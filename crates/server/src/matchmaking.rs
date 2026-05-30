@@ -22,9 +22,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use ledger::{Address, U256};
+use ledger::{merkle_proof, tournament_leaf, Address, U256};
 
 use crate::{build_wager, validate_tc, AppState, GameOutcome, MAX_STAKE};
+
+/// Fields larger than this settle via a Merkle root (winners claim individually)
+/// instead of a single direct payout transaction.
+const ROOT_SETTLE_THRESHOLD: usize = 16;
 
 const OFFER_TTL: Duration = Duration::from_secs(3600);
 const TICKET_TTL: Duration = Duration::from_secs(3600);
@@ -134,6 +138,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tournaments/{id}", get(tourney_get))
         .route("/tournaments/{id}/join", post(tourney_join))
         .route("/tournaments/{id}/start", post(tourney_start))
+        .route("/tournaments/{id}/claim/{address}", get(tourney_claim_proof))
 }
 
 fn di() -> u64 {
@@ -662,6 +667,9 @@ struct Tournament {
     games: Vec<TourneyGame>,
     scores: HashMap<String, f64>,
     remaining: usize,
+    /// For a root-settled (large) tournament: the payout leaves, so the server
+    /// can serve Merkle proofs to claimers. (addr, amount in base units)
+    payout_leaves: Vec<(String, u128)>,
     created_at: Instant,
 }
 
@@ -725,6 +733,7 @@ async fn tourney_create(
             games: Vec::new(),
             scores: HashMap::new(),
             remaining: 0,
+            payout_leaves: Vec::new(),
             created_at: Instant::now(),
         },
     );
@@ -969,5 +978,64 @@ async fn distribute_pool(
         payouts.push(U256::from(*payout_for.get(player.as_str()).unwrap_or(&0)));
     }
 
-    state.0.settlement.settle_tournament(tid, addrs, payouts).await
+    // Large fields settle via a Merkle root (O(1) per winner claim); small
+    // fields settle directly in one transaction.
+    if n > ROOT_SETTLE_THRESHOLD {
+        // Only winners (amount > 0) become leaves; losers already paid at entry.
+        let leaves: Vec<(Address, U256)> = addrs
+            .iter()
+            .zip(payouts.iter())
+            .filter(|(_, p)| **p > U256::ZERO)
+            .map(|(a, p)| (*a, *p))
+            .collect();
+        state.0.settlement.settle_tournament_root(tid, leaves.clone()).await?;
+        // Persist the leaves so the server can serve claim proofs.
+        if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&tid) {
+            t.payout_leaves = leaves
+                .iter()
+                .map(|(a, p)| (format!("{a:?}"), p.to::<u128>()))
+                .collect();
+        }
+        Ok(())
+    } else {
+        state.0.settlement.settle_tournament(tid, addrs, payouts).await
+    }
+}
+
+#[derive(Serialize)]
+struct ClaimProof {
+    amount: String,
+    proof: Vec<String>,
+}
+
+/// Serve a Merkle proof for a winner to claim from a root-settled tournament.
+async fn tourney_claim_proof(
+    State(state): State<AppState>,
+    Path((id, address)): Path<(Uuid, String)>,
+) -> Result<Json<ClaimProof>, StatusCode> {
+    let leaves = {
+        let t = state.0.lobby.tournaments.lock().unwrap();
+        let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+        if t.payout_leaves.is_empty() {
+            return Err(StatusCode::NOT_FOUND); // not a root-settled tournament
+        }
+        t.payout_leaves.clone()
+    };
+    let idx = leaves
+        .iter()
+        .position(|(a, _)| a.eq_ignore_ascii_case(&address))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let amount = leaves[idx].1;
+    let hashes: Vec<_> = leaves
+        .iter()
+        .filter_map(|(a, amt)| a.parse::<Address>().ok().map(|a| tournament_leaf(a, U256::from(*amt))))
+        .collect();
+    if hashes.len() != leaves.len() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let proof = merkle_proof(&hashes, idx);
+    Ok(Json(ClaimProof {
+        amount: amount.to_string(),
+        proof: proof.iter().map(|p| format!("{p:#x}")).collect(),
+    }))
 }

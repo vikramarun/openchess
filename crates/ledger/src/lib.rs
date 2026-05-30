@@ -6,11 +6,12 @@
 //! loser's bankroll to the winner's (minus rake). Funds live in the contract,
 //! never in a platform wallet.
 
-use alloy::primitives::B256;
+use alloy::primitives::{keccak256, B256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::network::EthereumWallet;
 use alloy::signers::Signer;
 use alloy::sol;
+use alloy::sol_types::SolValue;
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -79,6 +80,73 @@ pub fn game_id_to_bytes32(id: Uuid) -> B256 {
     B256::from(b)
 }
 
+// --- Merkle tree (matches ChessEscrow._verifyProof: sorted-pair hashing,
+// OZ-style double-hashed leaves) ------------------------------------------
+
+/// Leaf for a tournament payout: keccak256(keccak256(abi.encode(account, amount))).
+pub fn tournament_leaf(account: Address, amount: U256) -> B256 {
+    let inner = keccak256((account, amount).abi_encode());
+    keccak256(inner)
+}
+
+fn hash_pair(a: B256, b: B256) -> B256 {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(lo.as_slice());
+    buf[32..].copy_from_slice(hi.as_slice());
+    keccak256(buf)
+}
+
+/// Merkle root over leaf hashes (odd node carried up unchanged).
+pub fn merkle_root(leaves: &[B256]) -> B256 {
+    if leaves.is_empty() {
+        return B256::ZERO;
+    }
+    let mut level = leaves.to_vec();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            if i + 1 < level.len() {
+                next.push(hash_pair(level[i], level[i + 1]));
+                i += 2;
+            } else {
+                next.push(level[i]);
+                i += 1;
+            }
+        }
+        level = next;
+    }
+    level[0]
+}
+
+/// Proof (sibling path) for the leaf at `index`.
+pub fn merkle_proof(leaves: &[B256], mut index: usize) -> Vec<B256> {
+    let mut proof = Vec::new();
+    let mut level = leaves.to_vec();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            if i + 1 < level.len() {
+                if i == index {
+                    proof.push(level[i + 1]);
+                } else if i + 1 == index {
+                    proof.push(level[i]);
+                }
+                next.push(hash_pair(level[i], level[i + 1]));
+                i += 2;
+            } else {
+                next.push(level[i]); // odd carried up; no sibling for it
+                i += 1;
+            }
+        }
+        index /= 2;
+        level = next;
+    }
+    proof
+}
+
 /// The settlement interface the game server depends on.
 #[async_trait]
 pub trait SettlementSink: Send + Sync {
@@ -120,7 +188,7 @@ pub trait SettlementSink: Send + Sync {
         Ok(())
     }
 
-    /// Distribute a tournament pool to `payouts` (parallel to `players`).
+    /// Distribute a tournament pool directly to a small winners list.
     async fn settle_tournament(
         &self,
         tid: Uuid,
@@ -129,6 +197,17 @@ pub trait SettlementSink: Send + Sync {
     ) -> anyhow::Result<()> {
         tracing::info!(%tid, "settlement(log): settle tournament");
         Ok(())
+    }
+
+    /// Settle a large tournament by committing a Merkle root of the payout
+    /// leaves; winners claim individually on-chain. Returns the committed root.
+    async fn settle_tournament_root(
+        &self,
+        tid: Uuid,
+        _leaves: Vec<(Address, U256)>,
+    ) -> anyhow::Result<B256> {
+        tracing::info!(%tid, "settlement(log): settle tournament (root)");
+        Ok(B256::ZERO)
     }
 }
 
@@ -309,6 +388,32 @@ impl SettlementSink for OnchainSettlement {
         tracing::info!(%tid, "settlement(onchain): tournament settled");
         Ok(())
     }
+
+    async fn settle_tournament_root(
+        &self,
+        tid: Uuid,
+        leaves: Vec<(Address, U256)>,
+    ) -> anyhow::Result<B256> {
+        let leaf_hashes: Vec<B256> =
+            leaves.iter().map(|(a, amt)| tournament_leaf(*a, *amt)).collect();
+        let root = merkle_root(&leaf_hashes);
+        let tidb = game_id_to_bytes32(tid);
+        let deadline = U256::from(unix_now().saturating_add(3600));
+        let escrow = self.contract();
+        let digest = escrow.digestTournamentRoot(tidb, root, deadline).call().await?;
+        let sig = self.oracle.sign_hash(&digest).await?;
+        let v: u8 = if sig.v() { 28 } else { 27 };
+        let r = B256::from(sig.r());
+        let s = B256::from(sig.s());
+        escrow
+            .settleTournamentRoot(tidb, root, deadline, v, r, s)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        tracing::info!(%tid, %root, "settlement(onchain): tournament root committed");
+        Ok(root)
+    }
 }
 
 fn unix_now() -> u64 {
@@ -478,6 +583,85 @@ mod tests {
         assert_eq!(read.bankroll(addrs[0]).call().await?, U256::from(11_000_000u64));
         assert_eq!(read.bankroll(addrs[1]).call().await?, U256::from(10_000_000u64));
         assert_eq!(read.bankroll(addrs[2]).call().await?, U256::from(9_000_000u64));
+        Ok(())
+    }
+
+    #[test]
+    fn merkle_root_and_proof_self_consistent() {
+        // Rebuilding the root from a leaf + its proof must reproduce the root.
+        let leaves: Vec<B256> = (0u64..5)
+            .map(|i| keccak256(i.to_be_bytes()))
+            .collect();
+        let root = merkle_root(&leaves);
+        for i in 0..leaves.len() {
+            let proof = merkle_proof(&leaves, i);
+            let mut h = leaves[i];
+            for p in proof {
+                h = hash_pair(h, p);
+            }
+            assert_eq!(h, root, "leaf {i} proof");
+        }
+    }
+
+    #[tokio::test]
+    async fn settles_tournament_via_merkle_root() -> anyhow::Result<()> {
+        let anvil = Anvil::new().try_spawn()?;
+        let url = anvil.endpoint_url();
+        let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
+        let oracle: PrivateKeySigner = anvil.keys()[1].clone().into();
+        let players: Vec<PrivateKeySigner> =
+            (2..5).map(|i| anvil.keys()[i].clone().into()).collect();
+
+        let dep = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(deployer.clone()))
+            .connect_http(url.clone());
+        let usdc = MockUSDC::deploy(&dep).await?;
+        let escrow =
+            ChessEscrow::deploy(&dep, *usdc.address(), oracle.address(), deployer.address(), 0u16, 3600u64)
+                .await?;
+        let escrow_addr = *escrow.address();
+
+        let bankroll = U256::from(10_000_000u64);
+        let buy_in = U256::from(1_000_000u64);
+        for who in &players {
+            let p = ProviderBuilder::new()
+                .wallet(EthereumWallet::from(who.clone()))
+                .connect_http(url.clone());
+            MockUSDC::new(*usdc.address(), &p).mint(who.address(), bankroll).send().await?.get_receipt().await?;
+            MockUSDC::new(*usdc.address(), &p).approve(escrow_addr, bankroll).send().await?.get_receipt().await?;
+            ChessEscrow::new(escrow_addr, &p).deposit(bankroll).send().await?.get_receipt().await?;
+        }
+
+        let sink = OnchainSettlement::new(url.clone(), escrow_addr, oracle.clone());
+        let tid = Uuid::new_v4();
+        sink.open_tournament(tid, buy_in).await?;
+        for who in &players {
+            sink.enter_tournament(tid, who.address()).await?;
+        }
+
+        // Pool = 3 buy-ins. Tree pays p1=2, p2=1, p3=0 (p3 omitted).
+        let leaves = vec![
+            (players[0].address(), U256::from(2_000_000u64)),
+            (players[1].address(), U256::from(1_000_000u64)),
+        ];
+        sink.settle_tournament_root(tid, leaves.clone()).await?;
+
+        // Each winner claims with a Rust-built proof verified by the Solidity tree.
+        let leaf_hashes: Vec<B256> =
+            leaves.iter().map(|(a, amt)| tournament_leaf(*a, *amt)).collect();
+        let read = ChessEscrow::new(escrow_addr, &dep);
+        for (i, (acct, amt)) in leaves.iter().enumerate() {
+            let proof = merkle_proof(&leaf_hashes, i);
+            read.claimTournament(game_id_to_bytes32(tid), *acct, *amt, proof)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+        }
+
+        assert_eq!(read.bankroll(players[0].address()).call().await?, U256::from(11_000_000u64));
+        assert_eq!(read.bankroll(players[1].address()).call().await?, U256::from(10_000_000u64));
+        assert_eq!(read.bankroll(players[2].address()).call().await?, U256::from(9_000_000u64));
         Ok(())
     }
 }

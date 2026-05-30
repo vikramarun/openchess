@@ -49,18 +49,26 @@ contract ChessEscrow {
 
     mapping(bytes32 => Game) public games;
 
-    // Tournaments: a uniform buy-in is locked from each entrant's bankroll into
-    // a virtual pool; settlement distributes a signed payout list (the remainder
-    // is the rake). Entry count bounds settle gas; intended for reasonable sizes.
+    // Tournaments: a uniform buy-in is moved from each entrant's bankroll into
+    // the pool at entry (so losers never need touching at settle). Settlement is
+    // either a direct signed payout list (small fields) or a signed Merkle root
+    // that winners claim individually (scales to any field size). If the oracle
+    // never settles, each entrant can permissionlessly reclaim their buy-in
+    // after the timeout.
     struct Tournament {
         uint256 buyIn;
+        uint256 pool;
+        uint256 claimedAmount; // sum credited via root-claims so far
         uint32 entrants;
         uint64 openedAt;
         bool settled;
+        bytes32 payoutRoot; // non-zero only in root/claim mode
         bool exists;
     }
 
     mapping(bytes32 => Tournament) public tournaments;
+    mapping(bytes32 => mapping(address => bool)) public tournamentEntered;
+    mapping(bytes32 => mapping(address => bool)) public tournamentClaimed;
 
     // EIP-712 (domain separator recomputed if the chain id changes, e.g. a fork)
     bytes32 private immutable _CACHED_DOMAIN_SEPARATOR;
@@ -68,7 +76,10 @@ contract ChessEscrow {
     bytes32 public constant RESULT_TYPEHASH =
         keccak256("GameResult(bytes32 gameId,address winner,uint256 deadline)");
     bytes32 public constant TOURNAMENT_TYPEHASH = keccak256(
-        "TournamentResult(bytes32 tournamentId,bytes32 playersHash,bytes32 payoutsHash,uint256 deadline)"
+        "TournamentResult(bytes32 tournamentId,bytes32 winnersHash,bytes32 payoutsHash,uint256 deadline)"
+    );
+    bytes32 public constant TOURNAMENT_ROOT_TYPEHASH = keccak256(
+        "TournamentRoot(bytes32 tournamentId,bytes32 payoutRoot,uint256 deadline)"
     );
 
     uint256 private _reentrancyGuard = 1;
@@ -83,7 +94,9 @@ contract ChessEscrow {
     event TournamentOpened(bytes32 indexed tournamentId, uint256 buyIn);
     event TournamentEntered(bytes32 indexed tournamentId, address indexed player);
     event TournamentSettled(bytes32 indexed tournamentId, uint256 pool, uint256 rake);
-    event TournamentRefunded(bytes32 indexed tournamentId);
+    event TournamentRootSet(bytes32 indexed tournamentId, bytes32 payoutRoot);
+    event TournamentClaimed(bytes32 indexed tournamentId, address indexed account, uint256 amount);
+    event TournamentRefunded(bytes32 indexed tournamentId, address indexed account);
     event OracleUpdated(address oracle);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -109,7 +122,12 @@ contract ChessEscrow {
     error TournamentExists();
     error UnknownTournament();
     error BadDistribution();
-    error EntrantCountMismatch();
+    error AlreadyEntered();
+    error NotEntered();
+    error AlreadyClaimed();
+    error NoRoot();
+    error InvalidProof();
+    error SettleWindowClosed();
 
     // --- modifiers --------------------------------------------------------
 
@@ -263,34 +281,43 @@ contract ChessEscrow {
         if (tournaments[tid].exists) revert TournamentExists();
         tournaments[tid] = Tournament({
             buyIn: buyIn,
+            pool: 0,
+            claimedAmount: 0,
             entrants: 0,
             openedAt: uint64(block.timestamp),
             settled: false,
+            payoutRoot: bytes32(0),
             exists: true
         });
         emit TournamentOpened(tid, buyIn);
     }
 
-    /// Enter a player, locking their buy-in from their bankroll. Oracle-only.
+    /// Enter a player, moving their buy-in from bankroll into the pool. Funds
+    /// leave the entrant's bankroll now, so losers never need touching at
+    /// settle (which is what lets settlement/claims be O(1) per winner).
+    /// Oracle-only; one entry per address.
     function enterTournament(bytes32 tid, address player) external whenNotPaused {
         if (msg.sender != oracle) revert NotOracle();
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (player == feeRecipient) revert BadPlayers();
+        if (tournamentEntered[tid][player]) revert AlreadyEntered();
         if (available(player) < t.buyIn) revert InsufficientUnlocked();
-        locked[player] += t.buyIn;
+
+        bankroll[player] -= t.buyIn; // moved into the pool
+        t.pool += t.buyIn;
         t.entrants += 1;
+        tournamentEntered[tid][player] = true;
         emit TournamentEntered(tid, player);
     }
 
-    /// Settle a tournament by distributing the pool to a signed payout list.
-    /// `players` must be exactly the entrants; `payouts[i]` is what each
-    /// receives. The remainder (pool - sum(payouts)) is the rake. Anyone may
-    /// relay the oracle signature.
+    /// Settle a small field directly: credit each winner. Losers are not listed
+    /// (their buy-in already left their bankroll at entry). The remainder
+    /// (pool - sum(payouts)) is the rake. Must be within the settle window.
     function settleTournament(
         bytes32 tid,
-        address[] calldata players,
+        address[] calldata winners,
         uint256[] calldata payouts,
         uint256 deadline,
         uint8 v,
@@ -301,43 +328,90 @@ contract ChessEscrow {
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (block.timestamp > deadline) revert Expired();
-        if (players.length != t.entrants || payouts.length != t.entrants) {
-            revert EntrantCountMismatch();
-        }
+        if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+        if (winners.length != payouts.length) revert BadDistribution();
 
-        bytes32 digest = digestTournamentResult(tid, players, payouts, deadline);
+        bytes32 digest = digestTournamentResult(tid, winners, payouts, deadline);
         if (_recover(digest, v, r, s) != oracle) revert BadSignature();
 
         t.settled = true;
-        uint256 pool = t.buyIn * t.entrants;
         uint256 sumPay = 0;
-        for (uint256 i = 0; i < players.length; i++) {
-            address p = players[i];
-            // Unlock + remove their buy-in (into the pool), then credit payout.
-            locked[p] -= t.buyIn; // reverts if p wasn't a real entrant
-            bankroll[p] = bankroll[p] - t.buyIn + payouts[i];
+        for (uint256 i = 0; i < winners.length; i++) {
+            bankroll[winners[i]] += payouts[i];
             sumPay += payouts[i];
         }
-        if (sumPay > pool) revert BadDistribution();
-        uint256 rake = pool - sumPay;
+        if (sumPay > t.pool) revert BadDistribution();
+        uint256 rake = t.pool - sumPay;
         if (rake > 0) {
             bankroll[feeRecipient] += rake;
         }
-        emit TournamentSettled(tid, pool, rake);
+        t.claimedAmount = t.pool;
+        emit TournamentSettled(tid, t.pool, rake);
     }
 
-    /// Refund all entrants if a tournament is never settled within the timeout.
-    function settleTournamentTimeout(bytes32 tid, address[] calldata players) external {
+    /// Settle a large field by committing a signed Merkle root of (account,
+    /// amount) leaves whose amounts sum to the pool (include the fee recipient
+    /// as a leaf for the rake). Winners then `claimTournament` individually.
+    function settleTournamentRoot(
+        bytes32 tid,
+        bytes32 payoutRoot,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        Tournament storage t = tournaments[tid];
+        if (!t.exists) revert UnknownTournament();
+        if (t.settled) revert AlreadySettled();
+        if (block.timestamp > deadline) revert Expired();
+        if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+
+        bytes32 digest = digestTournamentRoot(tid, payoutRoot, deadline);
+        if (_recover(digest, v, r, s) != oracle) revert BadSignature();
+
+        t.settled = true;
+        t.payoutRoot = payoutRoot;
+        emit TournamentRootSet(tid, payoutRoot);
+    }
+
+    /// Claim a payout from a root-settled tournament. Permissionless (credits
+    /// `account`). `amount` + proof must be in the committed tree. O(1).
+    function claimTournament(
+        bytes32 tid,
+        address account,
+        uint256 amount,
+        bytes32[] calldata proof
+    ) external {
+        Tournament storage t = tournaments[tid];
+        if (t.payoutRoot == bytes32(0)) revert NoRoot();
+        if (tournamentClaimed[tid][account]) revert AlreadyClaimed();
+
+        // OZ-style double-hashed leaf prevents second-preimage attacks.
+        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(account, amount))));
+        if (!_verifyProof(proof, t.payoutRoot, leaf)) revert InvalidProof();
+        if (t.claimedAmount + amount > t.pool) revert BadDistribution();
+
+        tournamentClaimed[tid][account] = true;
+        t.claimedAmount += amount;
+        bankroll[account] += amount;
+        emit TournamentClaimed(tid, account, amount);
+    }
+
+    /// If a tournament is never settled within the timeout, each entrant can
+    /// permissionlessly reclaim their buy-in. O(1) per entrant — no oracle and
+    /// no entrant-list needed (non-custodial safety net at any field size).
+    function claimRefund(bytes32 tid, address account) external {
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (block.timestamp <= t.openedAt + settleTimeout) revert TimeoutNotReached();
-        if (players.length != t.entrants) revert EntrantCountMismatch();
-        t.settled = true;
-        for (uint256 i = 0; i < players.length; i++) {
-            locked[players[i]] -= t.buyIn; // unlock (buy-in never left bankroll)
-        }
-        emit TournamentRefunded(tid);
+        if (!tournamentEntered[tid][account]) revert NotEntered();
+        if (tournamentClaimed[tid][account]) revert AlreadyClaimed();
+
+        tournamentClaimed[tid][account] = true;
+        t.pool -= t.buyIn;
+        bankroll[account] += t.buyIn;
+        emit TournamentRefunded(tid, account);
     }
 
     // --- admin ------------------------------------------------------------
@@ -403,6 +477,32 @@ contract ChessEscrow {
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    /// EIP-712 digest for a Merkle-root tournament settlement.
+    function digestTournamentRoot(bytes32 tid, bytes32 payoutRoot, uint256 deadline)
+        public
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash =
+            keccak256(abi.encode(TOURNAMENT_ROOT_TYPEHASH, tid, payoutRoot, deadline));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    /// Standard sorted-pair Merkle proof verification (OpenZeppelin-compatible).
+    function _verifyProof(bytes32[] calldata proof, bytes32 root, bytes32 leaf)
+        internal
+        pure
+        returns (bool)
+    {
+        bytes32 computed = leaf;
+        for (uint256 i = 0; i < proof.length; i++) {
+            bytes32 p = proof[i];
+            computed =
+                computed <= p ? keccak256(abi.encodePacked(computed, p)) : keccak256(abi.encodePacked(p, computed));
+        }
+        return computed == root;
     }
 
     function _domainSeparator() internal view returns (bytes32) {

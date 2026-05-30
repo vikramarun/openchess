@@ -253,8 +253,10 @@ contract ChessEscrowTest {
     function test_tournament_distributes_pool() public {
         bytes32 tid = keccak256("t1");
         _enterAll(tid);
-        // each entrant locked one buy-in
-        _assert(escrow.locked(white) == STAKE && escrow.locked(carol) == STAKE, "locked");
+        // buy-in moved out of each entrant's bankroll into the pool at entry
+        _assert(escrow.bankroll(white) == 9 * STAKE && escrow.bankroll(carol) == 9 * STAKE, "post-entry");
+        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        _assert(pool == 3 * STAKE, "pool");
 
         // pool = 3 STAKE; pay white 2, black 1, carol 0 (no rake)
         uint256[] memory payouts = new uint256[](3);
@@ -304,9 +306,67 @@ contract ChessEscrowTest {
         bytes32 tid = keccak256("t4");
         _enterAll(tid);
         vm.warp(block.timestamp + 3601);
-        escrow.settleTournamentTimeout(tid, _players3());
-        _assert(escrow.locked(white) == 0 && escrow.locked(carol) == 0, "unlocked");
+        // each entrant permissionlessly reclaims their buy-in
+        escrow.claimRefund(tid, white);
+        escrow.claimRefund(tid, black);
+        escrow.claimRefund(tid, carol);
         _assert(escrow.bankroll(white) == 10 * STAKE, "white whole");
         _assert(escrow.bankroll(carol) == 10 * STAKE, "carol whole");
+        // double refund rejected
+        vm.expectRevert();
+        escrow.claimRefund(tid, white);
+    }
+
+    function test_tournament_double_entry_rejected() public {
+        bytes32 tid = keccak256("t5");
+        _fund(carol, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        vm.expectRevert();
+        escrow.enterTournament(tid, white);
+    }
+
+    function _leaf(address a, uint256 amt) internal pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(a, amt))));
+    }
+
+    function test_tournament_merkle_claim() public {
+        bytes32 tid = keccak256("t6");
+        _enterAll(tid); // pool = 3 STAKE
+
+        // Tree of 2 leaves: white gets 2 STAKE, black gets 1 STAKE (sum = pool).
+        bytes32 lw = _leaf(white, 2 * STAKE);
+        bytes32 lb = _leaf(black, STAKE);
+        bytes32 root = lw <= lb
+            ? keccak256(abi.encodePacked(lw, lb))
+            : keccak256(abi.encodePacked(lb, lw));
+
+        uint256 deadline = block.timestamp + 100;
+        bytes32 digest = escrow.digestTournamentRoot(tid, root, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(oracleKey, digest);
+        escrow.settleTournamentRoot(tid, root, deadline, v, r, s);
+
+        bytes32[] memory proofW = new bytes32[](1);
+        proofW[0] = lb;
+        bytes32[] memory proofB = new bytes32[](1);
+        proofB[0] = lw;
+
+        escrow.claimTournament(tid, white, 2 * STAKE, proofW); // anyone can relay
+        escrow.claimTournament(tid, black, STAKE, proofB);
+
+        _assert(escrow.bankroll(white) == 11 * STAKE, "white claimed");
+        _assert(escrow.bankroll(black) == 10 * STAKE, "black claimed");
+        _assert(escrow.bankroll(carol) == 9 * STAKE, "carol unpaid (lost buy-in)");
+
+        // double claim rejected
+        vm.expectRevert();
+        escrow.claimTournament(tid, white, 2 * STAKE, proofW);
+
+        // forged amount / bad proof rejected
+        vm.expectRevert();
+        escrow.claimTournament(tid, carol, STAKE, proofW);
     }
 }
