@@ -25,7 +25,7 @@ implemented end-to-end, including on-chain tournament pool distribution.
 | Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 18 Foundry tests |
 | On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests + live demo |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip test + live |
-| Web app (create + live spectator + wallet + SIWE) | `apps/web` | ✅ verified in-browser |
+| Web app (lichess-style UI + in-browser WASM engine) | `apps/web` | ✅ verified in-browser |
 
 **Verified end-to-end:**
 - Two BYO clients driving Stockfish play a full game over WebSocket with a
@@ -116,12 +116,16 @@ cargo run -p byo-client -- play --game <GAME_ID> --token <BLACK_TOKEN>
 ```
 A spectator can connect (read-only, no token) to `ws://127.0.0.1:8080/ws/game/<GAME_ID>`.
 
-**3. Web UI** — create games and watch live in the browser:
+**3. Web UI** (lichess-style) — the homepage loads a **Stockfish engine in your
+browser** (WASM, runs on your CPU — zero download, zero server cost), then offers
+the game modes:
 ```bash
 cd apps/web && pnpm install && pnpm dev   # http://localhost:3000
 ```
-Open http://localhost:3000, create a game (copy the two client commands it
-prints), launch the two `byo-client play` commands, then click **Watch live**.
+Open http://localhost:3000 → **Quick Play** runs two browser engines against the
+live server with no setup. The web page itself is a bring-your-own-engine client
+(`lib/engine.ts` + `lib/play.ts`) speaking the same WS protocol as the native
+client; advanced users still point the native client at a custom UCI engine.
 
 **4. On-chain money loop (Park/Patzer)** — the full wagered flow on a local
 Anvil chain: SIWE sign-in → authenticated offer/accept → escrow → play →

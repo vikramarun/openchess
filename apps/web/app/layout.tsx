@@ -1,13 +1,11 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 
 import "./globals.css";
 import { Providers } from "./providers";
-import { WalletButton } from "@/components/WalletButton";
-import { SignIn } from "@/components/SignIn";
+import { Header } from "@/components/Header";
 
 export const metadata: Metadata = {
-  title: "Chess Wager — machines play, you wager",
+  title: "OpenChess — machines play, you wager",
   description: "Engine-vs-engine chess with non-custodial USDC wagers on Base.",
 };
 
@@ -26,15 +24,7 @@ export default function RootLayout({
       </head>
       <body>
         <Providers>
-          <div className="header">
-            <Link href="/" className="brand" style={{ textDecoration: "none" }}>
-              ♞ Chess Wager
-            </Link>
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <SignIn />
-              <WalletButton />
-            </div>
-          </div>
+          <Header />
           {children}
         </Providers>
       </body>

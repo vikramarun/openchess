@@ -111,28 +111,31 @@ export default function GamePage() {
 
   return (
     <div className="container">
-      <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+      <div className="game-wrap">
         <div>
           <Chessboard fen={fen} />
-          <div className="clocks">
+          <div className="clocks" style={{ display: "flex", gap: 12, marginTop: 12 }}>
             <div className="clock">⚪ {clock ? fmt(clock.white_ms) : "—"}</div>
             <div className="clock">⚫ {clock ? fmt(clock.black_ms) : "—"}</div>
           </div>
         </div>
 
-        <div style={{ flex: 1, minWidth: 240 }}>
+        <div className="sidebar">
           <div className="panel">
-            <div className="muted">Game</div>
+            <div className="muted" style={{ fontSize: 13 }}>
+              Spectating
+            </div>
             <code>{id}</code>
             <div style={{ marginTop: 8 }} className="muted">
               Status: {status}
             </div>
-            {result && (
-              <h2 style={{ color: "var(--accent)" }}>
-                {winnerText} — {result.reason}
-              </h2>
-            )}
           </div>
+
+          {result && (
+            <div className="result-banner">
+              {winnerText} · {result.reason}
+            </div>
+          )}
 
           <div className="panel">
             <div className="muted" style={{ marginBottom: 8 }}>
@@ -143,7 +146,8 @@ export default function GamePage() {
               {moves.map((san, i) =>
                 i % 2 === 0 ? (
                   <span key={i}>
-                    {i / 2 + 1}. {san}{" "}
+                    <span className="num">{i / 2 + 1}.</span>
+                    {san}{" "}
                   </span>
                 ) : (
                   <span key={i}>{san} </span>

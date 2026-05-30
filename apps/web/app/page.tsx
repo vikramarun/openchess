@@ -1,112 +1,96 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
 
-import { SERVER_HTTP } from "@/lib/config";
-
-type CreateResp = {
-  game_id: string;
-  white_token: string;
-  black_token: string;
-  spectate_path: string;
-};
+import { useEngine } from "@/lib/engineContext";
 
 export default function Home() {
-  const [initial, setInitial] = useState(60);
-  const [increment, setIncrement] = useState(1);
-  const [resp, setResp] = useState<CreateResp | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { status } = useEngine();
 
-  async function createGame() {
-    setLoading(true);
-    setErr(null);
-    try {
-      const r = await fetch(`${SERVER_HTTP}/games`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ initial_secs: initial, increment_secs: increment }),
-      });
-      if (!r.ok) throw new Error(`server returned ${r.status}`);
-      setResp(await r.json());
-    } catch (e: any) {
-      setErr(e.message ?? String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
+  const banner =
+    status === "ready" ? (
+      <span>
+        Your engine is <b>ready</b> — Stockfish,{" "}
+        <span className="free">running in your browser for free</span>. No download, no
+        server cost.
+      </span>
+    ) : status === "loading" ? (
+      <span>Loading Stockfish in your browser…</span>
+    ) : status === "error" ? (
+      <span>
+        Couldn’t load the in-browser engine — you can still bring your own with the
+        native client.
+      </span>
+    ) : (
+      <span>Preparing your engine…</span>
+    );
 
   return (
     <div className="container">
-      <div className="panel">
-        <h1 style={{ marginTop: 0 }}>Machines play. You wager.</h1>
-        <p className="muted">
-          Engine-vs-engine chess with non-custodial USDC wagers on Base. Create a
-          game, point two bring-your-own-engine clients at the seats, and watch
-          them play live. The server is the sole authority on legality, clock,
-          and result.
+      <div className="hero">
+        <h1>
+          <span className="king">♞</span> OpenChess
+        </h1>
+        <p>
+          Machines play. You wager. Bring your own engine — or use the one running in
+          your browser right now — and stake USDC on Base, settled non-custodially.
         </p>
       </div>
 
-      <div className="panel">
-        <h2 style={{ marginTop: 0 }}>Create a game</h2>
-        <div style={{ display: "flex", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <label>
-            <div className="muted">Initial (sec)</div>
-            <input
-              type="number"
-              value={initial}
-              min={1}
-              onChange={(e) => setInitial(Number(e.target.value))}
-            />
-          </label>
-          <label>
-            <div className="muted">Increment (sec)</div>
-            <input
-              type="number"
-              value={increment}
-              min={0}
-              onChange={(e) => setIncrement(Number(e.target.value))}
-            />
-          </label>
-          <button className="primary" onClick={createGame} disabled={loading}>
-            {loading ? "Creating…" : "Create game"}
-          </button>
-        </div>
-        {err && (
-          <p style={{ color: "#e06c6c" }}>
-            {err} — is the server running on {SERVER_HTTP}?
-          </p>
-        )}
+      <div className="engine-banner">
+        <span className={`dot ${status}`} />
+        {banner}
       </div>
 
-      {resp && (
-        <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Game created</h2>
-          <p>
-            Game id: <code>{resp.game_id}</code>
-          </p>
-          <p className="muted">Launch each engine client (in two terminals):</p>
-          <pre>
-{`# White
-cargo run -p byo-client -- play \\
-  --game ${resp.game_id} --token ${resp.white_token}
+      <div className="mode-grid">
+        <Link href="/play" className="mode-card">
+          <div className="mc-top">
+            <span className="mc-icon">♟</span>
+            <span className="mc-title">Quick Play</span>
+            <span className="mc-tag">free</span>
+          </div>
+          <div className="mc-desc">
+            Watch two engines battle, right here in your browser. Zero setup — proves the
+            whole stack with no download and no opponent needed.
+          </div>
+        </Link>
 
-# Black
-cargo run -p byo-client -- play \\
-  --game ${resp.game_id} --token ${resp.black_token}`}
-          </pre>
-          <p>
-            <Link href={`/game/${resp.game_id}`} className="primary" style={{
-              display: "inline-block", padding: "10px 18px", borderRadius: 6,
-              textDecoration: "none", color: "white",
-            }}>
-              ▶ Watch live
-            </Link>
-          </p>
-        </div>
-      )}
+        <Link href="/park" className="mode-card">
+          <div className="mc-top">
+            <span className="mc-icon">🅿️</span>
+            <span className="mc-title">Park / Patzer</span>
+            <span className="mc-tag">wager</span>
+          </div>
+          <div className="mc-desc">
+            Post a game at a price. Someone accepts, both stake, the winner takes the pot
+            (minus a small rake).
+          </div>
+        </Link>
+
+        <Link href="/gauntlet" className="mode-card">
+          <div className="mc-top">
+            <span className="mc-icon">🔥</span>
+            <span className="mc-title">Gauntlet</span>
+            <span className="mc-tag">wager</span>
+          </div>
+          <div className="mc-desc">
+            Your engine plays back-to-back games at a fixed tier (10¢ … $100) until you
+            stop. Lock a bankroll once, net-settle on-chain.
+          </div>
+        </Link>
+
+        <Link href="/tournament" className="mode-card">
+          <div className="mc-top">
+            <span className="mc-icon">🏆</span>
+            <span className="mc-title">Tournament</span>
+            <span className="mc-tag">wager</span>
+          </div>
+          <div className="mc-desc">
+            Buy in to a prize pool. Round-robin (Swiss & knockout soon). Pool distributed
+            on-chain by final standings.
+          </div>
+        </Link>
+      </div>
     </div>
   );
 }

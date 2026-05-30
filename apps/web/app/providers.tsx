@@ -7,21 +7,23 @@ import { useEffect, useState } from "react";
 import { WagmiProvider } from "wagmi";
 
 import { wagmiConfig } from "@/lib/wagmi";
+import { EngineProvider } from "@/lib/engineContext";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  // The wallet stack (wagmi/RainbowKit) touches browser-only APIs, so we mount
-  // it client-side only. No page relies on wagmi hooks during SSR, so rendering
-  // children without the provider on the server is safe.
+  // The wallet stack (wagmi/RainbowKit) + the in-browser engine (Web Worker)
+  // touch browser-only APIs, so we mount client-side only.
   if (!mounted) return <>{children}</>;
 
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider theme={darkTheme()}>{children}</RainbowKitProvider>
+        <RainbowKitProvider theme={darkTheme()}>
+          <EngineProvider>{children}</EngineProvider>
+        </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );
