@@ -1,0 +1,22 @@
+# Rust
+/target
+
+# Node
+node_modules/
+apps/web/.next/
+.turbo/
+
+# Foundry build output (run `forge build` to regenerate)
+contracts/out/
+contracts/cache/
+
+# Logs / temp
+*.log
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store

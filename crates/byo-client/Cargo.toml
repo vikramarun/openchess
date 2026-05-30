@@ -1,0 +1,25 @@
+[package]
+name = "byo-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "chess-client"
+path = "src/main.rs"
+
+[dependencies]
+protocol.workspace = true
+game-engine.workspace = true
+shakmaty.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+uuid = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
