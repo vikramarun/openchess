@@ -10,6 +10,7 @@ import { Chessboard } from "@/components/Chessboard";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
+import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number };
 type Result = { winner: "white" | "black" | null; reason: string };
@@ -24,6 +25,7 @@ export default function PlayPage() {
   const [moves, setMoves] = useState<string[]>([]);
   const [clock, setClock] = useState<Clock | null>(null);
   const [result, setResult] = useState<Result | null>(null);
+  const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("loading engines…");
   const [nonce, setNonce] = useState(0); // bump to start a new game
 
@@ -96,6 +98,7 @@ export default function PlayPage() {
             case "game_over":
               setResult(m.result);
               setStatus("finished");
+              verifyResultSig(m.result_hash, m.server_sig).then(setVerified);
               break;
           }
         } catch {
@@ -155,6 +158,11 @@ export default function PlayPage() {
           {result && (
             <div className="result-banner">
               {winnerText} · {result.reason}
+              {verified?.signed && (
+                <div className="verified">
+                  ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                </div>
+              )}
             </div>
           )}
 

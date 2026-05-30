@@ -98,15 +98,16 @@ honest checklist.
 ## Known limitations (not production-ready as-is)
 
 - **Single-node only** (see Infra #1).
-- **Tournament restart gap**: live tournament standings are in-memory while
-  settlement is durable. If the server restarts mid-tournament after the on-chain
-  pool was opened, it can't re-derive standings to *settle by result* — funds are
-  recoverable only via `claimRefund` after the timeout. **Do not take real
-  tournament buy-ins until tournament entrants/standings are persisted**, or
-  operate with a documented refund runbook.
-- **Results are oracle-asserted** (`server_sig` to clients + an on-chain dispute
-  window are a TODO). The operator can sign an incorrect result; the trust model
-  matches a standard result oracle.
+- **Tournament restart**: tournament entrants/standings are now persisted. On
+  restart, a tournament whose games all finished is **settled by result**; one
+  with games still in flight is marked `abandoned` (their rooms are gone) and
+  entrants recover via on-chain `claimRefund`. Resuming *in-flight* games across
+  a restart still requires the room-resumption work (single-node limitation).
+- **Results are signed + client-verifiable** (the oracle signs `result_hash`;
+  clients recover the signer vs `/oracle`). A full **on-chain dispute window**
+  (optimistic settlement with fraud proofs) is still a TODO — today a malicious
+  operator could sign an incorrect result, matching a standard result-oracle
+  trust model.
 - **No anti-collusion / wash-trading controls** (rating/Sybil) yet.
 - **In-browser wagering UI not built** — Quick Play is fully in-browser; wager
   modes (park/gauntlet/tournament) run via the native client (the web pages are

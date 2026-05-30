@@ -748,6 +748,8 @@ async fn tourney_create(
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
     }
 
+    let (buy_in, initial_secs, increment_secs) =
+        (req.buy_in.clone(), req.initial_secs, req.increment_secs);
     state.0.lobby.tournaments.lock().insert(
         id,
         Tournament {
@@ -764,7 +766,42 @@ async fn tourney_create(
             created_at: Instant::now(),
         },
     );
+    // Persist so a restart can recover this tournament (see recover_tournaments).
+    if let Some(db) = &state.0.db {
+        let _ = db
+            .upsert_tournament(
+                id,
+                buy_in.as_deref(),
+                initial_secs as i64,
+                increment_secs as i64,
+                "open",
+                &json!([]),
+            )
+            .await;
+    }
     Ok(Json(IdResp { tournament_id: id }))
+}
+
+/// Re-persist a tournament's row from its in-memory state (players + status).
+async fn persist_tournament(state: &AppState, tid: Uuid) {
+    let Some(db) = &state.0.db else { return };
+    let snap = {
+        let ts = state.0.lobby.tournaments.lock();
+        ts.get(&tid).map(|t| {
+            (
+                t.buy_in.clone(),
+                t.initial_secs as i64,
+                t.increment_secs as i64,
+                t.status.clone(),
+                serde_json::to_value(&t.players).unwrap_or_else(|_| json!([])),
+            )
+        })
+    };
+    if let Some((buy_in, init, inc, status, players)) = snap {
+        let _ = db
+            .upsert_tournament(tid, buy_in.as_deref(), init, inc, &status, &players)
+            .await;
+    }
 }
 
 #[derive(Deserialize)]
@@ -822,12 +859,15 @@ async fn tourney_join(
         if state.0.settlement.enter_tournament(id, addr).await.is_err() {
             return StatusCode::BAD_GATEWAY;
         }
-        let mut t = state.0.lobby.tournaments.lock();
-        if let Some(t) = t.get_mut(&id) {
-            if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
-                t.players.push(wallet);
+        {
+            let mut t = state.0.lobby.tournaments.lock();
+            if let Some(t) = t.get_mut(&id) {
+                if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
+                    t.players.push(wallet);
+                }
             }
         }
+        persist_tournament(&state, id).await;
         StatusCode::OK
     } else {
         // Casual tournament: a display name.
@@ -835,12 +875,15 @@ async fn tourney_join(
             Some(n) => n,
             None => return StatusCode::BAD_REQUEST,
         };
-        let mut t = state.0.lobby.tournaments.lock();
-        if let Some(t) = t.get_mut(&id) {
-            if !t.players.contains(&name) {
-                t.players.push(name);
+        {
+            let mut t = state.0.lobby.tournaments.lock();
+            if let Some(t) = t.get_mut(&id) {
+                if !t.players.contains(&name) {
+                    t.players.push(name);
+                }
             }
         }
+        persist_tournament(&state, id).await;
         StatusCode::OK
     }
 }
@@ -919,6 +962,14 @@ async fn tourney_start(
             map.insert(g.game_id, id);
         }
     }
+    // Persist the running tournament + its pairings so standings can be
+    // re-derived after a restart (see recover_tournaments).
+    if let Some(db) = &state.0.db {
+        let _ = db.set_tournament_status(id, "running").await;
+        for g in &games {
+            let _ = db.add_tournament_game(id, g.game_id, &g.white, &g.black).await;
+        }
+    }
     Ok(Json(games))
 }
 
@@ -950,6 +1001,75 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
     }
     if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
         t.status = "settled".into();
+    }
+    if let Some(db) = &state.0.db {
+        let _ = db.set_tournament_status(tid, "settled").await;
+    }
+}
+
+/// Recover tournaments after a restart. A `running` tournament whose games all
+/// finished is settled by result; one with games still in flight is marked
+/// `abandoned` (their rooms are gone) — entrants recover via on-chain
+/// `claimRefund` after the timeout.
+pub async fn recover_tournaments(state: &AppState) {
+    let Some(db) = &state.0.db else { return };
+    let rows = match db.recoverable_tournaments().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("tournament recovery query failed: {e:#}");
+            return;
+        }
+    };
+    for t in rows {
+        let games = db.tournament_game_results(t.id).await.unwrap_or_default();
+        if games.is_empty() {
+            continue;
+        }
+        let unfinished = games
+            .iter()
+            .filter(|g| g.game_status.as_deref() != Some("finished"))
+            .count();
+        let players: Vec<String> = serde_json::from_value(t.players.clone()).unwrap_or_default();
+
+        if unfinished == 0 {
+            // Re-derive standings from persisted game results, then settle.
+            let mut scores: HashMap<String, f64> = HashMap::new();
+            for g in &games {
+                match g.game_result.as_deref() {
+                    Some("white") => *scores.entry(g.white.clone()).or_insert(0.0) += 1.0,
+                    Some("black") => *scores.entry(g.black.clone()).or_insert(0.0) += 1.0,
+                    Some("draw") => {
+                        *scores.entry(g.white.clone()).or_insert(0.0) += 0.5;
+                        *scores.entry(g.black.clone()).or_insert(0.0) += 0.5;
+                    }
+                    _ => {}
+                }
+            }
+            state.0.lobby.tournaments.lock().insert(
+                t.id,
+                Tournament {
+                    name: "recovered".into(),
+                    buy_in: t.buy_in.clone(),
+                    initial_secs: 0,
+                    increment_secs: 0,
+                    status: "complete".into(),
+                    players,
+                    games: Vec::new(),
+                    scores,
+                    remaining: 0,
+                    payout_leaves: Vec::new(),
+                    created_at: Instant::now(),
+                },
+            );
+            tracing::info!(tournament = %t.id, "recovered completed tournament — settling by result");
+            settle_tournament(state, t.id).await;
+        } else {
+            tracing::warn!(
+                tournament = %t.id, unfinished,
+                "tournament interrupted by restart — marking abandoned; entrants refund via claimRefund"
+            );
+            let _ = db.set_tournament_status(t.id, "abandoned").await;
+        }
     }
 }
 

@@ -11,11 +11,16 @@ full architecture and rationale.
 
 ## Status
 
-End-to-end and tested: **42 automated tests pass** (20 Rust + 22 Foundry). Three
+End-to-end and tested: **43 automated tests pass** (21 Rust + 22 Foundry). Three
 full audit rounds ([AUDIT.md](AUDIT.md)) with the Critical/High findings
 remediated. All three game modes work end-to-end (incl. on-chain tournament pool
 distribution + Merkle-claim for large fields), and the web app runs a Stockfish
 engine **in the browser** (WASM — the user's CPU, zero server cost).
+
+Results are **client-verifiable**: the oracle signs each result and the web app
+recovers the signer against the published `/oracle` address ("✓ Verified"
+badge). Tournaments are **restart-safe**: a server restart re-derives standings
+from persisted results and settles completed tournaments by result.
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for system/flow/data diagrams and
 **[PRODUCTION.md](PRODUCTION.md)** for the go-live checklist + operator action

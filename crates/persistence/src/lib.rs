@@ -39,6 +39,21 @@ pub struct OutboxRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+pub struct TournamentRow {
+    pub id: Uuid,
+    pub buy_in: Option<String>,
+    pub players: serde_json::Value,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct TournamentGameRow {
+    pub white: String,
+    pub black: String,
+    pub game_status: Option<String>,
+    pub game_result: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 pub struct TournamentOutboxRow {
     pub id: Uuid,
     pub tid: Uuid,
@@ -291,6 +306,85 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // -- tournament durable state -----------------------------------------
+
+    pub async fn upsert_tournament(
+        &self,
+        id: Uuid,
+        buy_in: Option<&str>,
+        initial_secs: i64,
+        increment_secs: i64,
+        status: &str,
+        players: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO tournaments (id, buy_in, initial_secs, increment_secs, status, players)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, players=EXCLUDED.players"#,
+        )
+        .bind(id)
+        .bind(buy_in)
+        .bind(initial_secs)
+        .bind(increment_secs)
+        .bind(status)
+        .bind(players)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_tournament_status(&self, id: Uuid, status: &str) -> Result<()> {
+        sqlx::query("UPDATE tournaments SET status=$2 WHERE id=$1")
+            .bind(id)
+            .bind(status)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn add_tournament_game(
+        &self,
+        tid: Uuid,
+        game_id: Uuid,
+        white: &str,
+        black: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO tournament_games (tournament_id, game_id, white, black)
+               VALUES ($1,$2,$3,$4) ON CONFLICT (game_id) DO NOTHING"#,
+        )
+        .bind(tid)
+        .bind(game_id)
+        .bind(white)
+        .bind(black)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Tournaments that may need recovery after a restart (status='running').
+    pub async fn recoverable_tournaments(&self) -> Result<Vec<TournamentRow>> {
+        let rows = sqlx::query_as::<_, TournamentRow>(
+            "SELECT id, buy_in, players FROM tournaments WHERE status='running'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Each tournament game with its (possibly null) result/status from `games`.
+    pub async fn tournament_game_results(&self, tid: Uuid) -> Result<Vec<TournamentGameRow>> {
+        let rows = sqlx::query_as::<_, TournamentGameRow>(
+            r#"SELECT tg.white, tg.black, g.status AS game_status, g.result AS game_result
+               FROM tournament_games tg LEFT JOIN games g ON g.id = tg.game_id
+               WHERE tg.tournament_id = $1"#,
+        )
+        .bind(tid)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Latest root-mode payload for a tournament (so claim proofs survive a

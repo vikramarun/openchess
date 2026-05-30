@@ -360,6 +360,13 @@ pre {
   font-size: 18px;
   font-weight: 700;
 }
+.result-banner .verified {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: ui-monospace, monospace;
+}
 
 @media (max-width: 880px) {
   .mode-grid {

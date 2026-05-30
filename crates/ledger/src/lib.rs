@@ -214,6 +214,21 @@ pub trait SettlementSink: Send + Sync {
     async fn is_tournament_settled(&self, _tid: Uuid) -> bool {
         false
     }
+
+    // -- verifiable results ------------------------------------------------
+
+    /// Sign a result commitment (the game's `result_hash`) so clients can
+    /// verify, non-repudiably, that the oracle attested this exact result.
+    /// Returns a 0x-hex EIP-191 signature, or None if there is no signer.
+    async fn sign_result(&self, _commitment: &str) -> Option<String> {
+        None
+    }
+
+    /// The oracle/result-signer address (checksummed), if any. Published so
+    /// clients can verify `sign_result` signatures.
+    fn signer_address(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Default no-chain sink: logs what it *would* settle. Used when the server is
@@ -431,6 +446,15 @@ impl SettlementSink for OnchainSettlement {
             Err(_) => false,
         }
     }
+
+    async fn sign_result(&self, commitment: &str) -> Option<String> {
+        let sig = self.oracle.sign_message(commitment.as_bytes()).await.ok()?;
+        Some(format!("0x{}", alloy::hex::encode(sig.as_bytes())))
+    }
+
+    fn signer_address(&self) -> Option<String> {
+        Some(self.oracle.address().to_string())
+    }
 }
 
 fn unix_now() -> u64 {
@@ -601,6 +625,21 @@ mod tests {
         assert_eq!(read.bankroll(addrs[1]).call().await?, U256::from(10_000_000u64));
         assert_eq!(read.bankroll(addrs[2]).call().await?, U256::from(9_000_000u64));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn signs_and_recovers_result_commitment() {
+        // EIP-191 sign a result hash, then recover the signer — exactly what the
+        // browser does with viem's recoverMessageAddress to show "verified ✓".
+        let signer: PrivateKeySigner =
+            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+                .parse()
+                .unwrap();
+        let commitment = "9b74c9897bac770ffc029102a200c5de"; // a result_hash
+        let sig = signer.sign_message(commitment.as_bytes()).await.unwrap();
+        let hex = format!("0x{}", alloy::hex::encode(sig.as_bytes()));
+        let recovered = recover_personal_sign(commitment, &hex).expect("recover");
+        assert_eq!(recovered, signer.address());
     }
 
     #[test]

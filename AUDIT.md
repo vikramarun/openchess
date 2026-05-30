@@ -262,3 +262,24 @@ legal/AML/licensing review; tournament-restart durability caveat; verifiable
 results (`server_sig` + dispute window) as the remaining trust-model TODO.
 
 See `ARCHITECTURE.md` for system/flow/data diagrams.
+
+---
+
+## Caveats closed (verifiable results + tournament durability)
+
+The two trust-model/durability caveats from round 3 are now addressed and
+live-verified:
+
+- **Client-verifiable results.** The oracle EIP-191-signs each game's
+  `result_hash`; `GameOver` carries `server_sig` and the server publishes the
+  signer at `GET /oracle`. The web app recovers the signer (viem) and shows a
+  "✓ Verified — signed by oracle 0x…" badge. Ledger test
+  `signs_and_recovers_result_commitment` proves the round-trip. (A full on-chain
+  *dispute window* / optimistic fraud-proof remains future work.)
+- **Tournament restart durability.** Tournaments + pairings are persisted
+  (`tournaments`, `tournament_games`); on boot `recover_tournaments` re-derives
+  standings from persisted game results and **settles completed tournaments by
+  result** (verified: a seeded `running` tournament with finished games settled
+  on restart with standings alice 1.5 / carol 1.5 / bob 0). Tournaments with
+  games still in flight are marked `abandoned` (entrants refund via
+  `claimRefund`), since in-flight rooms aren't resumable on a single node.

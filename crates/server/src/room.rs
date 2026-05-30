@@ -520,13 +520,16 @@ impl Room {
             })
             .await;
 
+        // Oracle-sign the result commitment so clients can verify it.
+        let server_sig = self.settlement.sign_result(&result_hash).await;
+
         let _ = clock;
         self.send_all(ServerMessage::GameOver {
             game_id: self.game_id,
             result,
             final_pgn: pgn,
             result_hash,
-            server_sig: None,
+            server_sig,
         })
         .await;
     }

@@ -137,7 +137,7 @@ standings) is **in-memory** — the Redis layer in production.
 | Concern | Who is trusted | Mitigation |
 |---|---|---|
 | Move legality / clock / result | **server (authority)** | re-validated server-side; result committed by SHA-256 over the move log |
-| Result correctness for settlement | **oracle key** (server) | same trust as any chess result oracle; on-chain dispute window is a documented TODO |
+| Result correctness for settlement | **oracle key** (server) | oracle EIP-191-signs `result_hash`; clients verify the signer vs `/oracle` ("✓ Verified"). Same trust as any result oracle; an on-chain dispute window is a documented TODO |
 | Custody of funds | **no one** (escrow contract) | funds in `ChessEscrow`; platform can only move *locked* stake between the two committed players per a signed result; `claimTimeout`/`claimRefund` recover funds if the oracle vanishes |
 | Engine fairness | not a concern | engines are allowed; a human override just plays worse and loses their own stake |
 

@@ -153,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
     }
     // Update mode standings (gauntlet/tournament) as games finish.
     tokio::spawn(matchmaking::results_task(state.clone(), results_rx));
+    // Recover tournaments interrupted by a restart: settle completed ones by
+    // result, mark interrupted ones abandoned (entrants refund on-chain).
+    matchmaking::recover_tournaments(&state).await;
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
     // A malformed WEB_ORIGIN logs and falls back rather than panicking at boot.
@@ -171,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(ready))
+        .route("/oracle", get(oracle_info))
         .route("/games", post(create_game))
         .merge(auth::routes())
         .merge(matchmaking::routes())
@@ -219,6 +223,19 @@ async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode
         }
     }
     Ok("ready")
+}
+
+#[derive(Serialize)]
+struct OracleInfo {
+    /// Address that signs game results (`server_sig`), so clients can verify them.
+    address: Option<String>,
+}
+
+/// Publishes the oracle/result-signer address for client-side result verification.
+async fn oracle_info(State(state): State<AppState>) -> Json<OracleInfo> {
+    Json(OracleInfo {
+        address: state.0.settlement.signer_address(),
+    })
 }
 
 async fn shutdown_signal() {

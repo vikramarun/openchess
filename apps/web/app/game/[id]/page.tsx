@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { SERVER_WS } from "@/lib/config";
+import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number; increment_ms: number };
 type Result = { winner: "white" | "black" | null; reason: string };
@@ -27,6 +28,7 @@ export default function GamePage() {
   const [moves, setMoves] = useState<string[]>([]);
   const [clock, setClock] = useState<Clock | null>(null);
   const [result, setResult] = useState<Result | null>(null);
+  const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("connecting…");
 
   const pos = useRef(Chess.default());
@@ -71,6 +73,7 @@ export default function GamePage() {
           case "game_over":
             setResult(msg.result);
             setStatus("finished");
+            verifyResultSig(msg.result_hash, msg.server_sig).then(setVerified);
             break;
         }
       } catch {
@@ -134,6 +137,11 @@ export default function GamePage() {
           {result && (
             <div className="result-banner">
               {winnerText} · {result.reason}
+              {verified?.signed && (
+                <div className="verified">
+                  ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                </div>
+              )}
             </div>
           )}
 
