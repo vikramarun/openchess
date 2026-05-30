@@ -39,6 +39,28 @@ pub struct OutboxRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+pub struct PlayerStatsRow {
+    pub games: i64,
+    pub wins: i64,
+    pub losses: i64,
+    pub draws: i64,
+    pub net: Decimal,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct PlayerGameRow {
+    pub id: Uuid,
+    pub mode: String,
+    pub white_wallet: Option<String>,
+    pub black_wallet: Option<String>,
+    pub result: Option<String>,
+    pub stake: Option<Decimal>,
+    pub result_reason: Option<String>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub moves: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 pub struct TournamentRow {
     pub id: Uuid,
     pub buy_in: Option<String>,
@@ -493,6 +515,102 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    // -- player profile / stats -------------------------------------------
+
+    /// Aggregate W/L/D + net winnings (USDC base units) for an address over
+    /// finished games. `address` is matched case-insensitively.
+    pub async fn player_stats(&self, address: &str) -> Result<PlayerStatsRow> {
+        let addr = address.to_lowercase();
+        let row = sqlx::query_as::<_, PlayerStatsRow>(
+            r#"SELECT
+                 COUNT(*) AS games,
+                 COUNT(*) FILTER (WHERE (lower(white_wallet)=$1 AND result='white')
+                                     OR (lower(black_wallet)=$1 AND result='black')) AS wins,
+                 COUNT(*) FILTER (WHERE (lower(white_wallet)=$1 AND result='black')
+                                     OR (lower(black_wallet)=$1 AND result='white')) AS losses,
+                 COUNT(*) FILTER (WHERE result='draw') AS draws,
+                 COALESCE(SUM(CASE
+                   WHEN (lower(white_wallet)=$1 AND result='white')
+                     OR (lower(black_wallet)=$1 AND result='black') THEN stake
+                   WHEN (lower(white_wallet)=$1 AND result='black')
+                     OR (lower(black_wallet)=$1 AND result='white') THEN -stake
+                   ELSE 0 END), 0) AS net
+               FROM games
+               WHERE status='finished' AND (lower(white_wallet)=$1 OR lower(black_wallet)=$1)"#,
+        )
+        .bind(&addr)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Current rating for an address (1500 if unseen).
+    pub async fn player_rating(&self, address: &str) -> Result<f32> {
+        let r: Option<f32> =
+            sqlx::query_scalar("SELECT rating FROM users WHERE lower(wallet)=$1")
+                .bind(address.to_lowercase())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(r.unwrap_or(1500.0))
+    }
+
+    /// Recent finished games involving an address (most recent first).
+    pub async fn player_games(&self, address: &str, limit: i64) -> Result<Vec<PlayerGameRow>> {
+        let rows = sqlx::query_as::<_, PlayerGameRow>(
+            r#"SELECT g.id, g.mode, g.white_wallet, g.black_wallet, g.result,
+                      g.stake, g.result_reason, g.finished_at,
+                      (SELECT COUNT(*) FROM moves m WHERE m.game_id = g.id) AS moves
+               FROM games g
+               WHERE g.status='finished'
+                 AND (lower(g.white_wallet)=$1 OR lower(g.black_wallet)=$1)
+               ORDER BY g.finished_at DESC NULLS LAST LIMIT $2"#,
+        )
+        .bind(address.to_lowercase())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Update Elo ratings for a finished game with two known wallets (no-op for
+    /// casual/anonymous games). K=24.
+    pub async fn update_ratings(&self, game_id: Uuid) -> Result<()> {
+        let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT white_wallet, black_wallet, result FROM games WHERE id=$1",
+        )
+        .bind(game_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((Some(white), Some(black), Some(result))) = row else {
+            return Ok(()); // anonymous/casual game — nothing to rate
+        };
+        let score_white = match result.as_str() {
+            "white" => 1.0_f64,
+            "black" => 0.0,
+            "draw" => 0.5,
+            _ => return Ok(()),
+        };
+        self.upsert_user(&white).await?;
+        self.upsert_user(&black).await?;
+        let ra = self.player_rating(&white).await? as f64;
+        let rb = self.player_rating(&black).await? as f64;
+        let expected_white = 1.0 / (1.0 + 10f64.powf((rb - ra) / 400.0));
+        const K: f64 = 24.0;
+        let new_a = ra + K * (score_white - expected_white);
+        let new_b = rb + K * ((1.0 - score_white) - (1.0 - expected_white));
+        sqlx::query("UPDATE users SET rating=$2 WHERE lower(wallet)=lower($1)")
+            .bind(&white)
+            .bind(new_a as f32)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE users SET rating=$2 WHERE lower(wallet)=lower($1)")
+            .bind(&black)
+            .bind(new_b as f32)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { useEngine } from "@/lib/engineContext";
+import { ProfileLink } from "./ProfileLink";
 import { SignIn } from "./SignIn";
 import { WalletButton } from "./WalletButton";
 
@@ -24,6 +25,7 @@ export function Header() {
       <nav className="nav">
         <Link href="/">Play</Link>
         <Link href="/play">Quick&nbsp;Play</Link>
+        <ProfileLink />
       </nav>
       <div className="header-actions">
         <span className="engine-pill" title="Stockfish runs in your browser — free">

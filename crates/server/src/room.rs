@@ -492,6 +492,8 @@ impl Room {
                 {
                     tracing::error!(game_id = %self.game_id, "finish_and_enqueue failed: {e:#}");
                 }
+                // Update Elo for games with two known wallets (no-op otherwise).
+                let _ = db.update_ratings(self.game_id).await;
             }
             // No database: best-effort inline settle for a wagered game.
             None => {

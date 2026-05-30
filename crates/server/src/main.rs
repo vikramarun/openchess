@@ -9,6 +9,7 @@
 
 mod auth;
 mod matchmaking;
+mod players;
 mod room;
 mod ws;
 
@@ -178,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/games", post(create_game))
         .merge(auth::routes())
         .merge(matchmaking::routes())
+        .merge(players::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)

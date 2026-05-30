@@ -113,6 +113,29 @@ honest checklist.
   modes (park/gauntlet/tournament) run via the native client (the web pages are
   labeled beta).
 
+## Deploying the web app to Vercel
+
+Vercel hosts the **Next.js frontend only** (`apps/web`). The Rust game server is
+a long-lived, stateful WebSocket process — it **cannot** run on Vercel's
+serverless functions. Host it on a VM / Fly.io / Railway / Render (anything that
+runs a persistent process, accepts WebSockets, and reaches Postgres + an RPC),
+then point the web app at it.
+
+1. Push the repo to GitHub (done).
+2. Vercel → **New Project** → import the repo → set **Root Directory =
+   `apps/web`** (it has its own `package.json` + lockfile; Next.js is auto-detected).
+3. Add Environment Variables (Project Settings → Environment Variables):
+   - `NEXT_PUBLIC_SERVER_HTTP` = `https://<your-game-server-host>`
+   - `NEXT_PUBLIC_SERVER_WS`   = `wss://<your-game-server-host>`
+   - `NEXT_PUBLIC_WC_PROJECT_ID` = your WalletConnect Cloud project id
+4. Deploy. `public/stockfish.js` is served as a static asset — the in-browser
+   engine works with no extra config (single-threaded build, no COOP/COEP).
+
+On the **game server** side, set `WEB_ORIGIN=https://<your-app>.vercel.app` (CORS)
+and `SIWE_DOMAIN=<your-app>.vercel.app` (must equal the browser origin host), plus
+`DATABASE_URL`, `RPC_URL`, `ESCROW_ADDR`, `ORACLE_KEY`, `REQUIRE_ONCHAIN=1`.
+Terminate TLS in front of it so the browser can reach it over `https`/`wss`.
+
 ## Environment variables
 
 **Server** (`chess-server`):
