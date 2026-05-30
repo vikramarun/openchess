@@ -5,16 +5,16 @@
 //! task, so there are no locks on the hot path and move ordering is serialized
 //! by the command channel.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 use game_engine::{Game, MoveApplied, MoveError, LAG_ALLOWANCE_MS};
 use ledger::{Address, SettlementSink};
 use persistence::Db;
 use protocol::{Color, GameEndReason, GameResult, ServerMessage, TimeControl};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, Instant};
 
 /// On-chain seats for a wagered game (used to settle the result).
@@ -26,11 +26,16 @@ pub struct StakeInfo {
 
 /// Commands accepted by a room from the WebSocket layer.
 pub enum RoomCmd {
-    /// A player connection attached to its seat.
+    /// A player connection attaches to its seat. `resp` replies `true` if the
+    /// seat was free (attached) or `false` if already occupied by a live
+    /// connection (rejected — prevents concurrent seat hijack).
     AttachPlayer {
         color: Color,
         out: mpsc::Sender<ServerMessage>,
+        resp: oneshot::Sender<bool>,
     },
+    /// A player connection dropped; free the seat so a reconnect can re-attach.
+    Detach { color: Color },
     /// A player signalled its engine is ready.
     Ready { color: Color },
     /// A player submitted a move.
@@ -55,6 +60,7 @@ pub fn spawn_room(
     settlement: Arc<dyn SettlementSink>,
     stake: Option<StakeInfo>,
     db: Option<Arc<Db>>,
+    cleanup_tx: mpsc::Sender<protocol::GameId>,
 ) -> RoomHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (spectate_tx, _) = broadcast::channel(256);
@@ -64,6 +70,8 @@ pub fn spawn_room(
         game: None,
         white_out: None,
         black_out: None,
+        white_occupied: false,
+        black_occupied: false,
         wready: false,
         bready: false,
         started: false,
@@ -72,6 +80,7 @@ pub fn spawn_room(
         settlement,
         stake,
         db,
+        cleanup_tx,
     };
     tokio::spawn(room.run(cmd_rx));
     RoomHandle {
@@ -86,6 +95,8 @@ struct Room {
     game: Option<Game>,
     white_out: Option<mpsc::Sender<ServerMessage>>,
     black_out: Option<mpsc::Sender<ServerMessage>>,
+    white_occupied: bool,
+    black_occupied: bool,
     wready: bool,
     bready: bool,
     started: bool,
@@ -94,6 +105,7 @@ struct Room {
     settlement: Arc<dyn SettlementSink>,
     stake: Option<StakeInfo>,
     db: Option<Arc<Db>>,
+    cleanup_tx: mpsc::Sender<protocol::GameId>,
 }
 
 impl Room {
@@ -140,6 +152,8 @@ impl Room {
             }
         }
         tracing::info!(game_id = %self.game_id, "room closed");
+        // Signal the server to evict this game's room handle + launch tokens.
+        let _ = self.cleanup_tx.send(self.game_id).await;
     }
 
     async fn on_tick(&mut self) {
@@ -170,12 +184,45 @@ impl Room {
 
     async fn handle(&mut self, cmd: RoomCmd) {
         match cmd {
-            RoomCmd::AttachPlayer { color, out } => {
-                match color {
-                    Color::White => self.white_out = Some(out),
-                    Color::Black => self.black_out = Some(out),
+            RoomCmd::AttachPlayer { color, out, resp } => {
+                let occupied = match color {
+                    Color::White => self.white_occupied,
+                    Color::Black => self.black_occupied,
+                };
+                if occupied {
+                    let _ = resp.send(false);
+                    tracing::warn!(game_id = %self.game_id, ?color, "rejected attach: seat occupied");
+                    return;
                 }
+                match color {
+                    Color::White => {
+                        self.white_out = Some(out);
+                        self.white_occupied = true;
+                    }
+                    Color::Black => {
+                        self.black_out = Some(out);
+                        self.black_occupied = true;
+                    }
+                }
+                let _ = resp.send(true);
                 tracing::info!(game_id = %self.game_id, ?color, "player attached");
+                // Reconnection: if the game is already live, resend current state.
+                if self.started && !self.game.as_ref().map(|g| g.is_over()).unwrap_or(true) {
+                    self.resend_state(color).await;
+                }
+            }
+            RoomCmd::Detach { color } => {
+                match color {
+                    Color::White => {
+                        self.white_occupied = false;
+                        self.white_out = None;
+                    }
+                    Color::Black => {
+                        self.black_occupied = false;
+                        self.black_out = None;
+                    }
+                }
+                tracing::info!(game_id = %self.game_id, ?color, "player detached");
             }
             RoomCmd::Ready { color } => {
                 match color {
@@ -207,6 +254,7 @@ impl Room {
         let now = self.now_ms();
         let game = Game::new(self.tc, now);
         let clock = game.clock(now);
+        let start_fen = game.start_fen().to_string();
         self.game = Some(game);
         self.started = true;
 
@@ -214,7 +262,6 @@ impl Room {
             let _ = db.set_game_active(self.game_id).await;
         }
 
-        let start_fen = self.game.as_ref().unwrap().start_fen().to_string();
         // Tell each player which color they are.
         self.send_to(
             Color::White,
@@ -244,6 +291,43 @@ impl Room {
         });
 
         self.prompt_turn().await;
+    }
+
+    /// Resend current game state to a (re)connecting player.
+    async fn resend_state(&self, color: Color) {
+        let now = self.now_ms();
+        let Some(game) = self.game.as_ref() else {
+            return;
+        };
+        let clock = game.clock(now);
+        self.send_to(
+            color,
+            ServerMessage::GameStart {
+                game_id: self.game_id,
+                start_fen: game.start_fen().to_string(),
+                your_color: color,
+                clock,
+            },
+        )
+        .await;
+        if game.turn() == color {
+            let remaining = match color {
+                Color::White => clock.white_ms,
+                Color::Black => clock.black_ms,
+            };
+            self.send_to(
+                color,
+                ServerMessage::YourTurn {
+                    game_id: self.game_id,
+                    ply: game.ply(),
+                    position_fen: game.fen(),
+                    moves_uci: game.moves_uci().to_vec(),
+                    clock,
+                    deadline_server_ms: now + remaining + LAG_ALLOWANCE_MS,
+                },
+            )
+            .await;
+        }
     }
 
     /// Ask the side to move for its move.
@@ -373,46 +457,54 @@ impl Room {
     }
 
     async fn finish(&mut self, result: GameResult) {
-        let (pgn, clock) = {
-            let game = self.game.as_ref().unwrap();
-            (game.pgn(), game.clock(self.now_ms()))
+        let (pgn, clock) = match self.game.as_ref() {
+            Some(game) => (game.pgn(), game.clock(self.now_ms())),
+            None => return,
         };
-        let result_hash = hash_hex(&pgn);
+        // Cryptographic commitment to the full game (move log via PGN).
+        let result_hash = sha256_hex(&pgn);
         let (result_str, reason_str) = result_strings(&result);
+        let wagered = self.stake.is_some();
+        let winner_addr: Option<String> = self.stake.and_then(|stake| match result.winner {
+            Some(Color::White) => Some(stake.white.to_string()),
+            Some(Color::Black) => Some(stake.black.to_string()),
+            None => None, // wagered draw → null winner (refund both)
+        });
 
-        // Persist the durable result + final PGN.
-        if let Some(db) = &self.db {
-            let _ = db
-                .finish_game(self.game_id, result_str, reason_str, &result_hash, &pgn)
-                .await;
-        }
-
-        // Settlement seam. For a wagered game we prefer the durable, crash-safe
-        // path: enqueue to the settlement outbox (a worker drains it on-chain).
-        // With no database we settle inline as a best-effort fallback.
-        if let Some(stake) = self.stake {
-            let winner_addr = match result.winner {
-                Some(Color::White) => Some(stake.white),
-                Some(Color::Black) => Some(stake.black),
-                None => None,
-            };
-            match &self.db {
-                Some(db) => {
-                    let addr_str = winner_addr.map(|a| a.to_string());
-                    if let Err(e) = db
-                        .enqueue_settlement(self.game_id, addr_str.as_deref())
-                        .await
-                    {
-                        tracing::error!(game_id = %self.game_id, "enqueue settlement failed: {e:#}");
-                    }
+        match &self.db {
+            // Durable, crash-safe path: persist result + (if wagered) enqueue
+            // settlement in a single transaction. A worker drains the outbox.
+            Some(db) => {
+                if let Err(e) = db
+                    .finish_and_enqueue(
+                        self.game_id,
+                        result_str,
+                        reason_str,
+                        &result_hash,
+                        &pgn,
+                        winner_addr.as_deref(),
+                        wagered,
+                    )
+                    .await
+                {
+                    tracing::error!(game_id = %self.game_id, "finish_and_enqueue failed: {e:#}");
                 }
-                None => match self.settlement.report_result(self.game_id, winner_addr).await {
-                    Ok(()) => {}
-                    Err(e) => tracing::error!(game_id = %self.game_id, "settlement failed: {e:#}"),
-                },
             }
-        } else {
-            tracing::info!(game_id = %self.game_id, ?result, result_hash, "unwagered game finished");
+            // No database: best-effort inline settle for a wagered game.
+            None => {
+                if let Some(stake) = self.stake {
+                    let winner = match result.winner {
+                        Some(Color::White) => Some(stake.white),
+                        Some(Color::Black) => Some(stake.black),
+                        None => None,
+                    };
+                    if let Err(e) = self.settlement.report_result(self.game_id, winner).await {
+                        tracing::error!(game_id = %self.game_id, "settlement failed: {e:#}");
+                    }
+                } else {
+                    tracing::info!(game_id = %self.game_id, ?result, result_hash, "unwagered game finished");
+                }
+            }
         }
 
         let _ = clock;
@@ -446,9 +538,17 @@ fn result_strings(r: &GameResult) -> (&'static str, &'static str) {
     (winner, reason)
 }
 
-fn hash_hex(s: &str) -> String {
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:016x}", h.finish())
+fn sha256_hex(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    hex_encode(&h.finalize())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 

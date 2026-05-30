@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chess
+          POSTGRES_PASSWORD: chess
+          POSTGRES_DB: chess
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Postgres for the persistence test (otherwise it no-ops).
+      DATABASE_URL: postgres://chess:chess@localhost:5432/chess
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      # Contracts FIRST — the `ledger` crate compiles against contracts/out/.
+      - name: Build + test contracts
+        run: cd contracts && forge build && forge test -vv
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo test (workspace)
+        run: cargo test --workspace
+
+      - name: Web build
+        run: |
+          corepack enable
+          cd apps/web && pnpm install --frozen-lockfile=false && pnpm build

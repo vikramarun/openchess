@@ -94,6 +94,19 @@ pub trait SettlementSink: Send + Sync {
     /// Settle a finished game. `winner == None` is a draw (both refunded).
     async fn report_result(&self, game_id: Uuid, winner: Option<Address>)
         -> anyhow::Result<()>;
+
+    /// Whether this sink actually settles on-chain. The server refuses wagered
+    /// games when this is false (fail-closed — never take money it can't settle).
+    fn is_onchain(&self) -> bool {
+        false
+    }
+
+    /// Whether a game is already settled on-chain. Lets the settlement worker
+    /// treat a crash-after-submit (or any replay revert) as success rather than
+    /// a failure. Default `false` for non-chain sinks.
+    async fn is_settled(&self, _game_id: Uuid) -> bool {
+        false
+    }
 }
 
 /// Default no-chain sink: logs what it *would* settle. Used when the server is
@@ -164,6 +177,9 @@ impl SettlementSink for OnchainSettlement {
         black: Address,
         stake: U256,
     ) -> anyhow::Result<()> {
+        if white == black {
+            anyhow::bail!("refusing to open escrow with identical seats");
+        }
         let gid = game_id_to_bytes32(game_id);
         let escrow = self.contract();
         escrow
@@ -185,17 +201,21 @@ impl SettlementSink for OnchainSettlement {
         let winner_addr = winner.unwrap_or(Address::ZERO);
         let escrow = self.contract();
 
+        // Bound the signature's lifetime so a captured result can't be relayed
+        // indefinitely.
+        let deadline = U256::from(unix_now().saturating_add(3600));
+
         // Ask the contract for the exact EIP-712 digest, sign it with the
         // oracle key, and submit. (Signing the contract's own digest avoids
         // re-deriving the domain separator in Rust.)
-        let digest = escrow.digestGameResult(gid, winner_addr).call().await?;
+        let digest = escrow.digestGameResult(gid, winner_addr, deadline).call().await?;
         let sig = self.oracle.sign_hash(&digest).await?;
         let v: u8 = if sig.v() { 28 } else { 27 };
         let r = B256::from(sig.r());
         let s = B256::from(sig.s());
 
         escrow
-            .settleGame(gid, winner_addr, v, r, s)
+            .settleGame(gid, winner_addr, deadline, v, r, s)
             .send()
             .await?
             .get_receipt()
@@ -203,6 +223,25 @@ impl SettlementSink for OnchainSettlement {
         tracing::info!(%game_id, ?winner, "settlement(onchain): settled");
         Ok(())
     }
+
+    fn is_onchain(&self) -> bool {
+        true
+    }
+
+    async fn is_settled(&self, game_id: Uuid) -> bool {
+        let gid = game_id_to_bytes32(game_id);
+        match self.contract().games(gid).call().await {
+            Ok(g) => g.settled,
+            Err(_) => false,
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

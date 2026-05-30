@@ -177,3 +177,31 @@ lives).
 Production-ready today: `game-engine`, `ChessEscrow` conservation/refund logic,
 outbox schema. Prototype-only: seat↔wallet↔stake binding, gauntlet loop, tournament
 money, reconnection, result verifiability, and server-layer hardening.
+
+---
+
+## Remediation status (post-fix)
+
+The Critical/High findings and most Mediums were addressed; remaining items are
+deployment/ops or explicit product follow-ups.
+
+| Finding | Status | Notes |
+|---|---|---|
+| C1 seat↔wallet binding | Fixed | Wager endpoints require SIWE; seats = authed wallet; `/games` casual-only; identical seats rejected; seat-occupancy guard blocks concurrent hijack. |
+| C2 settlement reliability | Fixed | Transactional finish+enqueue; retry w/ attempt cap; stale-row reaper; idempotent already-settled; fail-closed on escrow/config. |
+| H1 white==black | Fixed | Contract + Rust guards. |
+| H2 feeRecipient as player | Fixed | Rejected in `openGame`. |
+| H3 SafeERC20 | Fixed | `_callOptionalReturn` + deposit balance-delta. |
+| H4 ownership/pause/oracle key | Partly | `Ownable2Step` + `Pausable` added; multisig/threshold oracle is an ops choice (deploy oracle as a multisig). |
+| H5 deadline / domain separator | Fixed | `deadline` in `GameResult`; separator recomputed on chainId change. |
+| H6 SIWE verification | Fixed | Domain + chainId + address-match + single-use TTL nonce. |
+| H7 room panics | Fixed | `unwrap()`s removed; graceful guards. |
+| H8 unbounded state / rate limit | Fixed (mem) / deferred (rate limit) | Room/token/offer/ticket/nonce/session eviction + TTL sweep. Edge rate-limiting left to deployment. |
+| H9 CORS | Fixed | Restricted to `WEB_ORIGIN` (default `localhost:3000`). |
+| M1 result verifiability | Partly | `result_hash` now SHA-256 over the move log. `server_sig` to clients + on-chain dispute window TODO. |
+| M2 collusion/wash-trading | Deferred | Same-wallet seats rejected; rating/Sybil controls are product follow-ups. |
+| M3 reconnection | Fixed | `Detach` on drop + resend-state on re-attach (clock still runs during disconnect, by design). |
+| M4 input bounds | Fixed | Time-control + stake bounds; overflow-safe. |
+| M5 transport/token | Partly | Tokens now bound to the player's own staked wallet (residual risk self-affecting); TLS + token-off-query are deployment follow-ups. |
+| M6 fee mid-game | Fixed | `feeBps` snapshotted at `openGame`. |
+| Hygiene (LICENSE/CI/shutdown/tests) | Fixed | MIT LICENSE, GitHub Actions CI (Postgres + forge-before-cargo), graceful shutdown, server unit tests, README corrected. |

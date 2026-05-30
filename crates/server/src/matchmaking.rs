@@ -1,32 +1,46 @@
 //! Matchmaking for the three game modes, built on `AppState::start_game`.
 //!
 //! - **Park/Patzer**: post an offer at a price; someone accepts; both get tokens.
-//! - **Gauntlet**: join a fixed-tier queue; paired with the next arrival; the
-//!   client re-queues after each game to "keep playing until you stop".
+//! - **Gauntlet**: join a fixed-tier queue; paired with the next arrival.
 //! - **Tournament**: create, players join, start generates round-robin games.
 //!
-//! Lobby state is in-memory (the Redis layer in production). Durable game data
-//! is persisted by `start_game` + the room.
+//! For **wagered** games each seat is bound to the wallet that authenticated via
+//! SIWE (`Authorization: Bearer`) — never to an address taken from the request
+//! body. Casual (unwagered) games need no auth. Lobby state is in-memory with
+//! TTL eviction (the Redis layer in production).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use protocol::{GameId, TimeControl};
+use protocol::GameId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{parse_wager, AppState};
+use crate::{build_wager, validate_tc, AppState};
+
+const OFFER_TTL: Duration = Duration::from_secs(3600);
+const TICKET_TTL: Duration = Duration::from_secs(3600);
+const TOURNEY_TTL: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Default)]
 pub struct Lobby {
     park: Mutex<HashMap<Uuid, ParkOffer>>,
-    /// tier key -> waiting ticket ids
     queue: Mutex<HashMap<String, VecDeque<Uuid>>>,
     tickets: Mutex<HashMap<Uuid, Ticket>>,
     tournaments: Mutex<HashMap<Uuid, Tournament>>,
+}
+
+impl Lobby {
+    pub fn sweep_expired(&self) {
+        self.park.lock().unwrap().retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
+        self.tickets.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
+        self.tournaments.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
+    }
 }
 
 pub fn routes() -> Router<AppState> {
@@ -42,11 +56,11 @@ pub fn routes() -> Router<AppState> {
         .route("/tournaments/{id}/start", post(tourney_start))
 }
 
-fn tc_of(initial_secs: u64, increment_secs: u64) -> TimeControl {
-    TimeControl {
-        initial_ms: initial_secs * 1_000,
-        increment_ms: increment_secs * 1_000,
-    }
+fn di() -> u64 {
+    60
+}
+fn dinc() -> u64 {
+    1
 }
 
 // --------------------------------------------------------------------------
@@ -54,29 +68,23 @@ fn tc_of(initial_secs: u64, increment_secs: u64) -> TimeControl {
 // --------------------------------------------------------------------------
 
 struct ParkOffer {
-    poster_addr: Option<String>,
+    poster_addr: Option<String>, // authenticated wallet (Some only if wagered)
     stake: Option<String>,
     initial_secs: u64,
     increment_secs: u64,
     status: String, // open | matching | matched
     game_id: Option<GameId>,
     poster_token: Option<String>,
+    created_at: Instant,
 }
 
 #[derive(Deserialize)]
 struct ParkCreateReq {
-    poster_addr: Option<String>,
     stake: Option<String>,
     #[serde(default = "di")]
     initial_secs: u64,
     #[serde(default = "dinc")]
     increment_secs: u64,
-}
-fn di() -> u64 {
-    60
-}
-fn dinc() -> u64 {
-    1
 }
 
 #[derive(Serialize)]
@@ -86,22 +94,31 @@ struct ParkCreateResp {
 
 async fn park_create(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ParkCreateReq>,
-) -> Json<ParkCreateResp> {
+) -> Result<Json<ParkCreateResp>, StatusCode> {
+    validate_tc(req.initial_secs, req.increment_secs)?;
+    // Wagered offers require auth; the poster's seat is their authed wallet.
+    let poster_addr = if req.stake.is_some() {
+        Some(state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?)
+    } else {
+        None
+    };
     let id = Uuid::new_v4();
     state.0.lobby.park.lock().unwrap().insert(
         id,
         ParkOffer {
-            poster_addr: req.poster_addr,
+            poster_addr,
             stake: req.stake,
             initial_secs: req.initial_secs,
             increment_secs: req.increment_secs,
             status: "open".into(),
             game_id: None,
             poster_token: None,
+            created_at: Instant::now(),
         },
     );
-    Json(ParkCreateResp { offer_id: id })
+    Ok(Json(ParkCreateResp { offer_id: id }))
 }
 
 #[derive(Serialize)]
@@ -115,23 +132,18 @@ struct OfferSummary {
 
 async fn park_list(State(state): State<AppState>) -> Json<Vec<OfferSummary>> {
     let park = state.0.lobby.park.lock().unwrap();
-    let open = park
-        .iter()
-        .filter(|(_, o)| o.status == "open")
-        .map(|(id, o)| OfferSummary {
-            offer_id: *id,
-            poster_addr: o.poster_addr.clone(),
-            stake: o.stake.clone(),
-            initial_secs: o.initial_secs,
-            increment_secs: o.increment_secs,
-        })
-        .collect();
-    Json(open)
-}
-
-#[derive(Deserialize)]
-struct ParkAcceptReq {
-    acceptor_addr: Option<String>,
+    Json(
+        park.iter()
+            .filter(|(_, o)| o.status == "open")
+            .map(|(id, o)| OfferSummary {
+                offer_id: *id,
+                poster_addr: o.poster_addr.clone(),
+                stake: o.stake.clone(),
+                initial_secs: o.initial_secs,
+                increment_secs: o.increment_secs,
+            })
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
@@ -145,28 +157,72 @@ struct ParkAcceptResp {
 async fn park_accept(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<ParkAcceptReq>,
-) -> Result<Json<ParkAcceptResp>, axum::http::StatusCode> {
-    // Claim the offer (open -> matching) under lock, capturing its terms.
-    let (poster_addr, stake, tc) = {
+    headers: HeaderMap,
+) -> Result<Json<ParkAcceptResp>, StatusCode> {
+    // Claim the offer (open -> matching), capturing its terms.
+    let (poster_addr, stake, initial_secs, increment_secs) = {
         let mut park = state.0.lobby.park.lock().unwrap();
-        let offer = park.get_mut(&id).ok_or(axum::http::StatusCode::NOT_FOUND)?;
+        let offer = park.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
         if offer.status != "open" {
-            return Err(axum::http::StatusCode::CONFLICT);
+            return Err(StatusCode::CONFLICT);
         }
         offer.status = "matching".into();
         (
             offer.poster_addr.clone(),
             offer.stake.clone(),
-            tc_of(offer.initial_secs, offer.increment_secs),
+            offer.initial_secs,
+            offer.increment_secs,
         )
     };
 
-    let wager = parse_wager(&poster_addr, &req.acceptor_addr, &stake);
-    let resp = state.start_game(tc, "park", wager).await;
+    let unclaim = || {
+        if let Some(o) = state.0.lobby.park.lock().unwrap().get_mut(&id) {
+            o.status = "open".into();
+        }
+    };
 
-    let mut park = state.0.lobby.park.lock().unwrap();
-    if let Some(offer) = park.get_mut(&id) {
+    let tc = match validate_tc(initial_secs, increment_secs) {
+        Ok(tc) => tc,
+        Err(e) => {
+            unclaim();
+            return Err(e);
+        }
+    };
+
+    // Build the wager from authenticated wallets (poster + acceptor).
+    let wager = if let Some(stake) = stake {
+        let acceptor = match state.authed_wallet(&headers) {
+            Some(a) => a,
+            None => {
+                unclaim();
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        };
+        let poster = poster_addr.unwrap_or_default();
+        if poster.eq_ignore_ascii_case(&acceptor) {
+            unclaim();
+            return Err(StatusCode::BAD_REQUEST); // no self-play wagers
+        }
+        match build_wager(&poster, &acceptor, &stake) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                unclaim();
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
+
+    let resp = match state.start_game(tc, "park", wager).await {
+        Ok(r) => r,
+        Err(e) => {
+            unclaim();
+            return Err(e);
+        }
+    };
+
+    if let Some(offer) = state.0.lobby.park.lock().unwrap().get_mut(&id) {
         offer.status = "matched".into();
         offer.game_id = Some(resp.game_id);
         offer.poster_token = Some(resp.white_token.clone());
@@ -183,7 +239,6 @@ async fn park_accept(
 struct ParkGetResp {
     status: String,
     game_id: Option<GameId>,
-    /// The poster's launch token, once matched (color = white).
     token: Option<String>,
     color: Option<String>,
 }
@@ -212,17 +267,15 @@ async fn park_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<P
 
 struct Ticket {
     addr: Option<String>,
-    stake: Option<String>,
     status: String, // waiting | matched
     game_id: Option<GameId>,
     token: Option<String>,
     color: Option<String>,
+    created_at: Instant,
 }
 
 #[derive(Deserialize)]
 struct QueueReq {
-    addr: Option<String>,
-    /// Stake tier in USDC base units (the Gauntlet tier).
     stake: Option<String>,
     #[serde(default = "di")]
     initial_secs: u64,
@@ -235,7 +288,19 @@ struct QueueResp {
     ticket_id: Uuid,
 }
 
-async fn queue_join(State(state): State<AppState>, Json(req): Json<QueueReq>) -> Json<QueueResp> {
+async fn queue_join(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<QueueReq>,
+) -> Result<Json<QueueResp>, StatusCode> {
+    let tc = validate_tc(req.initial_secs, req.increment_secs)?;
+    // Wagered tiers require auth; the seat is the authed wallet.
+    let addr = if req.stake.is_some() {
+        Some(state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?)
+    } else {
+        None
+    };
+
     let key = format!(
         "{}|{}|{}",
         req.stake.clone().unwrap_or_else(|| "0".into()),
@@ -246,20 +311,18 @@ async fn queue_join(State(state): State<AppState>, Json(req): Json<QueueReq>) ->
     state.0.lobby.tickets.lock().unwrap().insert(
         my_id,
         Ticket {
-            addr: req.addr.clone(),
-            stake: req.stake.clone(),
+            addr: addr.clone(),
             status: "waiting".into(),
             game_id: None,
             token: None,
             color: None,
+            created_at: Instant::now(),
         },
     );
 
-    // Try to pair with a waiting opponent at the same tier.
     let opponent = {
         let mut queue = state.0.lobby.queue.lock().unwrap();
-        let waiting = queue.entry(key.clone()).or_default();
-        waiting.pop_front()
+        queue.entry(key.clone()).or_default().pop_front()
     };
 
     if let Some(opp_id) = opponent {
@@ -273,10 +336,18 @@ async fn queue_join(State(state): State<AppState>, Json(req): Json<QueueReq>) ->
             .and_then(|t| t.addr.clone());
 
         // opponent = white, me = black
-        let wager = parse_wager(&opp_addr, &req.addr, &req.stake);
-        let resp = state
-            .start_game(tc_of(req.initial_secs, req.increment_secs), "gauntlet", wager)
-            .await;
+        let wager = if let Some(stake) = req.stake.clone() {
+            let white = opp_addr.clone().ok_or(StatusCode::CONFLICT)?;
+            let black = addr.clone().ok_or(StatusCode::UNAUTHORIZED)?;
+            if white.eq_ignore_ascii_case(&black) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Some(build_wager(&white, &black, &stake)?)
+        } else {
+            None
+        };
+
+        let resp = state.start_game(tc, "gauntlet", wager).await?;
 
         let mut tickets = state.0.lobby.tickets.lock().unwrap();
         if let Some(t) = tickets.get_mut(&opp_id) {
@@ -303,7 +374,7 @@ async fn queue_join(State(state): State<AppState>, Json(req): Json<QueueReq>) ->
             .push_back(my_id);
     }
 
-    Json(QueueResp { ticket_id: my_id })
+    Ok(Json(QueueResp { ticket_id: my_id }))
 }
 
 #[derive(Serialize)]
@@ -344,6 +415,7 @@ struct Tournament {
     status: String, // open | running
     players: Vec<String>,
     games: Vec<TourneyGame>,
+    created_at: Instant,
 }
 
 #[derive(Clone, Serialize)]
@@ -373,7 +445,8 @@ struct IdResp {
 async fn tourney_create(
     State(state): State<AppState>,
     Json(req): Json<TourneyCreateReq>,
-) -> Json<IdResp> {
+) -> Result<Json<IdResp>, StatusCode> {
+    validate_tc(req.initial_secs, req.increment_secs)?;
     let id = Uuid::new_v4();
     state.0.lobby.tournaments.lock().unwrap().insert(
         id,
@@ -385,9 +458,10 @@ async fn tourney_create(
             status: "open".into(),
             players: Vec::new(),
             games: Vec::new(),
+            created_at: Instant::now(),
         },
     );
-    Json(IdResp { tournament_id: id })
+    Ok(Json(IdResp { tournament_id: id }))
 }
 
 #[derive(Deserialize)]
@@ -399,17 +473,17 @@ async fn tourney_join(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<JoinReq>,
-) -> axum::http::StatusCode {
+) -> StatusCode {
     let mut t = state.0.lobby.tournaments.lock().unwrap();
     match t.get_mut(&id) {
         Some(t) if t.status == "open" => {
             if !t.players.contains(&req.player) {
                 t.players.push(req.player);
             }
-            axum::http::StatusCode::OK
+            StatusCode::OK
         }
-        Some(_) => axum::http::StatusCode::CONFLICT,
-        None => axum::http::StatusCode::NOT_FOUND,
+        Some(_) => StatusCode::CONFLICT,
+        None => StatusCode::NOT_FOUND,
     }
 }
 
@@ -425,9 +499,9 @@ struct TourneyView {
 async fn tourney_get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<TourneyView>, axum::http::StatusCode> {
+) -> Result<Json<TourneyView>, StatusCode> {
     let t = state.0.lobby.tournaments.lock().unwrap();
-    let t = t.get(&id).ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(TourneyView {
         name: t.name.clone(),
         buy_in: t.buy_in.clone(),
@@ -443,26 +517,29 @@ async fn tourney_list(State(state): State<AppState>) -> Json<Vec<IdResp>> {
 }
 
 /// Start a round-robin: every player pairs with every other once. Games are
-/// created (unwagered for now; pool prize distribution needs a dedicated
-/// contract method and is not yet wired).
+/// created **unwagered** for now (pool prize distribution needs a dedicated
+/// contract method and is not yet wired — tracked in AUDIT.md / README).
 async fn tourney_start(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<TourneyGame>>, axum::http::StatusCode> {
+) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
     let (players, tc) = {
         let mut t = state.0.lobby.tournaments.lock().unwrap();
-        let t = t.get_mut(&id).ok_or(axum::http::StatusCode::NOT_FOUND)?;
+        let t = t.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
         if t.status != "open" || t.players.len() < 2 {
-            return Err(axum::http::StatusCode::CONFLICT);
+            return Err(StatusCode::CONFLICT);
         }
         t.status = "running".into();
-        (t.players.clone(), tc_of(t.initial_secs, t.increment_secs))
+        (
+            t.players.clone(),
+            validate_tc(t.initial_secs, t.increment_secs)?,
+        )
     };
 
     let mut games = Vec::new();
     for i in 0..players.len() {
         for j in (i + 1)..players.len() {
-            let resp = state.start_game(tc, "tournament", None).await;
+            let resp = state.start_game(tc, "tournament", None).await?;
             games.push(TourneyGame {
                 game_id: resp.game_id,
                 white: players[i].clone(),

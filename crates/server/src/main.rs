@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ledger::{Address, SettlementSink, U256};
@@ -23,23 +24,33 @@ use persistence::{Db, Tc as PgTc, Wager as PgWager};
 use protocol::{Color, GameId, TimeControl};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use crate::matchmaking::Lobby;
 use crate::room::{spawn_room, RoomHandle, StakeInfo};
 
+/// Input bounds (reject absurd / overflow-inducing values).
+pub const MAX_INITIAL_SECS: u64 = 3 * 60 * 60; // 3 hours
+pub const MAX_INCREMENT_SECS: u64 = 180;
+/// Max stake in USDC base units (6 dp) — 1,000,000 USDC. Bounds the U256→u128
+/// conversion and absurd wagers.
+pub const MAX_STAKE: u128 = 1_000_000_000_000;
+
 #[derive(Clone)]
 pub struct AppState(pub Arc<Inner>);
 
 pub struct Inner {
     pub rooms: Mutex<HashMap<GameId, RoomHandle>>,
-    /// launch token -> (game, color)
+    /// launch token -> (game, color). Removed when the game ends.
     pub tokens: Mutex<HashMap<String, (GameId, Color)>>,
     pub settlement: Arc<dyn SettlementSink>,
     pub db: Option<Arc<Db>>,
     pub lobby: Lobby,
     pub auth: auth::Auth,
+    /// Rooms signal their game id here on finish so we can evict state.
+    pub cleanup_tx: mpsc::Sender<GameId>,
 }
 
 /// On-chain seats + stake for a wagered game.
@@ -72,6 +83,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let (cleanup_tx, cleanup_rx) = mpsc::channel::<GameId>(256);
+
     let state = AppState(Arc::new(Inner {
         rooms: Mutex::new(HashMap::new()),
         tokens: Mutex::new(HashMap::new()),
@@ -79,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         lobby: Lobby::default(),
         auth: auth::Auth::default(),
+        cleanup_tx,
     }));
 
     // Drain the settlement outbox on-chain in the background (durable path).
@@ -86,6 +100,21 @@ async fn main() -> anyhow::Result<()> {
         let settlement = state.0.settlement.clone();
         tokio::spawn(settlement_worker(db, settlement));
     }
+    // Evict finished games' rooms + tokens; periodically sweep stale lobby state.
+    tokio::spawn(cleanup_task(state.clone(), cleanup_rx));
+    tokio::spawn(sweep_task(state.clone()));
+
+    // Restrict CORS to the configured web origin (no permissive on a money API).
+    let cors = match std::env::var("WEB_ORIGIN") {
+        Ok(origin) => CorsLayer::new()
+            .allow_origin(origin.parse::<axum::http::HeaderValue>().expect("WEB_ORIGIN"))
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any),
+        Err(_) => CorsLayer::new()
+            .allow_origin("http://localhost:3000".parse::<axum::http::HeaderValue>().unwrap())
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any),
+    };
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -93,23 +122,63 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth::routes())
         .merge(matchmaking::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state);
 
     let addr = std::env::var("BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("chess-server listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
 
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutdown signal received");
+}
+
+/// Remove a finished game's room handle and its launch tokens.
+async fn cleanup_task(state: AppState, mut rx: mpsc::Receiver<GameId>) {
+    while let Some(game_id) = rx.recv().await {
+        state.0.rooms.lock().unwrap().remove(&game_id);
+        state
+            .0
+            .tokens
+            .lock()
+            .unwrap()
+            .retain(|_, (g, _)| *g != game_id);
+        tracing::debug!(%game_id, "evicted finished game state");
+    }
+}
+
+/// Periodically expire stale lobby/auth state (bounds memory; mitigates DoS).
+async fn sweep_task(state: AppState) {
+    use tokio::time::{interval, Duration};
+    let mut tick = interval(Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        state.0.auth.sweep_expired();
+        state.0.lobby.sweep_expired();
+    }
+}
+
 /// Background worker: claims pending settlements and submits them on-chain.
-/// At-least-once is safe — the escrow contract is replay-guarded.
+/// Transient failures are requeued with an attempt cap; crashed-worker rows are
+/// reaped back to pending; an already-settled game (crash-after-submit / replay
+/// revert) is treated as success.
 async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
     use tokio::time::{interval, Duration};
     let mut tick = interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
+
+        // Reap rows stranded in `processing` by a crashed worker.
+        if let Err(e) = db.requeue_stale(30).await {
+            tracing::warn!("outbox reaper failed: {e:#}");
+        }
+
         let rows = match db.claim_settlements(8).await {
             Ok(r) => r,
             Err(e) => {
@@ -123,6 +192,7 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                 Some(a) => match a.parse::<Address>() {
                     Ok(addr) => Some(addr),
                     Err(_) => {
+                        // Permanently malformed — never retryable.
                         let _ = db.complete_settlement(row.id, "failed", Some("bad winner addr")).await;
                         let _ = db.set_settlement_status(row.game_id, "failed").await;
                         continue;
@@ -137,9 +207,21 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    let _ = db.complete_settlement(row.id, "failed", Some(&msg)).await;
-                    let _ = db.set_settlement_status(row.game_id, "failed").await;
-                    tracing::error!(game_id = %row.game_id, "outbox: settle failed: {msg}");
+                    // The submit may have actually landed (crash/replay): if the
+                    // chain says it's settled, that's success, not failure.
+                    if settlement.is_settled(row.game_id).await {
+                        let _ = db.complete_settlement(row.id, "settled", None).await;
+                        let _ = db.set_settlement_status(row.game_id, "settled").await;
+                        tracing::info!(game_id = %row.game_id, "outbox: already settled on-chain");
+                    } else if row.attempts >= persistence::MAX_SETTLE_ATTEMPTS {
+                        let _ = db.complete_settlement(row.id, "failed", Some(&msg)).await;
+                        let _ = db.set_settlement_status(row.game_id, "failed").await;
+                        tracing::error!(game_id = %row.game_id, attempts = row.attempts, "outbox: giving up: {msg}");
+                    } else {
+                        // Transient: requeue for retry on a later tick.
+                        let _ = db.complete_settlement(row.id, "pending", Some(&msg)).await;
+                        tracing::warn!(game_id = %row.game_id, attempts = row.attempts, "outbox: transient, will retry: {msg}");
+                    }
                 }
             }
         }
@@ -152,9 +234,6 @@ struct CreateGameReq {
     initial_secs: u64,
     #[serde(default = "default_increment")]
     increment_secs: u64,
-    white_addr: Option<String>,
-    black_addr: Option<String>,
-    stake: Option<String>,
 }
 fn default_initial() -> u64 {
     60
@@ -171,29 +250,42 @@ pub struct CreateGameResp {
     pub spectate_path: String,
 }
 
+/// `/games` creates an **unwagered (casual)** game with two open seats. Wagered
+/// games go through the authenticated Park/Gauntlet matchmaking flows, where
+/// each seat is bound to the wallet that consented to stake it.
 async fn create_game(
     State(state): State<AppState>,
     Json(req): Json<CreateGameReq>,
-) -> Json<CreateGameResp> {
-    let tc = TimeControl {
-        initial_ms: req.initial_secs * 1_000,
-        increment_ms: req.increment_secs * 1_000,
-    };
-    let wager = parse_wager(&req.white_addr, &req.black_addr, &req.stake);
-    let resp = state.start_game(tc, "casual", wager).await;
-    Json(resp)
+) -> Result<Json<CreateGameResp>, StatusCode> {
+    let tc = validate_tc(req.initial_secs, req.increment_secs)?;
+    let resp = state.start_game(tc, "casual", None).await?;
+    Ok(Json(resp))
 }
 
-/// Parse optional on-chain seats into a `WagerSeats`.
-pub fn parse_wager(
-    white_addr: &Option<String>,
-    black_addr: &Option<String>,
-    stake: &Option<String>,
-) -> Option<WagerSeats> {
-    let white = white_addr.as_ref()?.parse::<Address>().ok()?;
-    let black = black_addr.as_ref()?.parse::<Address>().ok()?;
-    let stake = stake.as_ref()?.parse::<U256>().ok()?;
-    Some(WagerSeats { white, black, stake })
+/// Validate + build a time control, rejecting absurd / overflow-inducing values.
+pub fn validate_tc(initial_secs: u64, increment_secs: u64) -> Result<TimeControl, StatusCode> {
+    if initial_secs == 0 || initial_secs > MAX_INITIAL_SECS || increment_secs > MAX_INCREMENT_SECS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(TimeControl {
+        initial_ms: initial_secs * 1_000,
+        increment_ms: increment_secs * 1_000,
+    })
+}
+
+/// Build wager seats from authenticated wallet strings + a stake string.
+/// Rejects identical seats and out-of-range stakes.
+pub fn build_wager(white: &str, black: &str, stake: &str) -> Result<WagerSeats, StatusCode> {
+    let white = white.parse::<Address>().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let black = black.parse::<Address>().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let stake = stake.parse::<U256>().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if white == black {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if stake == U256::ZERO || stake > U256::from(MAX_STAKE) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(WagerSeats { white, black, stake })
 }
 
 impl AppState {
@@ -205,14 +297,26 @@ impl AppState {
         tc: TimeControl,
         mode: &str,
         wager: Option<WagerSeats>,
-    ) -> CreateGameResp {
+    ) -> Result<CreateGameResp, StatusCode> {
         let game_id = Uuid::new_v4();
         let stake_info = wager.map(|w| StakeInfo {
             white: w.white,
             black: w.black,
         });
 
-        // Persist the game row.
+        // Fail-closed: never accept a wager we cannot settle on-chain, or with
+        // identical / overflowing seats.
+        if let Some(w) = wager {
+            if !self.0.settlement.is_onchain() {
+                tracing::warn!(%game_id, "refusing wagered game: no on-chain settlement configured");
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            if w.white == w.black || w.stake == U256::ZERO || w.stake > U256::from(MAX_STAKE) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+
+        // Persist the game row. For a wagered game this must succeed (fail-closed).
         if let Some(db) = &self.0.db {
             let pwager = wager.map(|w| PgWager {
                 white_addr: w.white.to_string(),
@@ -238,10 +342,14 @@ impl AppState {
                 .await
             {
                 tracing::error!(%game_id, "persist create_game failed: {e:#}");
+                if wager.is_some() {
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
             }
         }
 
-        // Lock stakes on-chain.
+        // Lock stakes on-chain BEFORE spawning the room. If this fails for a
+        // wagered game, abort — never let an unbacked wagered game play.
         if let Some(w) = wager {
             if let Err(e) = self
                 .0
@@ -249,7 +357,11 @@ impl AppState {
                 .open_escrow(game_id, w.white, w.black, w.stake)
                 .await
             {
-                tracing::error!(%game_id, "open_escrow failed: {e:#}");
+                tracing::error!(%game_id, "open_escrow failed, aborting wagered game: {e:#}");
+                if let Some(db) = &self.0.db {
+                    let _ = db.finish_game(game_id, "draw", "aborted", "", "").await;
+                }
+                return Err(StatusCode::BAD_GATEWAY);
             }
         }
 
@@ -259,6 +371,7 @@ impl AppState {
             self.0.settlement.clone(),
             stake_info,
             self.0.db.clone(),
+            self.0.cleanup_tx.clone(),
         );
         self.0.rooms.lock().unwrap().insert(game_id, handle);
 
@@ -271,17 +384,27 @@ impl AppState {
         }
 
         tracing::info!(%game_id, mode, wagered = wager.is_some(), "game created");
-        CreateGameResp {
+        Ok(CreateGameResp {
             game_id,
             white_token,
             black_token,
             spectate_path: format!("/ws/game/{game_id}"),
-        }
+        })
     }
 
     /// Resolve a launch token to its (game, color) seat.
     pub fn token_seat(&self, token: &str) -> Option<(GameId, Color)> {
         self.0.tokens.lock().unwrap().get(token).copied()
+    }
+
+    /// The authenticated wallet for a request, from its `Authorization: Bearer`.
+    pub fn authed_wallet(&self, headers: &HeaderMap) -> Option<String> {
+        let token = headers
+            .get("authorization")?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")?;
+        self.0.auth.wallet_for_token(token)
     }
 
     /// Clone a room's command sender + subscribe to its spectator stream.

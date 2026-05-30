@@ -11,15 +11,17 @@ full architecture and rationale.
 
 ## Status
 
-End-to-end and tested: **23 automated tests pass** (15 Rust + 8 Foundry).
+End-to-end and tested: **30 automated tests pass** (16 Rust + 14 Foundry). A
+full security audit ([AUDIT.md](AUDIT.md)) was performed and the Critical/High
+findings remediated (see *Security hardening* below).
 
 | Component | Crate / dir | Status |
 |---|---|---|
 | Shared wire protocol | `crates/protocol` | ✅ 3 tests |
 | Authoritative game engine (shakmaty) | `crates/game-engine` | ✅ 6 tests |
 | BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish; 3 book tests |
-| Game server (WS hub + rooms + 3 modes + SIWE) | `crates/server` | ✅ verified end-to-end |
-| Non-custodial escrow + oracle | `contracts/ChessEscrow.sol` | ✅ 8 Foundry tests |
+| Game server (WS hub + rooms + 3 modes + SIWE) | `crates/server` | ✅ live demos; 2 unit tests |
+| Non-custodial escrow + oracle | `contracts/ChessEscrow.sol` | ✅ 14 Foundry tests |
 | On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests + live demo |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip test + live |
 | Web app (create + live spectator + wallet + SIWE) | `apps/web` | ✅ verified in-browser |
@@ -28,22 +30,37 @@ End-to-end and tested: **23 automated tests pass** (15 Rust + 8 Foundry).
 - Two BYO clients driving Stockfish play a full game over WebSocket with a
   server-enforced clock; result is detected authoritatively. A Next.js spectator
   renders the live board (chessground), clocks, and SAN move list.
-- **Three modes** work: Park/Patzer (offer→accept), Gauntlet (tier queue
-  pairing), Tournament (round-robin). All games + full move logs persist to
-  Postgres.
-- A **wagered** game opens escrow on creation; on finish the result is enqueued
-  to a durable **settlement outbox** and a worker signs an EIP-712 result and
-  settles it on-chain — verified with a decisive payout (winner +stake−rake).
-- **SIWE**: nonce → wallet-signed EIP-4361 → session token; nonce replay rejected.
-- A **Polyglot opening book** is consulted client-side before the engine.
+- **Wagered games are authenticated**: SIWE sign-in → authenticated Park
+  offer/accept where each on-chain seat is bound to the signed-in wallet →
+  escrow opened → engines play → result enqueued to a durable, retrying
+  **settlement outbox** → a worker signs a time-bounded EIP-712 result and
+  settles on-chain. Verified live (decisive payout and draw refund) via
+  `scripts/onchain-demo.sh`.
+- **Modes:** Park/Patzer is complete. Gauntlet is a fixed-tier queue that pairs
+  the next two arrivals (continuous "play-until-you-stop" re-queue is **not yet**
+  implemented). Tournament generates round-robin **pairings only** — scoring and
+  pool prize payout are **not yet** wired.
+
+### Security hardening (post-audit)
+- Wager endpoints require a SIWE session; seats derive from the authenticated
+  wallet (never the request body); identical seats rejected.
+- Contract: `white != black`, fee-recipient can't play, SafeERC20-style
+  transfers + deposit delta, `Ownable2Step` + `Pausable`, time-bounded results
+  (`deadline`) with a fork-safe domain separator, rake snapshot at open.
+- Settlement: transactional finish+enqueue, retry with attempt cap + stale-row
+  reaper, idempotent "already settled" handling, fail-closed (no wager without
+  on-chain settlement / on escrow-open failure).
+- Auth/DoS: full EIP-4361 verification (domain/chainId/address match), single-use
+  nonces + TTL, session TTL, evicted lobby/room/token state, restricted CORS,
+  input bounds, SHA-256 result commitment.
 
 ### Not yet wired (next steps)
 - Redis pub/sub + game-node sharding (today: in-process broadcast, single node)
 - Glicko-2 ratings; gauntlet auto-requeue loop; tournament scoring + pool prize
   payout (needs a dedicated contract method)
-- Settlement outbox retry/backoff (failed rows are currently terminal)
-- Engine profiles + per-move signing in the client (protocol already carries the
-  optional `sig` field)
+- Result signature (`server_sig`) surfaced to clients; multisig/threshold oracle
+- Anti-collusion / wash-trading controls; per-move client signing; wss/TLS in
+  deployment; tokens off the WS query string
 
 ## Prerequisites
 - Rust (stable), Foundry (`forge`/`anvil`/`cast`), a UCI engine on PATH

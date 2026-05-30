@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientEnvelope, ClientMessage, Color, Envelope, GameId, ServerMessage};
 use serde::Deserialize;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::room::RoomCmd;
@@ -40,20 +40,37 @@ pub async fn ws_handler(
     })
 }
 
-async fn handle_player(state: AppState, game_id: GameId, color: Color, socket: WebSocket) {
+async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socket: WebSocket) {
     let Some((cmd_tx, _spec)) = state.room_channels(&game_id) else {
         return;
     };
 
     let (out_tx, mut out_rx) = mpsc::channel::<ServerMessage>(64);
+    let (resp_tx, resp_rx) = oneshot::channel();
     if cmd_tx
         .send(RoomCmd::AttachPlayer {
             color,
             out: out_tx.clone(),
+            resp: resp_tx,
         })
         .await
         .is_err()
     {
+        return;
+    }
+    // Reject if the seat is already held by a live connection.
+    if !matches!(resp_rx.await, Ok(true)) {
+        let env = Envelope::new(
+            1,
+            0,
+            ServerMessage::Error {
+                code: "seat_occupied".into(),
+                message: "this seat already has a live connection".into(),
+            },
+        );
+        if let Ok(text) = serde_json::to_string(&env) {
+            let _ = socket.send(Message::Text(text.into())).await;
+        }
         return;
     }
 
@@ -114,6 +131,8 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, socket: W
             _ => {}
         }
     }
+    // Connection dropped: free the seat so a reconnect can re-attach.
+    let _ = cmd_tx.send(RoomCmd::Detach { color }).await;
     writer.abort();
 }
 
