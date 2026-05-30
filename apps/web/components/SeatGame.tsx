@@ -30,12 +30,17 @@ export function SeatGame({
   color,
   stake,
   onDone,
+  onResult,
+  subtitle,
 }: {
   gameId: string;
   token: string;
   color: "white" | "black";
   stake?: string | null;
   onDone?: () => void;
+  /** Fires once when the game ends — used by gauntlet/tournament to advance. */
+  onResult?: (winner: "white" | "black" | null) => void;
+  subtitle?: string;
 }) {
   const [fen, setFen] = useState(INITIAL_FEN);
   const [moves, setMoves] = useState<string[]>([]);
@@ -44,6 +49,8 @@ export function SeatGame({
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("loading engine…");
   const pos = useRef(Chess.default());
+  const onResultRef = useRef(onResult);
+  onResultRef.current = onResult;
 
   useEffect(() => {
     let cancelled = false;
@@ -91,6 +98,7 @@ export function SeatGame({
               setResult(m.result);
               setStatus("finished");
               verifyResultSig(m.result_hash, m.server_sig).then(setVerified);
+              onResultRef.current?.(m.result?.winner ?? null);
               break;
           }
         } catch {
@@ -136,7 +144,7 @@ export function SeatGame({
       <div className="sidebar">
         <div className="panel">
           <div style={{ fontWeight: 700, color: "var(--text-strong)", marginBottom: 4 }}>
-            Your game · {color === "white" ? "White" : "Black"}
+            {subtitle ?? `Your game · ${color === "white" ? "White" : "Black"}`}
           </div>
           <div className="muted" style={{ fontSize: 14 }}>
             Your engine plays your seat in your browser; your opponent runs theirs.

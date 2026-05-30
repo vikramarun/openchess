@@ -555,6 +555,102 @@ pre {
   width: 230px;
 }
 
+/* ---------- gauntlet ---------- */
+.gauntlet-score {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.gs-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.gs-stats .bk {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 64px;
+  text-align: center;
+}
+.gs-stats .bk-v {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.gs-stats .bk-l {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.spinner {
+  width: 28px;
+  height: 28px;
+  margin: 4px auto 0;
+  border: 3px solid var(--panel-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- tournament ---------- */
+.tourney-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.tourney-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.tourney-card .tc-name {
+  font-weight: 700;
+  color: var(--text-strong);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-pill {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--muted);
+}
+.status-pill.open {
+  color: var(--accent);
+}
+.status-pill.running {
+  color: #e0a96c;
+}
+.status-pill.settled,
+.status-pill.complete {
+  color: var(--text);
+}
+
 /* ---------- profile / stats ---------- */
 .profile-head {
   display: flex;

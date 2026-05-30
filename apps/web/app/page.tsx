@@ -135,9 +135,9 @@ export default function Home() {
       </div>
 
       <p className="muted" style={{ textAlign: "center", marginTop: 18, fontSize: 13 }}>
-        Quick Play and <b>Park / Patzer wagering</b> are fully in-browser — connect a wallet,
-        deposit USDC, and post or accept a staked game. Gauntlet &amp; Tournament staking run
-        through the native client for now.
+        Every mode runs in your browser — connect a wallet, deposit USDC once, and play{" "}
+        <b>Park</b>, <b>Gauntlet</b>, or <b>Tournament</b> for stakes, settled non-custodially.
+        The native client is still available for headless / custom engines.
       </p>
     </div>
   );

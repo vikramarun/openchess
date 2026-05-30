@@ -109,11 +109,16 @@ honest checklist.
   operator could sign an incorrect result, matching a standard result-oracle
   trust model.
 - **No anti-collusion / wash-trading controls** (rating/Sybil) yet.
-- **In-browser wagering**: Park / Patzer now wagers fully in-browser — connect a
-  wallet, deposit USDC into the escrow (approve + `deposit`), post or accept a
-  staked offer, and your in-browser engine plays your seat while settlement runs
-  on-chain. The escrow address + chain are single-sourced from the server's
-  `GET /config`. Gauntlet & Tournament staking still run via the native client.
+- **In-browser wagering**: all three wager modes run fully in-browser — connect a
+  wallet, deposit USDC into the escrow (approve + `deposit`), and your in-browser
+  engine plays your seat while settlement runs on-chain:
+  - **Park / Patzer** — post or accept a staked offer.
+  - **Gauntlet** — pick a tier; auto-queue, play, re-queue, with a live tally.
+  - **Tournament** — create/join (buy-in → pool), start a round-robin, auto-play
+    your bracket; the pool pays out by standings (small fields credit the
+    bankroll directly; large fields settle a Merkle root, claimed on-chain).
+  The escrow address + chain are single-sourced from the server's `GET /config`.
+  The native client remains for headless / custom engines.
 
 ## Deploying the web app to Vercel
 
