@@ -39,6 +39,15 @@ pub struct OutboxRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+pub struct TournamentOutboxRow {
+    pub id: Uuid,
+    pub tid: Uuid,
+    pub mode: String,
+    pub payload: serde_json::Value,
+    pub attempts: i32,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 pub struct GameRow {
     pub id: Uuid,
     pub mode: String,
@@ -209,6 +218,85 @@ impl Db {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    // -- tournament settlement outbox -------------------------------------
+
+    /// Enqueue a completed tournament's payout for durable on-chain settlement.
+    pub async fn enqueue_tournament_settlement(
+        &self,
+        tid: Uuid,
+        mode: &str,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO tournament_outbox (id, tid, mode, payload) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tid)
+        .bind(mode)
+        .bind(payload)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn claim_tournament_settlements(&self, limit: i64) -> Result<Vec<TournamentOutboxRow>> {
+        let rows = sqlx::query_as::<_, TournamentOutboxRow>(
+            r#"UPDATE tournament_outbox
+               SET status='processing', attempts=attempts+1, claimed_at=now()
+               WHERE id IN (
+                   SELECT id FROM tournament_outbox
+                   WHERE status='pending' AND attempts < $2
+                   ORDER BY created_at LIMIT $1
+                   FOR UPDATE SKIP LOCKED
+               )
+               RETURNING id, tid, mode, payload, attempts"#,
+        )
+        .bind(limit)
+        .bind(MAX_SETTLE_ATTEMPTS)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn requeue_stale_tournaments(&self, lease_secs: i64) -> Result<u64> {
+        let res = sqlx::query(
+            r#"UPDATE tournament_outbox SET status='pending'
+               WHERE status='processing' AND claimed_at IS NOT NULL
+                 AND claimed_at < now() - make_interval(secs => $1)"#,
+        )
+        .bind(lease_secs as f64)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    pub async fn set_tournament_settlement_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE tournament_outbox SET status=$2, last_error=$3 WHERE id=$1")
+            .bind(id)
+            .bind(status)
+            .bind(error)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Latest root-mode payload for a tournament (so claim proofs survive a
+    /// server restart — the leaves are recoverable from the durable row).
+    pub async fn tournament_payload(&self, tid: Uuid) -> Result<Option<serde_json::Value>> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT payload FROM tournament_outbox WHERE tid=$1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(tid)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(p,)| p))
     }
 
     pub async fn get_game(&self, game_id: Uuid) -> Result<Option<GameRow>> {

@@ -345,9 +345,10 @@ contract ChessEscrowTest {
             : keccak256(abi.encodePacked(lb, lw));
 
         uint256 deadline = block.timestamp + 100;
-        bytes32 digest = escrow.digestTournamentRoot(tid, root, deadline);
+        uint256 total = 3 * STAKE; // leaves sum to the full pool (0 rake)
+        bytes32 digest = escrow.digestTournamentRoot(tid, root, total, deadline);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(oracleKey, digest);
-        escrow.settleTournamentRoot(tid, root, deadline, v, r, s);
+        escrow.settleTournamentRoot(tid, root, total, deadline, v, r, s);
 
         bytes32[] memory proofW = new bytes32[](1);
         proofW[0] = lb;
@@ -368,5 +369,46 @@ contract ChessEscrowTest {
         // forged amount / bad proof rejected
         vm.expectRevert();
         escrow.claimTournament(tid, carol, STAKE, proofW);
+
+        // refund blocked once root-settled
+        vm.expectRevert();
+        escrow.claimRefund(tid, carol);
+    }
+
+    function test_tournament_root_rake_taken_at_settle() public {
+        bytes32 tid = keccak256("t7");
+        _enterAll(tid); // pool = 3 STAKE
+        // Commit a tree that pays out only 2 STAKE; the other 1 STAKE is rake
+        // and must go to the fee recipient at settle (never stranded).
+        bytes32 lw = _leaf(white, 2 * STAKE);
+        uint256 total = 2 * STAKE;
+        uint256 deadline = block.timestamp + 100;
+        bytes32 digest = escrow.digestTournamentRoot(tid, lw, total, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(oracleKey, digest);
+        escrow.settleTournamentRoot(tid, lw, total, deadline, v, r, s);
+
+        _assert(escrow.bankroll(fee) == STAKE, "rake taken at settle");
+
+        bytes32[] memory empty = new bytes32[](0);
+        escrow.claimTournament(tid, white, 2 * STAKE, empty); // single-leaf root
+        _assert(escrow.bankroll(white) == 11 * STAKE, "white claimed");
+        // pool fully accounted: 2 claimed + 1 rake = 3
+        _assert(
+            escrow.bankroll(white) + escrow.bankroll(black) + escrow.bankroll(carol)
+                + escrow.bankroll(fee) == 30 * STAKE,
+            "conservation"
+        );
+    }
+
+    function test_claim_on_direct_settle_rejected() public {
+        bytes32 tid = keccak256("t8");
+        _enterAll(tid);
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 3 * STAKE;
+        _settleT(tid, _players3(), payouts, DEADLINE);
+        // no root in direct mode -> claim reverts NoRoot
+        bytes32[] memory empty = new bytes32[](0);
+        vm.expectRevert();
+        escrow.claimTournament(tid, white, 3 * STAKE, empty);
     }
 }

@@ -209,6 +209,11 @@ pub trait SettlementSink: Send + Sync {
         tracing::info!(%tid, "settlement(log): settle tournament (root)");
         Ok(B256::ZERO)
     }
+
+    /// Whether a tournament is already settled on-chain (worker idempotency).
+    async fn is_tournament_settled(&self, _tid: Uuid) -> bool {
+        false
+    }
 }
 
 /// Default no-chain sink: logs what it *would* settle. Used when the server is
@@ -397,22 +402,34 @@ impl SettlementSink for OnchainSettlement {
         let leaf_hashes: Vec<B256> =
             leaves.iter().map(|(a, amt)| tournament_leaf(*a, *amt)).collect();
         let root = merkle_root(&leaf_hashes);
+        let total: U256 = leaves.iter().fold(U256::ZERO, |acc, (_, amt)| acc + *amt);
         let tidb = game_id_to_bytes32(tid);
         let deadline = U256::from(unix_now().saturating_add(3600));
         let escrow = self.contract();
-        let digest = escrow.digestTournamentRoot(tidb, root, deadline).call().await?;
+        let digest = escrow
+            .digestTournamentRoot(tidb, root, total, deadline)
+            .call()
+            .await?;
         let sig = self.oracle.sign_hash(&digest).await?;
         let v: u8 = if sig.v() { 28 } else { 27 };
         let r = B256::from(sig.r());
         let s = B256::from(sig.s());
         escrow
-            .settleTournamentRoot(tidb, root, deadline, v, r, s)
+            .settleTournamentRoot(tidb, root, total, deadline, v, r, s)
             .send()
             .await?
             .get_receipt()
             .await?;
         tracing::info!(%tid, %root, "settlement(onchain): tournament root committed");
         Ok(root)
+    }
+
+    async fn is_tournament_settled(&self, tid: Uuid) -> bool {
+        let tidb = game_id_to_bytes32(tid);
+        match self.contract().tournaments(tidb).call().await {
+            Ok(t) => t.settled,
+            Err(_) => false,
+        }
     }
 }
 

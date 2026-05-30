@@ -19,6 +19,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{Color, GameId};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -29,6 +30,8 @@ use crate::{build_wager, validate_tc, AppState, GameOutcome, MAX_STAKE};
 /// Fields larger than this settle via a Merkle root (winners claim individually)
 /// instead of a single direct payout transaction.
 const ROOT_SETTLE_THRESHOLD: usize = 16;
+/// Hard cap on tournament entrants (bounds the O(n^2) round-robin + pool math).
+const MAX_TOURNAMENT_PLAYERS: usize = 128;
 
 const OFFER_TTL: Duration = Duration::from_secs(3600);
 const TICKET_TTL: Duration = Duration::from_secs(3600);
@@ -54,6 +57,14 @@ impl Lobby {
         self.tickets.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
         self.tournaments.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
         self.gauntlets.lock().unwrap().retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
+    }
+
+    /// Drop game->mode routing entries for games that no longer exist (e.g. a
+    /// room that was evicted without emitting a finished outcome). Bounds the
+    /// two routing maps so an abandoned game can't leak an entry forever.
+    pub fn prune_games(&self, live: &std::collections::HashSet<GameId>) {
+        self.game_to_gauntlet.lock().unwrap().retain(|g, _| live.contains(g));
+        self.game_to_tournament.lock().unwrap().retain(|g, _| live.contains(g));
     }
 
     /// Update mode standings when a game finishes. Returns a follow-up action
@@ -410,6 +421,20 @@ async fn queue_join(
         None
     };
 
+    // Only a gauntlet session's owner may attribute games to it (prevents
+    // stat-poisoning a staked session via a crafted session_id).
+    if let Some(sid) = req.session_id {
+        let g = state.0.lobby.gauntlets.lock().unwrap();
+        if let Some(s) = g.get(&sid) {
+            if let Some(owner) = &s.addr {
+                match &addr {
+                    Some(a) if a.eq_ignore_ascii_case(owner) => {}
+                    _ => return Err(StatusCode::UNAUTHORIZED),
+                }
+            }
+        }
+    }
+
     let key = format!(
         "{}|{}|{}",
         req.stake.clone().unwrap_or_else(|| "0".into()),
@@ -699,13 +724,18 @@ struct IdResp {
 
 async fn tourney_create(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<TourneyCreateReq>,
 ) -> Result<Json<IdResp>, StatusCode> {
     validate_tc(req.initial_secs, req.increment_secs)?;
     let id = Uuid::new_v4();
 
-    // A buy-in tournament opens its on-chain pool now (fail-closed).
+    // A buy-in tournament opens its on-chain pool now (fail-closed). Require an
+    // authenticated caller so an anonymous request can't burn oracle gas.
     if let Some(buy_in_str) = &req.buy_in {
+        if state.authed_wallet(&headers).is_none() {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         let buy_in = buy_in_str.parse::<U256>().map_err(|_| StatusCode::BAD_REQUEST)?;
         if buy_in == U256::ZERO || buy_in > U256::from(MAX_STAKE) {
             return Err(StatusCode::BAD_REQUEST);
@@ -754,15 +784,22 @@ async fn tourney_join(
     Json(req): Json<JoinReq>,
 ) -> StatusCode {
     // Read the tournament's terms + whether this entrant is already in.
-    let (buy_in, status) = {
+    let (buy_in, status, full) = {
         let t = state.0.lobby.tournaments.lock().unwrap();
         match t.get(&id) {
-            Some(t) => (t.buy_in.clone(), t.status.clone()),
+            Some(t) => (
+                t.buy_in.clone(),
+                t.status.clone(),
+                t.players.len() >= MAX_TOURNAMENT_PLAYERS,
+            ),
             None => return StatusCode::NOT_FOUND,
         }
     };
     if status != "open" {
         return StatusCode::CONFLICT;
+    }
+    if full {
+        return StatusCode::CONFLICT; // entrant cap reached
     }
 
     // Buy-in tournament: entrant is the authenticated wallet; lock on-chain.
@@ -953,7 +990,10 @@ async fn distribute_pool(
     let mut by_rank = vec![0u128; n];
     let mut assigned = 0u128;
     for i in 0..n {
-        by_rank[i] = pool * weights[i] / 10_000;
+        by_rank[i] = pool
+            .checked_mul(weights[i])
+            .ok_or_else(|| anyhow::anyhow!("payout overflow"))?
+            / 10_000;
         assigned += by_rank[i];
     }
     if n > 0 {
@@ -979,7 +1019,8 @@ async fn distribute_pool(
     }
 
     // Large fields settle via a Merkle root (O(1) per winner claim); small
-    // fields settle directly in one transaction.
+    // fields settle directly. Settlement is enqueued to a DURABLE outbox (a
+    // worker drains it on-chain, with retry); with no DB we settle inline.
     if n > ROOT_SETTLE_THRESHOLD {
         // Only winners (amount > 0) become leaves; losers already paid at entry.
         let leaves: Vec<(Address, U256)> = addrs
@@ -988,17 +1029,37 @@ async fn distribute_pool(
             .filter(|(_, p)| **p > U256::ZERO)
             .map(|(a, p)| (*a, *p))
             .collect();
-        state.0.settlement.settle_tournament_root(tid, leaves.clone()).await?;
-        // Persist the leaves so the server can serve claim proofs.
+        // Persist leaves in memory so the server can serve claim proofs.
         if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&tid) {
             t.payout_leaves = leaves
                 .iter()
                 .map(|(a, p)| (format!("{a:?}"), p.to::<u128>()))
                 .collect();
         }
-        Ok(())
+        match &state.0.db {
+            Some(db) => {
+                let payload = json!({
+                    "leaves": leaves.iter()
+                        .map(|(a, p)| [format!("{a:?}"), p.to_string()])
+                        .collect::<Vec<_>>()
+                });
+                db.enqueue_tournament_settlement(tid, "root", payload).await?;
+                Ok(())
+            }
+            None => state.0.settlement.settle_tournament_root(tid, leaves).await.map(|_| ()),
+        }
     } else {
-        state.0.settlement.settle_tournament(tid, addrs, payouts).await
+        match &state.0.db {
+            Some(db) => {
+                let payload = json!({
+                    "winners": addrs.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                    "payouts": payouts.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                });
+                db.enqueue_tournament_settlement(tid, "direct", payload).await?;
+                Ok(())
+            }
+            None => state.0.settlement.settle_tournament(tid, addrs, payouts).await,
+        }
     }
 }
 
@@ -1008,19 +1069,46 @@ struct ClaimProof {
     proof: Vec<String>,
 }
 
+/// Parse `{ "leaves": [[addr, amount], ...] }` (durable outbox payload).
+fn parse_leaves(v: &serde_json::Value) -> Vec<(String, u128)> {
+    v.get("leaves")
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|pair| {
+                    let a = pair.get(0)?.as_str()?.to_string();
+                    let amt = pair.get(1)?.as_str()?.parse::<u128>().ok()?;
+                    Some((a, amt))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Serve a Merkle proof for a winner to claim from a root-settled tournament.
 async fn tourney_claim_proof(
     State(state): State<AppState>,
     Path((id, address)): Path<(Uuid, String)>,
 ) -> Result<Json<ClaimProof>, StatusCode> {
-    let leaves = {
+    // Prefer in-memory leaves; fall back to the durable outbox payload so
+    // proofs survive a server restart.
+    let mem = {
         let t = state.0.lobby.tournaments.lock().unwrap();
-        let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-        if t.payout_leaves.is_empty() {
-            return Err(StatusCode::NOT_FOUND); // not a root-settled tournament
-        }
-        t.payout_leaves.clone()
+        t.get(&id).map(|t| t.payout_leaves.clone()).unwrap_or_default()
     };
+    let leaves = if !mem.is_empty() {
+        mem
+    } else if let Some(db) = &state.0.db {
+        match db.tournament_payload(id).await {
+            Ok(Some(v)) => parse_leaves(&v),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    if leaves.is_empty() {
+        return Err(StatusCode::NOT_FOUND); // not a root-settled tournament
+    }
     let idx = leaves
         .iter()
         .position(|(a, _)| a.eq_ignore_ascii_case(&address))

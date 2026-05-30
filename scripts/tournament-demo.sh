@@ -61,7 +61,7 @@ S2=$(siwe $K2 $A2); S3=$(siwe $K3 $A3); S4=$(siwe $K4 $A4)
 echo "signed in 3 players"
 
 echo "== create 1 USDC buy-in tournament (opens pool on-chain) =="
-TID=$(curl -s -X POST $H/tournaments -H 'content-type: application/json' \
+TID=$(curl -s -X POST $H/tournaments -H 'content-type: application/json' -H "authorization: Bearer $S2" \
   -d '{"name":"Anvil Open","buy_in":"1000000","initial_secs":5,"increment_secs":0}' | jget "['tournament_id']")
 echo "tournament=$TID"
 

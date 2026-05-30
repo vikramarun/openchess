@@ -32,45 +32,75 @@ export default function GamePage() {
   const pos = useRef(Chess.default());
 
   useEffect(() => {
-    const ws = new WebSocket(`${SERVER_WS}/ws/game/${id}`);
-    ws.onopen = () => setStatus("watching");
-    ws.onclose = () => setStatus("disconnected");
-    ws.onerror = () => setStatus("connection error");
-    ws.onmessage = (ev) => {
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let retry = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const handle = (ev: MessageEvent) => {
       let msg: any;
       try {
         msg = JSON.parse(ev.data);
       } catch {
         return;
       }
-      switch (msg.type) {
-        case "game_start":
-          pos.current = Chess.default();
-          setFen(INITIAL_FEN);
-          setMoves([]);
-          setResult(null);
-          if (msg.clock) setClock(msg.clock);
-          break;
-        case "opponent_moved": {
-          const move = parseUci(msg.uci);
-          if (move) {
-            const san = makeSanAndPlay(pos.current, move);
-            setFen(makeFen(pos.current.toSetup()));
-            setMoves((m) => [...m, san]);
+      try {
+        switch (msg.type) {
+          case "game_start":
+            pos.current = Chess.default();
+            setFen(INITIAL_FEN);
+            setMoves([]);
+            setResult(null);
+            if (msg.clock) setClock(msg.clock);
+            break;
+          case "opponent_moved": {
+            const move = parseUci(msg.uci);
+            // Only apply a move that is legal in the current position — a stale
+            // or malformed server message can't corrupt the board or throw.
+            if (move && pos.current.isLegal(move)) {
+              const san = makeSanAndPlay(pos.current, move);
+              setFen(makeFen(pos.current.toSetup()));
+              setMoves((m) => [...m, san]);
+            }
+            if (msg.clock) setClock(msg.clock);
+            break;
           }
-          if (msg.clock) setClock(msg.clock);
-          break;
+          case "clock_sync":
+            if (msg.clock) setClock(msg.clock);
+            break;
+          case "game_over":
+            setResult(msg.result);
+            setStatus("finished");
+            break;
         }
-        case "clock_sync":
-          if (msg.clock) setClock(msg.clock);
-          break;
-        case "game_over":
-          setResult(msg.result);
-          setStatus("finished");
-          break;
+      } catch {
+        // never let one bad message kill the stream
       }
     };
-    return () => ws.close();
+
+    const connect = () => {
+      if (cancelled) return;
+      ws = new WebSocket(`${SERVER_WS}/ws/game/${id}`);
+      ws.onopen = () => {
+        retry = 0;
+        setStatus("watching");
+      };
+      ws.onmessage = handle;
+      ws.onerror = () => setStatus("connection error");
+      ws.onclose = () => {
+        if (cancelled) return;
+        setStatus("reconnecting…");
+        retry = Math.min(retry + 1, 6);
+        timer = setTimeout(connect, 500 * 2 ** (retry - 1)); // backoff to ~16s
+      };
+    };
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      ws?.close();
+    };
   }, [id]);
 
   const winnerText = result

@@ -1,11 +1,23 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import { base, baseSepolia } from "wagmi/chains";
 
-// projectId is required by WalletConnect; for the local demo a placeholder is
-// fine (injected wallets like MetaMask still work). Replace for production.
+// WalletConnect requires a real projectId (from WalletConnect Cloud). Without
+// one, WalletConnect pairing won't work — injected wallets (MetaMask) still do.
+// In production the env var must be set; locally we warn loudly rather than
+// silently shipping a non-functional WC transport.
+const projectId = process.env.NEXT_PUBLIC_WC_PROJECT_ID;
+if (!projectId && typeof window !== "undefined") {
+  // Warn loudly in the browser (don't throw at import — that would break SSR /
+  // static prerender). Injected wallets still work without WalletConnect.
+  // eslint-disable-next-line no-console
+  console.warn(
+    "NEXT_PUBLIC_WC_PROJECT_ID is not set — WalletConnect pairing will not work. Set it for production.",
+  );
+}
+
 export const wagmiConfig = getDefaultConfig({
   appName: "Chess Wager",
-  projectId: process.env.NEXT_PUBLIC_WC_PROJECT_ID || "demo-project-id",
+  projectId: projectId || "dev-only-no-walletconnect",
   chains: [base, baseSepolia],
   ssr: true,
 });

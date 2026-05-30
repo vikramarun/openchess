@@ -79,7 +79,7 @@ contract ChessEscrow {
         "TournamentResult(bytes32 tournamentId,bytes32 winnersHash,bytes32 payoutsHash,uint256 deadline)"
     );
     bytes32 public constant TOURNAMENT_ROOT_TYPEHASH = keccak256(
-        "TournamentRoot(bytes32 tournamentId,bytes32 payoutRoot,uint256 deadline)"
+        "TournamentRoot(bytes32 tournamentId,bytes32 payoutRoot,uint256 totalPayout,uint256 deadline)"
     );
 
     uint256 private _reentrancyGuard = 1;
@@ -350,11 +350,14 @@ contract ChessEscrow {
     }
 
     /// Settle a large field by committing a signed Merkle root of (account,
-    /// amount) leaves whose amounts sum to the pool (include the fee recipient
-    /// as a leaf for the rake). Winners then `claimTournament` individually.
+    /// amount) leaves. `totalPayout` is the sum of all leaf amounts and is part
+    /// of the signed data; the rake (pool - totalPayout) is taken immediately,
+    /// and claims are bounded by `totalPayout`, so no pool remainder can ever be
+    /// stranded (unclaimable). Winners then `claimTournament` individually.
     function settleTournamentRoot(
         bytes32 tid,
         bytes32 payoutRoot,
+        uint256 totalPayout,
         uint256 deadline,
         uint8 v,
         bytes32 r,
@@ -365,12 +368,18 @@ contract ChessEscrow {
         if (t.settled) revert AlreadySettled();
         if (block.timestamp > deadline) revert Expired();
         if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+        if (totalPayout > t.pool) revert BadDistribution();
 
-        bytes32 digest = digestTournamentRoot(tid, payoutRoot, deadline);
+        bytes32 digest = digestTournamentRoot(tid, payoutRoot, totalPayout, deadline);
         if (_recover(digest, v, r, s) != oracle) revert BadSignature();
 
         t.settled = true;
         t.payoutRoot = payoutRoot;
+        uint256 rake = t.pool - totalPayout;
+        t.pool = totalPayout; // claims are now bounded by the committed total
+        if (rake > 0) {
+            bankroll[feeRecipient] += rake;
+        }
         emit TournamentRootSet(tid, payoutRoot);
     }
 
@@ -480,13 +489,15 @@ contract ChessEscrow {
     }
 
     /// EIP-712 digest for a Merkle-root tournament settlement.
-    function digestTournamentRoot(bytes32 tid, bytes32 payoutRoot, uint256 deadline)
-        public
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash =
-            keccak256(abi.encode(TOURNAMENT_ROOT_TYPEHASH, tid, payoutRoot, deadline));
+    function digestTournamentRoot(
+        bytes32 tid,
+        bytes32 payoutRoot,
+        uint256 totalPayout,
+        uint256 deadline
+    ) public view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(TOURNAMENT_ROOT_TYPEHASH, tid, payoutRoot, totalPayout, deadline)
+        );
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 

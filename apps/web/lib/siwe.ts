@@ -4,9 +4,13 @@ import { SERVER_HTTP } from "./config";
  *  session token. `signMessageAsync` comes from wagmi's useSignMessage. */
 export async function signInWithEthereum(
   address: string,
+  chainId: number,
   signMessageAsync: (args: { message: string }) => Promise<string>,
 ): Promise<string> {
   const nonce = (await (await fetch(`${SERVER_HTTP}/auth/nonce`)).json()).nonce;
+  // The chain id must match the actually-connected chain (hardcoding it breaks
+  // Base Sepolia / any non-8453 chain). The domain (location.host) must match
+  // the server's SIWE_DOMAIN.
   const message = [
     `${location.host} wants you to sign in with your Ethereum account:`,
     address,
@@ -15,7 +19,7 @@ export async function signInWithEthereum(
     "",
     `URI: ${location.origin}`,
     "Version: 1",
-    "Chain ID: 8453",
+    `Chain ID: ${chainId}`,
     `Nonce: ${nonce}`,
     `Issued At: ${new Date().toISOString()}`,
   ].join("\n");

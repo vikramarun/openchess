@@ -205,3 +205,30 @@ deployment/ops or explicit product follow-ups.
 | M5 transport/token | Partly | Launch tokens remain **bearer capabilities** (not wallet-bound), but the seat's *funds* are fixed to the authenticated wallet at escrow open — a leaked token cannot redirect winnings, only throw the game. Concurrent hijack is blocked by the seat-occupancy guard, and the staked-offer's white token is only returned to the authenticated poster. Wallet-bound/single-use tokens, token-off-query, and wss/TLS remain deployment/product follow-ups. |
 | M6 fee mid-game | Fixed | `feeBps` snapshotted at `openGame`. |
 | Hygiene (LICENSE/CI/shutdown/tests) | Fixed | MIT LICENSE, GitHub Actions CI (Postgres + forge-before-cargo), graceful shutdown, server unit tests, README corrected. |
+
+---
+
+## Round 2 remediation (modes + Merkle audit)
+
+A second multi-agent audit (contracts + frontend + backend) was run after the
+two game modes and the Merkle-claim tournament settlement landed. No
+critical/drain bug; the genuine findings were fixed:
+
+| Finding | Sev | Status | Fix |
+|---|---|---|---|
+| Root-mode tournament could strand the pool remainder (leaves summing < pool) | Med | Fixed | `settleTournamentRoot` now takes a signed `totalPayout`; rake taken at settle; claims bounded by it → no unclaimable residual. |
+| Tournament settlement not durable (transient RPC strands the pool) | High | Fixed | New `tournament_outbox` table + `tournament_settlement_worker` (retry + reaper + idempotent `is_tournament_settled`), mirroring per-game settlement. Verified live. |
+| Unbounded entrants → quadratic-game DoS; pool overflow | High | Fixed | `MAX_TOURNAMENT_PLAYERS` cap in join; `checked_mul` in payout math. |
+| Gauntlet stats poisoning via crafted `session_id` | Med | Fixed | A staked session can only be attributed games by its owner wallet. |
+| `game_to_*` routing maps leak on abandoned games | Med | Fixed | Pruned against live rooms in the sweep task. |
+| Anonymous buy-in tournament create burns oracle gas | Low | Fixed | Buy-in create now requires a SIWE session. |
+| SIWE hardcoded Chain ID 8453 (breaks Base Sepolia / real domains); errors swallowed | High (FE) | Fixed | Chain id from the connected chain; sign-in errors surfaced in the UI. |
+| WalletConnect projectId placeholder fails silently | Med (FE) | Fixed | Warns loudly in-browser when unset (injected wallets still work). |
+| Spectator move-apply could throw and kill the WS loop | Low (FE) | Fixed | Legality-guarded apply + try/catch; plus WS reconnect with backoff. |
+| Session token in localStorage; no money UI yet | Med (FE) | Noted | Acceptable today (token gates nothing on-chain); move to httpOnly cookie before any funds-gating UI ships. |
+
+Confirmed correct by the audit: pooled-at-entry solvency, settle-vs-refund
+mutual exclusion, cross-tournament pool isolation, Merkle leaf double-hash
+(second-preimage safe), no locks held across `.await`, payout ≤ pool, and
+fail-closed on the money endpoints. Test count after round 2: **42** (20 Rust +
+22 Foundry).

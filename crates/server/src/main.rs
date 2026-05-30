@@ -106,10 +106,11 @@ async fn main() -> anyhow::Result<()> {
         results_tx,
     }));
 
-    // Drain the settlement outbox on-chain in the background (durable path).
+    // Drain the per-game + tournament settlement outboxes on-chain (durable).
     if let Some(db) = state.0.db.clone() {
         let settlement = state.0.settlement.clone();
-        tokio::spawn(settlement_worker(db, settlement));
+        tokio::spawn(settlement_worker(db.clone(), settlement.clone()));
+        tokio::spawn(tournament_settlement_worker(db, settlement));
     }
     // Evict finished games' rooms + tokens; periodically sweep stale lobby state.
     tokio::spawn(cleanup_task(state.clone(), cleanup_rx));
@@ -176,6 +177,10 @@ async fn sweep_task(state: AppState) {
         tick.tick().await;
         state.0.auth.sweep_expired();
         state.0.lobby.sweep_expired();
+        // Prune game->mode routing entries for games that no longer exist.
+        let live: std::collections::HashSet<GameId> =
+            state.0.rooms.lock().unwrap().keys().copied().collect();
+        state.0.lobby.prune_games(&live);
     }
 }
 
@@ -241,6 +246,105 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
             }
         }
     }
+}
+
+/// Durable tournament settlement worker (parallels `settlement_worker`).
+async fn tournament_settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
+    use tokio::time::{interval, Duration};
+    let mut tick = interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        if let Err(e) = db.requeue_stale_tournaments(300).await {
+            tracing::warn!("tournament outbox reaper failed: {e:#}");
+        }
+        let rows = match db.claim_tournament_settlements(8).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("tournament outbox claim failed: {e:#}");
+                continue;
+            }
+        };
+        for row in rows {
+            match settle_tournament_row(&settlement, &row).await {
+                Ok(()) => {
+                    let _ = db.set_tournament_settlement_status(row.id, "settled", None).await;
+                    tracing::info!(tid = %row.tid, "tournament outbox: settled on-chain");
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if settlement.is_tournament_settled(row.tid).await {
+                        let _ = db.set_tournament_settlement_status(row.id, "settled", None).await;
+                    } else if row.attempts >= persistence::MAX_SETTLE_ATTEMPTS {
+                        let _ = db.set_tournament_settlement_status(row.id, "failed", Some(&msg)).await;
+                        tracing::error!(tid = %row.tid, "tournament outbox: giving up: {msg}");
+                    } else {
+                        let _ = db.set_tournament_settlement_status(row.id, "pending", Some(&msg)).await;
+                        tracing::warn!(tid = %row.tid, "tournament outbox: transient, will retry: {msg}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn settle_tournament_row(
+    settlement: &Arc<dyn SettlementSink>,
+    row: &persistence::TournamentOutboxRow,
+) -> anyhow::Result<()> {
+    match row.mode.as_str() {
+        "direct" => {
+            let winners = json_addrs(&row.payload, "winners")?;
+            let payouts = json_u256s(&row.payload, "payouts")?;
+            settlement.settle_tournament(row.tid, winners, payouts).await
+        }
+        "root" => {
+            let leaves = json_leaves(&row.payload)?;
+            settlement.settle_tournament_root(row.tid, leaves).await.map(|_| ())
+        }
+        other => Err(anyhow::anyhow!("unknown tournament settle mode: {other}")),
+    }
+}
+
+fn json_addrs(v: &serde_json::Value, key: &str) -> anyhow::Result<Vec<Address>> {
+    v.get(key)
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| anyhow::anyhow!("missing {key}"))?
+        .iter()
+        .map(|s| {
+            s.as_str()
+                .and_then(|s| s.parse::<Address>().ok())
+                .ok_or_else(|| anyhow::anyhow!("bad address in {key}"))
+        })
+        .collect()
+}
+
+fn json_u256s(v: &serde_json::Value, key: &str) -> anyhow::Result<Vec<U256>> {
+    v.get(key)
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| anyhow::anyhow!("missing {key}"))?
+        .iter()
+        .map(|s| {
+            s.as_str()
+                .and_then(|s| s.parse::<U256>().ok())
+                .ok_or_else(|| anyhow::anyhow!("bad amount in {key}"))
+        })
+        .collect()
+}
+
+fn json_leaves(v: &serde_json::Value) -> anyhow::Result<Vec<(Address, U256)>> {
+    v.get("leaves")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| anyhow::anyhow!("missing leaves"))?
+        .iter()
+        .map(|pair| {
+            let a = pair.get(0).and_then(|x| x.as_str()).and_then(|s| s.parse::<Address>().ok());
+            let amt = pair.get(1).and_then(|x| x.as_str()).and_then(|s| s.parse::<U256>().ok());
+            match (a, amt) {
+                (Some(a), Some(amt)) => Ok((a, amt)),
+                _ => Err(anyhow::anyhow!("bad leaf")),
+            }
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
