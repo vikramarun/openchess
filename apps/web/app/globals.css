@@ -489,6 +489,71 @@ pre {
   color: var(--accent);
   font-family: ui-monospace, monospace;
 }
+.result-banner.won {
+  border-color: var(--accent);
+  background: #2a3a1c;
+}
+.result-banner.lost {
+  border-color: #7a3b3b;
+  background: #3a2222;
+}
+
+/* ---------- bankroll + wager forms ---------- */
+.bankroll-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.bankroll-stats .bk {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.bankroll-stats .bk-v {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.bankroll-stats .bk-l {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.bankroll-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.bankroll-actions input {
+  flex: 1;
+}
+.offer-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.offer-form .of-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.offer-form .of-field:first-child {
+  flex: 1;
+  min-width: 180px;
+}
+.offer-form .tc-row {
+  margin-top: 0;
+  width: 230px;
+}
 
 /* ---------- profile / stats ---------- */
 .profile-head {

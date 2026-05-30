@@ -109,9 +109,11 @@ honest checklist.
   operator could sign an incorrect result, matching a standard result-oracle
   trust model.
 - **No anti-collusion / wash-trading controls** (rating/Sybil) yet.
-- **In-browser wagering UI not built** — Quick Play is fully in-browser; wager
-  modes (park/gauntlet/tournament) run via the native client (the web pages are
-  labeled beta).
+- **In-browser wagering**: Park / Patzer now wagers fully in-browser — connect a
+  wallet, deposit USDC into the escrow (approve + `deposit`), post or accept a
+  staked offer, and your in-browser engine plays your seat while settlement runs
+  on-chain. The escrow address + chain are single-sourced from the server's
+  `GET /config`. Gauntlet & Tournament staking still run via the native client.
 
 ## Deploying the web app to Vercel
 

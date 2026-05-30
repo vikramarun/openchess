@@ -229,6 +229,13 @@ pub trait SettlementSink: Send + Sync {
     fn signer_address(&self) -> Option<String> {
         None
     }
+
+    /// The escrow contract address (checksummed), if this sink settles on-chain.
+    /// Published so the web app can wire deposits/withdrawals to the right
+    /// contract without a second place to configure it.
+    fn escrow_address(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Default no-chain sink: logs what it *would* settle. Used when the server is
@@ -454,6 +461,10 @@ impl SettlementSink for OnchainSettlement {
 
     fn signer_address(&self) -> Option<String> {
         Some(self.oracle.address().to_string())
+    }
+
+    fn escrow_address(&self) -> Option<String> {
+        Some(self.escrow.to_string())
     }
 }
 

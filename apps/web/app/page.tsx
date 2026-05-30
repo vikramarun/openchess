@@ -135,8 +135,9 @@ export default function Home() {
       </div>
 
       <p className="muted" style={{ textAlign: "center", marginTop: 18, fontSize: 13 }}>
-        Quick Play is fully in-browser. Wager modes are in <b>beta</b> — staked play runs
-        through the native client today; in-browser wagering is coming.
+        Quick Play and <b>Park / Patzer wagering</b> are fully in-browser — connect a wallet,
+        deposit USDC, and post or accept a staked game. Gauntlet &amp; Tournament staking run
+        through the native client for now.
       </p>
     </div>
   );

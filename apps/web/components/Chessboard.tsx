@@ -7,7 +7,13 @@ import { useEffect, useRef } from "react";
 // (the published npm package does not vendor its CSS assets).
 
 /** Read-only chessground board driven by a FEN string. */
-export function Chessboard({ fen }: { fen: string }) {
+export function Chessboard({
+  fen,
+  orientation = "white",
+}: {
+  fen: string;
+  orientation?: "white" | "black";
+}) {
   const el = useRef<HTMLDivElement>(null);
   const api = useRef<Api | null>(null);
 
@@ -16,6 +22,7 @@ export function Chessboard({ fen }: { fen: string }) {
       api.current = Chessground(el.current, {
         viewOnly: true,
         coordinates: true,
+        orientation,
         fen,
       });
     }
@@ -29,6 +36,10 @@ export function Chessboard({ fen }: { fen: string }) {
   useEffect(() => {
     api.current?.set({ fen });
   }, [fen]);
+
+  useEffect(() => {
+    api.current?.set({ orientation });
+  }, [orientation]);
 
   return (
     <div className="board-wrap">

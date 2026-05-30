@@ -176,6 +176,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(ready))
         .route("/oracle", get(oracle_info))
+        .route("/config", get(config_info))
         .route("/games", post(create_game))
         .merge(auth::routes())
         .merge(matchmaking::routes())
@@ -237,6 +238,30 @@ struct OracleInfo {
 async fn oracle_info(State(state): State<AppState>) -> Json<OracleInfo> {
     Json(OracleInfo {
         address: state.0.settlement.signer_address(),
+    })
+}
+
+#[derive(Serialize)]
+struct ConfigInfo {
+    /// Escrow contract address (None ⇒ wagering disabled on this server).
+    escrow: Option<String>,
+    /// Chain the SIWE messages + escrow live on (matches `SIWE_CHAIN_ID`).
+    chain_id: u64,
+    /// Whether wagered play is available (on-chain settlement is configured).
+    wager_enabled: bool,
+}
+
+/// Publishes the on-chain config the web app needs to wire deposits/wagers:
+/// the escrow address and expected chain — single-sourced from the server.
+async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
+    let chain_id = std::env::var("SIWE_CHAIN_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8453);
+    Json(ConfigInfo {
+        escrow: state.0.settlement.escrow_address(),
+        chain_id,
+        wager_enabled: state.0.settlement.is_onchain(),
     })
 }
 
