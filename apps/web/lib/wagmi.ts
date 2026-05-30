@@ -15,9 +15,14 @@ if (!projectId && typeof window !== "undefined") {
   );
 }
 
-export const wagmiConfig = getDefaultConfig({
-  appName: "Chess Wager",
-  projectId: projectId || "dev-only-no-walletconnect",
-  chains: [base, baseSepolia],
-  ssr: true,
-});
+// Built lazily on the client (see providers.tsx) so getDefaultConfig — which
+// eagerly touches browser-only storage (indexedDB) — never runs during SSR /
+// static prerender.
+export function makeWagmiConfig() {
+  return getDefaultConfig({
+    appName: "Chess Wager",
+    projectId: projectId || "dev-only-no-walletconnect",
+    chains: [base, baseSepolia],
+    ssr: true,
+  });
+}

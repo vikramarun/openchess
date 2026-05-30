@@ -8,7 +8,7 @@
 //! bound to that wallet.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -39,7 +39,7 @@ pub struct Auth {
 
 impl Auth {
     pub fn wallet_for_token(&self, token: &str) -> Option<String> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock();
         let (wallet, issued) = sessions.get(token)?;
         if issued.elapsed() > SESSION_TTL {
             return None;
@@ -51,11 +51,9 @@ impl Auth {
     pub fn sweep_expired(&self) {
         self.nonces
             .lock()
-            .unwrap()
             .retain(|_, t| t.elapsed() < NONCE_TTL);
         self.sessions
             .lock()
-            .unwrap()
             .retain(|_, (_, t)| t.elapsed() < SESSION_TTL);
     }
 }
@@ -79,7 +77,6 @@ async fn nonce(State(state): State<AppState>) -> Json<NonceResp> {
         .auth
         .nonces
         .lock()
-        .unwrap()
         .insert(nonce.clone(), Instant::now());
     Json(NonceResp { nonce })
 }
@@ -109,7 +106,7 @@ async fn verify(
 
     // Nonce must be one we issued and still fresh; consume it (single-use).
     {
-        let mut nonces = state.0.auth.nonces.lock().unwrap();
+        let mut nonces = state.0.auth.nonces.lock();
         match nonces.remove(&fields.nonce) {
             Some(issued) if issued.elapsed() < NONCE_TTL => {}
             _ => return Err(StatusCode::UNAUTHORIZED),
@@ -130,7 +127,6 @@ async fn verify(
         .auth
         .sessions
         .lock()
-        .unwrap()
         .insert(token.clone(), (recovered.clone(), Instant::now()));
 
     Ok(Json(VerifyResp {

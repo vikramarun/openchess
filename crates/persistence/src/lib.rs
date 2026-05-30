@@ -71,6 +71,12 @@ impl Db {
         Ok(())
     }
 
+    /// Liveness check for the `/ready` endpoint.
+    pub async fn ping(&self) -> Result<()> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Create or fetch a user keyed by wallet address, returning its id.
     pub async fn upsert_user(&self, wallet: &str) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(

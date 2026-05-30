@@ -32,6 +32,8 @@ pub async fn ws_handler(
         .filter(|(g, _)| *g == game_id)
         .map(|(_, c)| c);
 
+    // Bound message/frame size — clients only ever send small JSON envelopes.
+    let ws = ws.max_message_size(16 * 1024).max_frame_size(16 * 1024);
     ws.on_upgrade(move |socket| async move {
         match seat {
             Some(color) => handle_player(state, game_id, color, socket).await,
@@ -113,13 +115,17 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socke
                     ClientMessage::Move {
                         ply, uci_move, ..
                     } => {
-                        let _ = cmd_tx
-                            .send(RoomCmd::Move {
-                                color,
-                                ply,
-                                uci_move,
-                            })
-                            .await;
+                        // A UCI move is at most 5 chars (e.g. e7e8q); drop
+                        // anything longer before it reaches the engine.
+                        if uci_move.len() <= 6 {
+                            let _ = cmd_tx
+                                .send(RoomCmd::Move {
+                                    color,
+                                    ply,
+                                    uci_move,
+                                })
+                                .await;
+                        }
                     }
                     ClientMessage::Resign { .. } => {
                         let _ = cmd_tx.send(RoomCmd::Resign { color }).await;

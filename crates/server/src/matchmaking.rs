@@ -10,7 +10,7 @@
 //! TTL eviction (the Redis layer in production).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
@@ -53,26 +53,26 @@ pub struct Lobby {
 
 impl Lobby {
     pub fn sweep_expired(&self) {
-        self.park.lock().unwrap().retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
-        self.tickets.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
-        self.tournaments.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
-        self.gauntlets.lock().unwrap().retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
+        self.park.lock().retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
+        self.tickets.lock().retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
+        self.tournaments.lock().retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
+        self.gauntlets.lock().retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
     }
 
     /// Drop game->mode routing entries for games that no longer exist (e.g. a
     /// room that was evicted without emitting a finished outcome). Bounds the
     /// two routing maps so an abandoned game can't leak an entry forever.
     pub fn prune_games(&self, live: &std::collections::HashSet<GameId>) {
-        self.game_to_gauntlet.lock().unwrap().retain(|g, _| live.contains(g));
-        self.game_to_tournament.lock().unwrap().retain(|g, _| live.contains(g));
+        self.game_to_gauntlet.lock().retain(|g, _| live.contains(g));
+        self.game_to_tournament.lock().retain(|g, _| live.contains(g));
     }
 
     /// Update mode standings when a game finishes. Returns a follow-up action
     /// (e.g. a completed tournament that needs settling).
     pub fn record_outcome(&self, game_id: GameId, winner: Option<Color>) -> OutcomeAction {
         // Gauntlet: bump each participating session's W/L/D + game count.
-        if let Some(entries) = self.game_to_gauntlet.lock().unwrap().remove(&game_id) {
-            let mut g = self.gauntlets.lock().unwrap();
+        if let Some(entries) = self.game_to_gauntlet.lock().remove(&game_id) {
+            let mut g = self.gauntlets.lock();
             for (sid, color) in entries {
                 if let Some(s) = g.get_mut(&sid) {
                     s.games += 1;
@@ -88,8 +88,8 @@ impl Lobby {
         // Tournament: award points and, when the last game completes, signal
         // for settlement (handled in `results_task`).
         let mut complete = None;
-        if let Some(tid) = self.game_to_tournament.lock().unwrap().remove(&game_id) {
-            let mut tourneys = self.tournaments.lock().unwrap();
+        if let Some(tid) = self.game_to_tournament.lock().remove(&game_id) {
+            let mut tourneys = self.tournaments.lock();
             if let Some(t) = tourneys.get_mut(&tid) {
                 if let Some(g) = t.games.iter().find(|g| g.game_id == game_id) {
                     let (w, b) = (g.white.clone(), g.black.clone());
@@ -201,7 +201,7 @@ async fn park_create(
         None
     };
     let id = Uuid::new_v4();
-    state.0.lobby.park.lock().unwrap().insert(
+    state.0.lobby.park.lock().insert(
         id,
         ParkOffer {
             poster_addr,
@@ -227,7 +227,7 @@ struct OfferSummary {
 }
 
 async fn park_list(State(state): State<AppState>) -> Json<Vec<OfferSummary>> {
-    let park = state.0.lobby.park.lock().unwrap();
+    let park = state.0.lobby.park.lock();
     Json(
         park.iter()
             .filter(|(_, o)| o.status == "open")
@@ -257,7 +257,7 @@ async fn park_accept(
 ) -> Result<Json<ParkAcceptResp>, StatusCode> {
     // Claim the offer (open -> matching), capturing its terms.
     let (poster_addr, stake, initial_secs, increment_secs) = {
-        let mut park = state.0.lobby.park.lock().unwrap();
+        let mut park = state.0.lobby.park.lock();
         let offer = park.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
         if offer.status != "open" {
             return Err(StatusCode::CONFLICT);
@@ -272,7 +272,7 @@ async fn park_accept(
     };
 
     let unclaim = || {
-        if let Some(o) = state.0.lobby.park.lock().unwrap().get_mut(&id) {
+        if let Some(o) = state.0.lobby.park.lock().get_mut(&id) {
             o.status = "open".into();
         }
     };
@@ -318,7 +318,7 @@ async fn park_accept(
         }
     };
 
-    if let Some(offer) = state.0.lobby.park.lock().unwrap().get_mut(&id) {
+    if let Some(offer) = state.0.lobby.park.lock().get_mut(&id) {
         offer.status = "matched".into();
         offer.game_id = Some(resp.game_id);
         offer.poster_token = Some(resp.white_token.clone());
@@ -347,7 +347,7 @@ async fn park_get(
     // For a wagered offer, only the authenticated poster may retrieve the white
     // launch token (else anyone polling the id could grab it and throw the
     // staked game). Casual offers carry no stake, so the token is returned freely.
-    let park = state.0.lobby.park.lock().unwrap();
+    let park = state.0.lobby.park.lock();
     match park.get(&id) {
         Some(o) => {
             let authorized = match &o.poster_addr {
@@ -424,7 +424,7 @@ async fn queue_join(
     // Only a gauntlet session's owner may attribute games to it (prevents
     // stat-poisoning a staked session via a crafted session_id).
     if let Some(sid) = req.session_id {
-        let g = state.0.lobby.gauntlets.lock().unwrap();
+        let g = state.0.lobby.gauntlets.lock();
         if let Some(s) = g.get(&sid) {
             if let Some(owner) = &s.addr {
                 match &addr {
@@ -442,7 +442,7 @@ async fn queue_join(
         req.increment_secs
     );
     let my_id = Uuid::new_v4();
-    state.0.lobby.tickets.lock().unwrap().insert(
+    state.0.lobby.tickets.lock().insert(
         my_id,
         Ticket {
             addr: addr.clone(),
@@ -456,7 +456,7 @@ async fn queue_join(
     );
 
     let opponent = {
-        let mut queue = state.0.lobby.queue.lock().unwrap();
+        let mut queue = state.0.lobby.queue.lock();
         queue.entry(key.clone()).or_default().pop_front()
     };
 
@@ -466,7 +466,6 @@ async fn queue_join(
             .lobby
             .tickets
             .lock()
-            .unwrap()
             .get(&opp_id)
             .map(|t| (t.addr.clone(), t.session_id))
             .unwrap_or((None, None));
@@ -499,11 +498,10 @@ async fn queue_join(
                 .lobby
                 .game_to_gauntlet
                 .lock()
-                .unwrap()
                 .insert(resp.game_id, links);
         }
 
-        let mut tickets = state.0.lobby.tickets.lock().unwrap();
+        let mut tickets = state.0.lobby.tickets.lock();
         if let Some(t) = tickets.get_mut(&opp_id) {
             t.status = "matched".into();
             t.game_id = Some(resp.game_id);
@@ -522,7 +520,6 @@ async fn queue_join(
             .lobby
             .queue
             .lock()
-            .unwrap()
             .entry(key)
             .or_default()
             .push_back(my_id);
@@ -540,7 +537,7 @@ struct TicketResp {
 }
 
 async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<TicketResp> {
-    let tickets = state.0.lobby.tickets.lock().unwrap();
+    let tickets = state.0.lobby.tickets.lock();
     match tickets.get(&id) {
         Some(t) => Json(TicketResp {
             status: t.status.clone(),
@@ -603,7 +600,7 @@ async fn gauntlet_start(
         None
     };
     let id = Uuid::new_v4();
-    state.0.lobby.gauntlets.lock().unwrap().insert(
+    state.0.lobby.gauntlets.lock().insert(
         id,
         GauntletSession {
             addr,
@@ -642,7 +639,7 @@ async fn gauntlet_get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<GauntletView>, StatusCode> {
-    let g = state.0.lobby.gauntlets.lock().unwrap();
+    let g = state.0.lobby.gauntlets.lock();
     let s = g.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(GauntletView {
         status: s.status.clone(),
@@ -661,7 +658,7 @@ async fn gauntlet_stop(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> StatusCode {
-    let mut g = state.0.lobby.gauntlets.lock().unwrap();
+    let mut g = state.0.lobby.gauntlets.lock();
     match g.get_mut(&id) {
         Some(s) => {
             // A staked session can only be stopped by its owner wallet.
@@ -751,7 +748,7 @@ async fn tourney_create(
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
     }
 
-    state.0.lobby.tournaments.lock().unwrap().insert(
+    state.0.lobby.tournaments.lock().insert(
         id,
         Tournament {
             name: req.name,
@@ -785,7 +782,7 @@ async fn tourney_join(
 ) -> StatusCode {
     // Read the tournament's terms + whether this entrant is already in.
     let (buy_in, status, full) = {
-        let t = state.0.lobby.tournaments.lock().unwrap();
+        let t = state.0.lobby.tournaments.lock();
         match t.get(&id) {
             Some(t) => (
                 t.buy_in.clone(),
@@ -810,7 +807,7 @@ async fn tourney_join(
         };
         // Already entered? (avoid a duplicate on-chain entry).
         {
-            let t = state.0.lobby.tournaments.lock().unwrap();
+            let t = state.0.lobby.tournaments.lock();
             if let Some(t) = t.get(&id) {
                 if t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
                     return StatusCode::OK;
@@ -825,7 +822,7 @@ async fn tourney_join(
         if state.0.settlement.enter_tournament(id, addr).await.is_err() {
             return StatusCode::BAD_GATEWAY;
         }
-        let mut t = state.0.lobby.tournaments.lock().unwrap();
+        let mut t = state.0.lobby.tournaments.lock();
         if let Some(t) = t.get_mut(&id) {
             if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
                 t.players.push(wallet);
@@ -838,7 +835,7 @@ async fn tourney_join(
             Some(n) => n,
             None => return StatusCode::BAD_REQUEST,
         };
-        let mut t = state.0.lobby.tournaments.lock().unwrap();
+        let mut t = state.0.lobby.tournaments.lock();
         if let Some(t) = t.get_mut(&id) {
             if !t.players.contains(&name) {
                 t.players.push(name);
@@ -861,7 +858,7 @@ async fn tourney_get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TourneyView>, StatusCode> {
-    let t = state.0.lobby.tournaments.lock().unwrap();
+    let t = state.0.lobby.tournaments.lock();
     let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(TourneyView {
         name: t.name.clone(),
@@ -873,7 +870,7 @@ async fn tourney_get(
 }
 
 async fn tourney_list(State(state): State<AppState>) -> Json<Vec<IdResp>> {
-    let t = state.0.lobby.tournaments.lock().unwrap();
+    let t = state.0.lobby.tournaments.lock();
     Json(t.keys().map(|id| IdResp { tournament_id: *id }).collect())
 }
 
@@ -885,7 +882,7 @@ async fn tourney_start(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
     let (players, tc) = {
-        let mut t = state.0.lobby.tournaments.lock().unwrap();
+        let mut t = state.0.lobby.tournaments.lock();
         let t = t.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
         if t.status != "open" || t.players.len() < 2 {
             return Err(StatusCode::CONFLICT);
@@ -911,13 +908,13 @@ async fn tourney_start(
         }
     }
 
-    if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&id) {
+    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
         t.games = games.clone();
         t.remaining = games.len();
     }
     // Register each game to the tournament so the results dispatcher can score it.
     {
-        let mut map = state.0.lobby.game_to_tournament.lock().unwrap();
+        let mut map = state.0.lobby.game_to_tournament.lock();
         for g in &games {
             map.insert(g.game_id, id);
         }
@@ -930,7 +927,7 @@ async fn tourney_start(
 async fn settle_tournament(state: &AppState, tid: Uuid) {
     // Snapshot terms + final standings (all entrants, including 0-score).
     let (buy_in, standings) = {
-        let tourneys = state.0.lobby.tournaments.lock().unwrap();
+        let tourneys = state.0.lobby.tournaments.lock();
         let Some(t) = tourneys.get(&tid) else {
             return;
         };
@@ -951,7 +948,7 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
             return;
         }
     }
-    if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&tid) {
+    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
         t.status = "settled".into();
     }
 }
@@ -1030,7 +1027,7 @@ async fn distribute_pool(
             .map(|(a, p)| (*a, *p))
             .collect();
         // Persist leaves in memory so the server can serve claim proofs.
-        if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&tid) {
+        if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
             t.payout_leaves = leaves
                 .iter()
                 .map(|(a, p)| (format!("{a:?}"), p.to::<u128>()))
@@ -1093,7 +1090,7 @@ async fn tourney_claim_proof(
     // Prefer in-memory leaves; fall back to the durable outbox payload so
     // proofs survive a server restart.
     let mem = {
-        let t = state.0.lobby.tournaments.lock().unwrap();
+        let t = state.0.lobby.tournaments.lock();
         t.get(&id).map(|t| t.payout_leaves.clone()).unwrap_or_default()
     };
     let leaves = if !mem.is_empty() {

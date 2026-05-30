@@ -13,7 +13,9 @@ mod room;
 mod ws;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -106,15 +108,49 @@ async fn main() -> anyhow::Result<()> {
         results_tx,
     }));
 
+    // Production profile: refuse to start half-configured, so a misconfigured
+    // node fails loudly at boot instead of silently rejecting every wager.
+    if env_flag("REQUIRE_ONCHAIN") {
+        let mut problems = Vec::new();
+        if state.0.db.is_none() {
+            problems.push("DATABASE_URL unset");
+        }
+        if !state.0.settlement.is_onchain() {
+            problems.push("on-chain settlement not configured (RPC_URL/ESCROW_ADDR/ORACLE_KEY)");
+        }
+        if std::env::var("SIWE_DOMAIN").is_err() {
+            problems.push("SIWE_DOMAIN unset");
+        }
+        if std::env::var("WEB_ORIGIN").is_err() {
+            problems.push("WEB_ORIGIN unset");
+        }
+        if !problems.is_empty() {
+            anyhow::bail!("REQUIRE_ONCHAIN set but misconfigured: {}", problems.join("; "));
+        }
+        tracing::info!("production profile OK (db + on-chain settlement + SIWE_DOMAIN + WEB_ORIGIN)");
+    }
+
     // Drain the per-game + tournament settlement outboxes on-chain (durable).
+    // Supervised: restarted if they ever exit/panic so settlement never stops.
     if let Some(db) = state.0.db.clone() {
-        let settlement = state.0.settlement.clone();
-        tokio::spawn(settlement_worker(db.clone(), settlement.clone()));
-        tokio::spawn(tournament_settlement_worker(db, settlement));
+        let s = state.0.settlement.clone();
+        {
+            let (db, s) = (db.clone(), s.clone());
+            supervise("settlement", move || settlement_worker(db.clone(), s.clone()));
+        }
+        {
+            let (db, s) = (db.clone(), s.clone());
+            supervise("tournament-settlement", move || {
+                tournament_settlement_worker(db.clone(), s.clone())
+            });
+        }
     }
     // Evict finished games' rooms + tokens; periodically sweep stale lobby state.
     tokio::spawn(cleanup_task(state.clone(), cleanup_rx));
-    tokio::spawn(sweep_task(state.clone()));
+    {
+        let st = state.clone();
+        supervise("sweep", move || sweep_task(st.clone()));
+    }
     // Update mode standings (gauntlet/tournament) as games finish.
     tokio::spawn(matchmaking::results_task(state.clone(), results_rx));
 
@@ -134,10 +170,12 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/ready", get(ready))
         .route("/games", post(create_game))
         .merge(auth::routes())
         .merge(matchmaking::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);
 
@@ -150,20 +188,66 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn env_flag(key: &str) -> bool {
+    matches!(std::env::var(key).ok().as_deref(), Some("1") | Some("true") | Some("TRUE"))
+}
+
+/// Spawn a long-lived worker and restart it if it ever exits or panics, so a
+/// transient failure can't permanently stop settlement/sweeps.
+fn supervise<F, Fut>(name: &'static str, make: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match tokio::spawn(make()).await {
+                Ok(()) => tracing::error!("worker {name} exited; restarting in 1s"),
+                Err(e) => tracing::error!("worker {name} panicked ({e}); restarting in 1s"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+}
+
+/// Readiness: distinct from liveness `/health` — checks the DB is reachable so a
+/// node that lost Postgres is pulled from the load balancer.
+async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode> {
+    if let Some(db) = &state.0.db {
+        if db.ping().await.is_err() {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+    Ok("ready")
+}
+
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        // SIGTERM is what Kubernetes/systemd send on stop.
+        if let Ok(mut s) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = term => {} }
     tracing::info!("shutdown signal received");
 }
 
 /// Remove a finished game's room handle and its launch tokens.
 async fn cleanup_task(state: AppState, mut rx: mpsc::Receiver<GameId>) {
     while let Some(game_id) = rx.recv().await {
-        state.0.rooms.lock().unwrap().remove(&game_id);
+        state.0.rooms.lock().remove(&game_id);
         state
             .0
             .tokens
             .lock()
-            .unwrap()
             .retain(|_, (g, _)| *g != game_id);
         tracing::debug!(%game_id, "evicted finished game state");
     }
@@ -179,7 +263,7 @@ async fn sweep_task(state: AppState) {
         state.0.lobby.sweep_expired();
         // Prune game->mode routing entries for games that no longer exist.
         let live: std::collections::HashSet<GameId> =
-            state.0.rooms.lock().unwrap().keys().copied().collect();
+            state.0.rooms.lock().keys().copied().collect();
         state.0.lobby.prune_games(&live);
     }
 }
@@ -493,12 +577,12 @@ impl AppState {
             self.0.cleanup_tx.clone(),
             self.0.results_tx.clone(),
         );
-        self.0.rooms.lock().unwrap().insert(game_id, handle);
+        self.0.rooms.lock().insert(game_id, handle);
 
         let white_token = Uuid::new_v4().simple().to_string();
         let black_token = Uuid::new_v4().simple().to_string();
         {
-            let mut tokens = self.0.tokens.lock().unwrap();
+            let mut tokens = self.0.tokens.lock();
             tokens.insert(white_token.clone(), (game_id, Color::White));
             tokens.insert(black_token.clone(), (game_id, Color::Black));
         }
@@ -514,7 +598,7 @@ impl AppState {
 
     /// Resolve a launch token to its (game, color) seat.
     pub fn token_seat(&self, token: &str) -> Option<(GameId, Color)> {
-        self.0.tokens.lock().unwrap().get(token).copied()
+        self.0.tokens.lock().get(token).copied()
     }
 
     /// The authenticated wallet for a request, from its `Authorization: Bearer`.
@@ -535,7 +619,7 @@ impl AppState {
         tokio::sync::mpsc::Sender<room::RoomCmd>,
         tokio::sync::broadcast::Receiver<protocol::ServerMessage>,
     )> {
-        let rooms = self.0.rooms.lock().unwrap();
+        let rooms = self.0.rooms.lock();
         let handle = rooms.get(game_id)?;
         Some((handle.cmd_tx.clone(), handle.spectate_tx.subscribe()))
     }

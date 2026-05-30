@@ -16,7 +16,13 @@ export class BrowserEngine {
         typeof e.data === "string" ? e.data : (e.data && e.data.data) || "";
       for (const l of [...this.listeners]) l(line);
     };
-    this.ready = this.handshake();
+    // If the worker script fails to load / instantiate, reject `ready` so the
+    // UI can degrade gracefully instead of hanging on the handshake timeout.
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.worker.onerror = () =>
+        reject(new Error("Stockfish worker failed to load"));
+      this.handshake().then(resolve).catch(reject);
+    });
   }
 
   private send(cmd: string) {

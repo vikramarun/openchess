@@ -11,10 +11,15 @@ full architecture and rationale.
 
 ## Status
 
-End-to-end and tested: **36 automated tests pass** (18 Rust + 18 Foundry). A
-full security audit ([AUDIT.md](AUDIT.md)) was performed and the Critical/High
-findings remediated (see *Security hardening* below). All three game modes are
-implemented end-to-end, including on-chain tournament pool distribution.
+End-to-end and tested: **42 automated tests pass** (20 Rust + 22 Foundry). Three
+full audit rounds ([AUDIT.md](AUDIT.md)) with the Critical/High findings
+remediated. All three game modes work end-to-end (incl. on-chain tournament pool
+distribution + Merkle-claim for large fields), and the web app runs a Stockfish
+engine **in the browser** (WASM — the user's CPU, zero server cost).
+
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for system/flow/data diagrams and
+**[PRODUCTION.md](PRODUCTION.md)** for the go-live checklist + operator action
+items (third-party audit, oracle key/KMS, deploy, infra, legal).
 
 | Component | Crate / dir | Status |
 |---|---|---|

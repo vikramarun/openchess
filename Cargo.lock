@@ -4521,6 +4521,7 @@ dependencies = [
  "futures-util",
  "game-engine",
  "ledger",
+ "parking_lot",
  "persistence",
  "protocol",
  "rust_decimal",

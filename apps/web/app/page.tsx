@@ -91,6 +91,11 @@ export default function Home() {
           </div>
         </Link>
       </div>
+
+      <p className="muted" style={{ textAlign: "center", marginTop: 18, fontSize: 13 }}>
+        Quick Play is fully in-browser. Wager modes are in <b>beta</b> — staked play runs
+        through the native client today; in-browser wagering is coming.
+      </p>
     </div>
   );
 }

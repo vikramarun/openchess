@@ -68,10 +68,19 @@ export function playSeat(
               sig: null,
             });
           } catch {
+            // Engine failed/timed out — resign this seat rather than silently
+            // stalling the game forever.
+            send({ type: "resign", game_id: gameId });
             ws.close();
           }
           break;
         }
+        case "move_rejected":
+          // Our move was illegal/late — the engine is misbehaving; resign
+          // instead of hanging (the server won't re-prompt this ply).
+          send({ type: "resign", game_id: gameId });
+          ws.close();
+          break;
         case "game_over":
           ws.close();
           resolve();

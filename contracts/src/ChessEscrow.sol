@@ -31,7 +31,11 @@ contract ChessEscrow {
     address public pendingOwner;  // Ownable2Step
     address public feeRecipient;  // accrues rake as a normal bankroll balance
     uint16 public feeBps;         // rake in basis points (e.g. 100 = 1%)
-    uint64 public settleTimeout;  // seconds after open before timeout refund
+    // Set once at construction. Do NOT add a setter: it is used live as
+    // `openedAt + settleTimeout` in the settle/refund windows, so changing it
+    // would retroactively move those boundaries for in-flight games/tournaments.
+    // If it ever must change, snapshot it per-game like `feeBps`.
+    uint64 public settleTimeout;
     bool public paused;
 
     mapping(address => uint256) public bankroll; // total deposited per user
@@ -97,7 +101,8 @@ contract ChessEscrow {
     event TournamentRootSet(bytes32 indexed tournamentId, bytes32 payoutRoot);
     event TournamentClaimed(bytes32 indexed tournamentId, address indexed account, uint256 amount);
     event TournamentRefunded(bytes32 indexed tournamentId, address indexed account);
-    event OracleUpdated(address oracle);
+    event OracleUpdated(address indexed oldOracle, address indexed newOracle);
+    event FeeUpdated(address indexed feeRecipient, uint16 feeBps);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event PausedSet(bool paused);
@@ -427,8 +432,8 @@ contract ChessEscrow {
 
     function setOracle(address oracle_) external onlyOwner {
         require(oracle_ != address(0), "zero addr");
+        emit OracleUpdated(oracle, oracle_);
         oracle = oracle_;
-        emit OracleUpdated(oracle_);
     }
 
     function setFee(address feeRecipient_, uint16 feeBps_) external onlyOwner {
@@ -436,6 +441,7 @@ contract ChessEscrow {
         require(feeBps_ <= 1_000, "fee too high"); // hard cap 10%
         feeRecipient = feeRecipient_;
         feeBps = feeBps_;
+        emit FeeUpdated(feeRecipient_, feeBps_);
     }
 
     function setPaused(bool paused_) external onlyOwner {

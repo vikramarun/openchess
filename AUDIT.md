@@ -232,3 +232,33 @@ mutual exclusion, cross-tournament pool isolation, Merkle leaf double-hash
 (second-preimage safe), no locks held across `.await`, payout ≤ pool, and
 fail-closed on the money endpoints. Test count after round 2: **42** (20 Rust +
 22 Foundry).
+
+---
+
+## Round 3 — final audit + production-readiness
+
+A third full audit (contract pre-deploy, backend ops-readiness, frontend + WASM
+engine) found **no remaining fund-loss bug**. Code-fixable items were fixed; the
+rest are operator/infra actions tracked in `PRODUCTION.md`.
+
+**Fixed in code:**
+- Contract: `FeeUpdated` event + `oldOracle` in `OracleUpdated` (indexer
+  reconciliation); explicit no-`settleTimeout`-setter guard comment; production
+  `script/Deploy.s.sol` (canonical Base USDC, env-driven, verifiable).
+- Backend: non-poisoning locks (`parking_lot`) so one panicked handler can't down
+  an endpoint; supervised settlement/sweep workers (auto-restart); `REQUIRE_ONCHAIN`
+  fail-fast boot profile; `/ready` (DB) distinct from `/health`; `TraceLayer`;
+  SIGTERM-aware graceful shutdown; WS message/frame size caps + UCI-length cap.
+- Frontend: WASM engine load-failure handling (`worker.onerror` rejects ready);
+  resilient play client (resign instead of silent stall on engine failure /
+  `move_rejected`); SRI on CDN stylesheets; client-only wagmi config (kills the
+  `indexedDB` prerender warning); honest "beta" labeling of wager modes.
+
+**Flagged to the operator (see `PRODUCTION.md`):** third-party contract audit;
+deploy+verify with chosen params; HSM/KMS oracle key + multisig/timelock owner;
+single-node-only (Redis/sharding needed for >1 replica); managed Postgres +
+one-shot migrations; TLS + edge rate-limiting; settlement/outbox alerting;
+legal/AML/licensing review; tournament-restart durability caveat; verifiable
+results (`server_sig` + dispute window) as the remaining trust-model TODO.
+
+See `ARCHITECTURE.md` for system/flow/data diagrams.
