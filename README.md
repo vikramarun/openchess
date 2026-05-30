@@ -11,9 +11,10 @@ full architecture and rationale.
 
 ## Status
 
-End-to-end and tested: **30 automated tests pass** (16 Rust + 14 Foundry). A
+End-to-end and tested: **36 automated tests pass** (18 Rust + 18 Foundry). A
 full security audit ([AUDIT.md](AUDIT.md)) was performed and the Critical/High
-findings remediated (see *Security hardening* below).
+findings remediated (see *Security hardening* below). All three game modes are
+implemented end-to-end, including on-chain tournament pool distribution.
 
 | Component | Crate / dir | Status |
 |---|---|---|
@@ -21,7 +22,7 @@ findings remediated (see *Security hardening* below).
 | Authoritative game engine (shakmaty) | `crates/game-engine` | ✅ 6 tests |
 | BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish; 3 book tests |
 | Game server (WS hub + rooms + 3 modes + SIWE) | `crates/server` | ✅ live demos; 2 unit tests |
-| Non-custodial escrow + oracle | `contracts/ChessEscrow.sol` | ✅ 14 Foundry tests |
+| Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 18 Foundry tests |
 | On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests + live demo |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip test + live |
 | Web app (create + live spectator + wallet + SIWE) | `apps/web` | ✅ verified in-browser |
@@ -38,10 +39,18 @@ findings remediated (see *Security hardening* below).
   refund) via `scripts/onchain-demo.sh`. (Launch tokens remain bearer
   capabilities to *play* a seat — they can't redirect winnings; wallet-bound
   single-use tokens are a follow-up.)
-- **Modes:** Park/Patzer is complete. Gauntlet is a fixed-tier queue that pairs
-  the next two arrivals (continuous "play-until-you-stop" re-queue is **not yet**
-  implemented). Tournament generates round-robin **pairings only** — scoring and
-  pool prize payout are **not yet** wired.
+- **All three modes are complete:**
+  - **Park/Patzer** — post a priced offer, opponent accepts, single-game escrow.
+  - **Gauntlet** — a server session + client loop (`chess-client gauntlet`) keeps
+    playing back-to-back games at a fixed tier until stopped (or a game cap),
+    each an independent per-game escrow; server tracks W/L/D. Same contract.
+    Verified via a multi-game demo.
+  - **Tournament** — buy-in opens a pool on-chain (`openTournament`); each join
+    locks a buy-in (`enterTournament`); a round-robin runs; the server aggregates
+    standings as games finish and distributes the pool by a top-heavy split via
+    a signed `settleTournament`. Verified live on Anvil
+    (`scripts/tournament-demo.sh`): 3-player buy-in tournament, pool distributed
+    65/25/10, funds conserved.
 
 ### Security hardening (post-audit)
 - Wager endpoints require a SIWE session; seats derive from the authenticated
@@ -58,8 +67,9 @@ findings remediated (see *Security hardening* below).
 
 ### Not yet wired (next steps)
 - Redis pub/sub + game-node sharding (today: in-process broadcast, single node)
-- Glicko-2 ratings; gauntlet auto-requeue loop; tournament scoring + pool prize
-  payout (needs a dedicated contract method)
+- Glicko-2 ratings
+- Durable outbox for **tournament** settlement (per-game settlement already uses
+  the durable outbox; tournament settlement is currently direct-with-logging)
 - Result signature (`server_sig`) surfaced to clients; multisig/threshold oracle
 - Anti-collusion / wash-trading controls; per-move client signing; wss/TLS in
   deployment; tokens off the WS query string
@@ -113,15 +123,31 @@ cd apps/web && pnpm install && pnpm dev   # http://localhost:3000
 Open http://localhost:3000, create a game (copy the two client commands it
 prints), launch the two `byo-client play` commands, then click **Watch live**.
 
-**4. On-chain money loop** — the full wagered flow on a local Anvil chain
-(deploy → fund → open escrow → play → settle → bankrolls move):
+**4. On-chain money loop (Park/Patzer)** — the full wagered flow on a local
+Anvil chain: SIWE sign-in → authenticated offer/accept → escrow → play →
+durable outbox → settle → bankrolls move:
 ```bash
 cargo build && (cd contracts && forge build)
 bash scripts/onchain-demo.sh
 ```
-To run the server against a chain yourself, set `RPC_URL`, `ESCROW_ADDR`, and
-`ORACLE_KEY`, then create a game with `white_addr` / `black_addr` / `stake`
-(USDC base units) in the POST body.
+
+**5. Gauntlet** — keep playing back-to-back games at a tier:
+```bash
+# (server running) two casual gauntlets pair each other for N games:
+chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
+# staked: add --stake <usdc-base-units> --auth-token <siwe-session>
+```
+
+**6. Tournament (staked, on-chain pool)** — buy-in pool distributed by standings
+on Anvil (open pool → join/lock buy-ins → round-robin → distribute 65/25/10):
+```bash
+bash scripts/tournament-demo.sh
+```
+
+Wagered games are created through the authenticated Park/Gauntlet/Tournament
+flows (each seat bound to the SIWE-signed-in wallet); the server must be run
+with `RPC_URL` / `ESCROW_ADDR` / `ORACLE_KEY` (and `SIWE_DOMAIN` / `SIWE_CHAIN_ID`)
+set — see the demo scripts for the exact env.
 
 ## Layout
 ```

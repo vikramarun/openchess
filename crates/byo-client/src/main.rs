@@ -9,6 +9,7 @@
 
 mod book;
 mod engine;
+mod gauntlet;
 mod net;
 
 use std::time::Instant;
@@ -75,6 +76,33 @@ enum Command {
         #[arg(long, default_value_t = 16)]
         book_max_ply: u32,
     },
+    /// Gauntlet: keep playing back-to-back games at a fixed tier until stopped.
+    Gauntlet {
+        /// HTTP base URL of the server (ws URL is derived from it).
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
+        /// Stake tier in USDC base units (omit for a casual gauntlet).
+        #[arg(long)]
+        stake: Option<String>,
+        #[arg(long, default_value_t = 60)]
+        initial_secs: u64,
+        #[arg(long, default_value_t = 0)]
+        increment_secs: u64,
+        /// Maximum number of games to play.
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        #[arg(long, default_value = "stockfish")]
+        engine: String,
+        #[arg(long = "engine-arg")]
+        engine_args: Vec<String>,
+        #[arg(long)]
+        book: Option<String>,
+        #[arg(long, default_value_t = 16)]
+        book_max_ply: u32,
+        /// SIWE session token (Bearer), required for a staked gauntlet.
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -129,6 +157,32 @@ async fn main() -> Result<()> {
                 engine_path: engine,
                 engine_args,
                 book,
+            })
+            .await
+        }
+        Command::Gauntlet {
+            server,
+            stake,
+            initial_secs,
+            increment_secs,
+            count,
+            engine,
+            engine_args,
+            book,
+            book_max_ply,
+            auth_token,
+        } => {
+            gauntlet::run_gauntlet(gauntlet::GauntletOpts {
+                http_server: server,
+                stake,
+                initial_secs,
+                increment_secs,
+                count,
+                engine_path: engine,
+                engine_args,
+                book_path: book,
+                book_max_ply,
+                auth_token,
             })
             .await
         }

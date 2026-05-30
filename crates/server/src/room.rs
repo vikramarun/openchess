@@ -61,6 +61,7 @@ pub fn spawn_room(
     stake: Option<StakeInfo>,
     db: Option<Arc<Db>>,
     cleanup_tx: mpsc::Sender<protocol::GameId>,
+    results_tx: mpsc::Sender<crate::GameOutcome>,
 ) -> RoomHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (spectate_tx, _) = broadcast::channel(256);
@@ -81,6 +82,7 @@ pub fn spawn_room(
         stake,
         db,
         cleanup_tx,
+        results_tx,
     };
     tokio::spawn(room.run(cmd_rx));
     RoomHandle {
@@ -106,6 +108,7 @@ struct Room {
     stake: Option<StakeInfo>,
     db: Option<Arc<Db>>,
     cleanup_tx: mpsc::Sender<protocol::GameId>,
+    results_tx: mpsc::Sender<crate::GameOutcome>,
 }
 
 impl Room {
@@ -506,6 +509,16 @@ impl Room {
                 }
             }
         }
+
+        // Report the outcome to the server so modes (gauntlet/tournament) can
+        // update standings.
+        let _ = self
+            .results_tx
+            .send(crate::GameOutcome {
+                game_id: self.game_id,
+                winner: result.winner,
+            })
+            .await;
 
         let _ = clock;
         self.send_all(ServerMessage::GameOver {

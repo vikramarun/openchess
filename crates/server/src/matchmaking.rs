@@ -17,15 +17,19 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use protocol::GameId;
+use protocol::{Color, GameId};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{build_wager, validate_tc, AppState};
+use ledger::{Address, U256};
+
+use crate::{build_wager, validate_tc, AppState, GameOutcome, MAX_STAKE};
 
 const OFFER_TTL: Duration = Duration::from_secs(3600);
 const TICKET_TTL: Duration = Duration::from_secs(3600);
 const TOURNEY_TTL: Duration = Duration::from_secs(24 * 3600);
+const GAUNTLET_TTL: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Default)]
 pub struct Lobby {
@@ -33,6 +37,11 @@ pub struct Lobby {
     queue: Mutex<HashMap<String, VecDeque<Uuid>>>,
     tickets: Mutex<HashMap<Uuid, Ticket>>,
     tournaments: Mutex<HashMap<Uuid, Tournament>>,
+    gauntlets: Mutex<HashMap<Uuid, GauntletSession>>,
+    /// game id -> the gauntlet sessions (and the color they played) in it.
+    game_to_gauntlet: Mutex<HashMap<GameId, Vec<(Uuid, Color)>>>,
+    /// game id -> the tournament it belongs to.
+    game_to_tournament: Mutex<HashMap<GameId, Uuid>>,
 }
 
 impl Lobby {
@@ -40,6 +49,74 @@ impl Lobby {
         self.park.lock().unwrap().retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
         self.tickets.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
         self.tournaments.lock().unwrap().retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
+        self.gauntlets.lock().unwrap().retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
+    }
+
+    /// Update mode standings when a game finishes. Returns a follow-up action
+    /// (e.g. a completed tournament that needs settling).
+    pub fn record_outcome(&self, game_id: GameId, winner: Option<Color>) -> OutcomeAction {
+        // Gauntlet: bump each participating session's W/L/D + game count.
+        if let Some(entries) = self.game_to_gauntlet.lock().unwrap().remove(&game_id) {
+            let mut g = self.gauntlets.lock().unwrap();
+            for (sid, color) in entries {
+                if let Some(s) = g.get_mut(&sid) {
+                    s.games += 1;
+                    match winner {
+                        None => s.draws += 1,
+                        Some(w) if w == color => s.wins += 1,
+                        Some(_) => s.losses += 1,
+                    }
+                }
+            }
+        }
+
+        // Tournament: award points and, when the last game completes, signal
+        // for settlement (handled in `results_task`).
+        let mut complete = None;
+        if let Some(tid) = self.game_to_tournament.lock().unwrap().remove(&game_id) {
+            let mut tourneys = self.tournaments.lock().unwrap();
+            if let Some(t) = tourneys.get_mut(&tid) {
+                if let Some(g) = t.games.iter().find(|g| g.game_id == game_id) {
+                    let (w, b) = (g.white.clone(), g.black.clone());
+                    match winner {
+                        Some(Color::White) => *t.scores.entry(w).or_insert(0.0) += 1.0,
+                        Some(Color::Black) => *t.scores.entry(b).or_insert(0.0) += 1.0,
+                        None => {
+                            *t.scores.entry(w).or_insert(0.0) += 0.5;
+                            *t.scores.entry(b).or_insert(0.0) += 0.5;
+                        }
+                    }
+                }
+                t.remaining = t.remaining.saturating_sub(1);
+                if t.remaining == 0 && t.status == "running" {
+                    t.status = "complete".into();
+                    complete = Some(tid);
+                }
+            }
+        }
+        match complete {
+            Some(tid) => OutcomeAction::SettleTournament { tid },
+            None => OutcomeAction::None,
+        }
+    }
+}
+
+/// Follow-up work the results dispatcher performs after a game outcome.
+pub enum OutcomeAction {
+    None,
+    SettleTournament { tid: Uuid },
+}
+
+/// Consumes game outcomes and updates mode standings; settles finished
+/// tournaments on-chain.
+pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) {
+    while let Some(o) = rx.recv().await {
+        match state.0.lobby.record_outcome(o.game_id, o.winner) {
+            OutcomeAction::None => {}
+            OutcomeAction::SettleTournament { tid } => {
+                settle_tournament(&state, tid).await;
+            }
+        }
     }
 }
 
@@ -50,6 +127,9 @@ pub fn routes() -> Router<AppState> {
         .route("/park/offers/{id}/accept", post(park_accept))
         .route("/queue", post(queue_join))
         .route("/queue/{id}", get(queue_get))
+        .route("/gauntlet/start", post(gauntlet_start))
+        .route("/gauntlet/{id}", get(gauntlet_get))
+        .route("/gauntlet/{id}/stop", post(gauntlet_stop))
         .route("/tournaments", post(tourney_create).get(tourney_list))
         .route("/tournaments/{id}", get(tourney_get))
         .route("/tournaments/{id}/join", post(tourney_join))
@@ -291,6 +371,8 @@ struct Ticket {
     game_id: Option<GameId>,
     token: Option<String>,
     color: Option<String>,
+    /// Gauntlet session this ticket belongs to (for standings), if any.
+    session_id: Option<Uuid>,
     created_at: Instant,
 }
 
@@ -301,6 +383,8 @@ struct QueueReq {
     initial_secs: u64,
     #[serde(default = "dinc")]
     increment_secs: u64,
+    /// Optional gauntlet session id to attribute the game's result to.
+    session_id: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -336,6 +420,7 @@ async fn queue_join(
             game_id: None,
             token: None,
             color: None,
+            session_id: req.session_id,
             created_at: Instant::now(),
         },
     );
@@ -346,14 +431,15 @@ async fn queue_join(
     };
 
     if let Some(opp_id) = opponent {
-        let opp_addr = state
+        let (opp_addr, opp_session) = state
             .0
             .lobby
             .tickets
             .lock()
             .unwrap()
             .get(&opp_id)
-            .and_then(|t| t.addr.clone());
+            .map(|t| (t.addr.clone(), t.session_id))
+            .unwrap_or((None, None));
 
         // opponent = white, me = black
         let wager = if let Some(stake) = req.stake.clone() {
@@ -368,6 +454,24 @@ async fn queue_join(
         };
 
         let resp = state.start_game(tc, "gauntlet", wager).await?;
+
+        // Attribute the game's result to any gauntlet sessions involved.
+        let mut links = Vec::new();
+        if let Some(sid) = opp_session {
+            links.push((sid, Color::White));
+        }
+        if let Some(sid) = req.session_id {
+            links.push((sid, Color::Black));
+        }
+        if !links.is_empty() {
+            state
+                .0
+                .lobby
+                .game_to_gauntlet
+                .lock()
+                .unwrap()
+                .insert(resp.game_id, links);
+        }
 
         let mut tickets = state.0.lobby.tickets.lock().unwrap();
         if let Some(t) = tickets.get_mut(&opp_id) {
@@ -424,6 +528,127 @@ async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<
 }
 
 // --------------------------------------------------------------------------
+// Gauntlet session (accounting + stop control over the tier queue)
+// --------------------------------------------------------------------------
+
+struct GauntletSession {
+    addr: Option<String>,
+    stake: Option<String>,
+    initial_secs: u64,
+    increment_secs: u64,
+    status: String, // running | stopped
+    games: u32,
+    wins: u32,
+    losses: u32,
+    draws: u32,
+    created_at: Instant,
+}
+
+#[derive(Deserialize)]
+struct GauntletStartReq {
+    stake: Option<String>,
+    #[serde(default = "di")]
+    initial_secs: u64,
+    #[serde(default = "dinc")]
+    increment_secs: u64,
+}
+
+#[derive(Serialize)]
+struct GauntletStartResp {
+    session_id: Uuid,
+    stake: Option<String>,
+    initial_secs: u64,
+    increment_secs: u64,
+}
+
+async fn gauntlet_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<GauntletStartReq>,
+) -> Result<Json<GauntletStartResp>, StatusCode> {
+    validate_tc(req.initial_secs, req.increment_secs)?;
+    let addr = if req.stake.is_some() {
+        Some(state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?)
+    } else {
+        None
+    };
+    let id = Uuid::new_v4();
+    state.0.lobby.gauntlets.lock().unwrap().insert(
+        id,
+        GauntletSession {
+            addr,
+            stake: req.stake.clone(),
+            initial_secs: req.initial_secs,
+            increment_secs: req.increment_secs,
+            status: "running".into(),
+            games: 0,
+            wins: 0,
+            losses: 0,
+            draws: 0,
+            created_at: Instant::now(),
+        },
+    );
+    Ok(Json(GauntletStartResp {
+        session_id: id,
+        stake: req.stake,
+        initial_secs: req.initial_secs,
+        increment_secs: req.increment_secs,
+    }))
+}
+
+#[derive(Serialize)]
+struct GauntletView {
+    status: String,
+    games: u32,
+    wins: u32,
+    losses: u32,
+    draws: u32,
+    stake: Option<String>,
+    initial_secs: u64,
+    increment_secs: u64,
+}
+
+async fn gauntlet_get(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<GauntletView>, StatusCode> {
+    let g = state.0.lobby.gauntlets.lock().unwrap();
+    let s = g.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(GauntletView {
+        status: s.status.clone(),
+        games: s.games,
+        wins: s.wins,
+        losses: s.losses,
+        draws: s.draws,
+        stake: s.stake.clone(),
+        initial_secs: s.initial_secs,
+        increment_secs: s.increment_secs,
+    }))
+}
+
+async fn gauntlet_stop(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let mut g = state.0.lobby.gauntlets.lock().unwrap();
+    match g.get_mut(&id) {
+        Some(s) => {
+            // A staked session can only be stopped by its owner wallet.
+            if let Some(addr) = &s.addr {
+                match state.authed_wallet(&headers) {
+                    Some(w) if w.eq_ignore_ascii_case(addr) => {}
+                    _ => return StatusCode::UNAUTHORIZED,
+                }
+            }
+            s.status = "stopped".into();
+            StatusCode::OK
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+// --------------------------------------------------------------------------
 // Tournament (round-robin)
 // --------------------------------------------------------------------------
 
@@ -432,9 +657,11 @@ struct Tournament {
     buy_in: Option<String>,
     initial_secs: u64,
     increment_secs: u64,
-    status: String, // open | running
+    status: String, // open | running | complete | settled
     players: Vec<String>,
     games: Vec<TourneyGame>,
+    scores: HashMap<String, f64>,
+    remaining: usize,
     created_at: Instant,
 }
 
@@ -468,6 +695,24 @@ async fn tourney_create(
 ) -> Result<Json<IdResp>, StatusCode> {
     validate_tc(req.initial_secs, req.increment_secs)?;
     let id = Uuid::new_v4();
+
+    // A buy-in tournament opens its on-chain pool now (fail-closed).
+    if let Some(buy_in_str) = &req.buy_in {
+        let buy_in = buy_in_str.parse::<U256>().map_err(|_| StatusCode::BAD_REQUEST)?;
+        if buy_in == U256::ZERO || buy_in > U256::from(MAX_STAKE) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !state.0.settlement.is_onchain() {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        state
+            .0
+            .settlement
+            .open_tournament(id, buy_in)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    }
+
     state.0.lobby.tournaments.lock().unwrap().insert(
         id,
         Tournament {
@@ -478,6 +723,8 @@ async fn tourney_create(
             status: "open".into(),
             players: Vec::new(),
             games: Vec::new(),
+            scores: HashMap::new(),
+            remaining: 0,
             created_at: Instant::now(),
         },
     );
@@ -486,24 +733,72 @@ async fn tourney_create(
 
 #[derive(Deserialize)]
 struct JoinReq {
-    player: String,
+    /// Display name for a casual tournament (ignored for buy-in tournaments,
+    /// where the entrant is the authenticated wallet).
+    player: Option<String>,
 }
 
 async fn tourney_join(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Json(req): Json<JoinReq>,
 ) -> StatusCode {
-    let mut t = state.0.lobby.tournaments.lock().unwrap();
-    match t.get_mut(&id) {
-        Some(t) if t.status == "open" => {
-            if !t.players.contains(&req.player) {
-                t.players.push(req.player);
-            }
-            StatusCode::OK
+    // Read the tournament's terms + whether this entrant is already in.
+    let (buy_in, status) = {
+        let t = state.0.lobby.tournaments.lock().unwrap();
+        match t.get(&id) {
+            Some(t) => (t.buy_in.clone(), t.status.clone()),
+            None => return StatusCode::NOT_FOUND,
         }
-        Some(_) => StatusCode::CONFLICT,
-        None => StatusCode::NOT_FOUND,
+    };
+    if status != "open" {
+        return StatusCode::CONFLICT;
+    }
+
+    // Buy-in tournament: entrant is the authenticated wallet; lock on-chain.
+    if let Some(buy_in_str) = buy_in {
+        let wallet = match state.authed_wallet(&headers) {
+            Some(w) => w,
+            None => return StatusCode::UNAUTHORIZED,
+        };
+        // Already entered? (avoid a duplicate on-chain entry).
+        {
+            let t = state.0.lobby.tournaments.lock().unwrap();
+            if let Some(t) = t.get(&id) {
+                if t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
+                    return StatusCode::OK;
+                }
+            }
+        }
+        let (addr, buy_in) = match (wallet.parse::<Address>(), buy_in_str.parse::<U256>()) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => return StatusCode::BAD_REQUEST,
+        };
+        let _ = buy_in; // amount is enforced on-chain from the tournament record
+        if state.0.settlement.enter_tournament(id, addr).await.is_err() {
+            return StatusCode::BAD_GATEWAY;
+        }
+        let mut t = state.0.lobby.tournaments.lock().unwrap();
+        if let Some(t) = t.get_mut(&id) {
+            if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
+                t.players.push(wallet);
+            }
+        }
+        StatusCode::OK
+    } else {
+        // Casual tournament: a display name.
+        let name = match req.player {
+            Some(n) => n,
+            None => return StatusCode::BAD_REQUEST,
+        };
+        let mut t = state.0.lobby.tournaments.lock().unwrap();
+        if let Some(t) = t.get_mut(&id) {
+            if !t.players.contains(&name) {
+                t.players.push(name);
+            }
+        }
+        StatusCode::OK
     }
 }
 
@@ -572,6 +867,107 @@ async fn tourney_start(
 
     if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&id) {
         t.games = games.clone();
+        t.remaining = games.len();
+    }
+    // Register each game to the tournament so the results dispatcher can score it.
+    {
+        let mut map = state.0.lobby.game_to_tournament.lock().unwrap();
+        for g in &games {
+            map.insert(g.game_id, id);
+        }
     }
     Ok(Json(games))
+}
+
+/// Settle a finished tournament: rank all entrants, compute a top-heavy payout
+/// split of the pool, and (for a buy-in tournament) distribute on-chain.
+async fn settle_tournament(state: &AppState, tid: Uuid) {
+    // Snapshot terms + final standings (all entrants, including 0-score).
+    let (buy_in, standings) = {
+        let tourneys = state.0.lobby.tournaments.lock().unwrap();
+        let Some(t) = tourneys.get(&tid) else {
+            return;
+        };
+        let mut s: Vec<(String, f64)> = t
+            .players
+            .iter()
+            .map(|p| (p.clone(), t.scores.get(p).copied().unwrap_or(0.0)))
+            .collect();
+        s.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        (t.buy_in.clone(), s)
+    };
+    tracing::info!(tournament = %tid, ?standings, "tournament complete — final standings");
+
+    if let Some(buy_in_str) = buy_in {
+        if let Err(e) = distribute_pool(state, tid, &buy_in_str, &standings).await {
+            tracing::error!(tournament = %tid, "tournament settlement failed: {e:#}");
+            // leave status 'complete' so it can be retried / inspected
+            return;
+        }
+    }
+    if let Some(t) = state.0.lobby.tournaments.lock().unwrap().get_mut(&tid) {
+        t.status = "settled".into();
+    }
+}
+
+/// Top-heavy payout weights (basis points) by field size.
+fn payout_weights(n: usize) -> Vec<u128> {
+    match n {
+        0 => vec![],
+        1 => vec![10_000],
+        2 => vec![7_000, 3_000],
+        _ => {
+            let mut w = vec![6_500, 2_500, 1_000];
+            w.resize(n, 0);
+            w
+        }
+    }
+}
+
+async fn distribute_pool(
+    state: &AppState,
+    tid: Uuid,
+    buy_in_str: &str,
+    standings: &[(String, f64)],
+) -> anyhow::Result<()> {
+    let n = standings.len();
+    let buy_in = buy_in_str
+        .parse::<U256>()
+        .map_err(|_| anyhow::anyhow!("bad buy-in"))?
+        .to::<u128>();
+    let pool = buy_in
+        .checked_mul(n as u128)
+        .ok_or_else(|| anyhow::anyhow!("pool overflow"))?;
+
+    // Payout per standings rank; remainder (rounding) goes to the winner.
+    let weights = payout_weights(n);
+    let mut by_rank = vec![0u128; n];
+    let mut assigned = 0u128;
+    for i in 0..n {
+        by_rank[i] = pool * weights[i] / 10_000;
+        assigned += by_rank[i];
+    }
+    if n > 0 {
+        by_rank[0] += pool - assigned; // full pool distributed (0 rake)
+    }
+
+    // Map payouts back to the entrant (players) order the contract expects.
+    use std::collections::HashMap;
+    let payout_for: HashMap<&str, u128> = standings
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (p.as_str(), by_rank[i]))
+        .collect();
+
+    let mut addrs = Vec::with_capacity(n);
+    let mut payouts = Vec::with_capacity(n);
+    for (player, _) in standings {
+        let addr = player
+            .parse::<Address>()
+            .map_err(|_| anyhow::anyhow!("entrant {player} is not an address"))?;
+        addrs.push(addr);
+        payouts.push(U256::from(*payout_for.get(player.as_str()).unwrap_or(&0)));
+    }
+
+    state.0.settlement.settle_tournament(tid, addrs, payouts).await
 }

@@ -218,4 +218,95 @@ contract ChessEscrowTest {
         escrow.acceptOwnership();
         _assert(escrow.owner() == newOwner, "new owner");
     }
+
+    // --- tournaments ------------------------------------------------------
+
+    address carol = address(0x3333);
+
+    function _enterAll(bytes32 tid) internal {
+        _fund(carol, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, carol);
+    }
+
+    function _players3() internal view returns (address[] memory p) {
+        p = new address[](3);
+        p[0] = white;
+        p[1] = black;
+        p[2] = carol;
+    }
+
+    function _settleT(bytes32 tid, address[] memory players, uint256[] memory payouts, uint256 deadline)
+        internal
+    {
+        bytes32 d = escrow.digestTournamentResult(tid, players, payouts, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(oracleKey, d);
+        escrow.settleTournament(tid, players, payouts, deadline, v, r, s);
+    }
+
+    function test_tournament_distributes_pool() public {
+        bytes32 tid = keccak256("t1");
+        _enterAll(tid);
+        // each entrant locked one buy-in
+        _assert(escrow.locked(white) == STAKE && escrow.locked(carol) == STAKE, "locked");
+
+        // pool = 3 STAKE; pay white 2, black 1, carol 0 (no rake)
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 2 * STAKE;
+        payouts[1] = STAKE;
+        payouts[2] = 0;
+        _settleT(tid, _players3(), payouts, DEADLINE);
+
+        _assert(escrow.bankroll(white) == 11 * STAKE, "white +1 net");
+        _assert(escrow.bankroll(black) == 10 * STAKE, "black even");
+        _assert(escrow.bankroll(carol) == 9 * STAKE, "carol -1");
+        _assert(escrow.locked(white) == 0 && escrow.locked(carol) == 0, "unlocked");
+        _assert(
+            escrow.bankroll(white) + escrow.bankroll(black) + escrow.bankroll(carol)
+                + escrow.bankroll(fee) == 30 * STAKE,
+            "conservation"
+        );
+    }
+
+    function test_tournament_rake_is_remainder() public {
+        bytes32 tid = keccak256("t2");
+        _enterAll(tid);
+        // pay only the winner 2 STAKE; remaining 1 STAKE is rake
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 2 * STAKE;
+        _settleT(tid, _players3(), payouts, DEADLINE);
+        _assert(escrow.bankroll(fee) == STAKE, "rake to fee");
+        _assert(
+            escrow.bankroll(white) + escrow.bankroll(black) + escrow.bankroll(carol)
+                + escrow.bankroll(fee) == 30 * STAKE,
+            "conservation"
+        );
+    }
+
+    function test_tournament_overpay_rejected() public {
+        bytes32 tid = keccak256("t3");
+        _enterAll(tid);
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 4 * STAKE; // exceeds the 3 STAKE pool
+        bytes32 d = escrow.digestTournamentResult(tid, _players3(), payouts, DEADLINE);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(oracleKey, d);
+        vm.expectRevert();
+        escrow.settleTournament(tid, _players3(), payouts, DEADLINE, v, r, s);
+    }
+
+    function test_tournament_timeout_refunds() public {
+        bytes32 tid = keccak256("t4");
+        _enterAll(tid);
+        vm.warp(block.timestamp + 3601);
+        escrow.settleTournamentTimeout(tid, _players3());
+        _assert(escrow.locked(white) == 0 && escrow.locked(carol) == 0, "unlocked");
+        _assert(escrow.bankroll(white) == 10 * STAKE, "white whole");
+        _assert(escrow.bankroll(carol) == 10 * STAKE, "carol whole");
+    }
 }

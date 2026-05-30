@@ -107,6 +107,29 @@ pub trait SettlementSink: Send + Sync {
     async fn is_settled(&self, _game_id: Uuid) -> bool {
         false
     }
+
+    // -- tournaments -------------------------------------------------------
+
+    async fn open_tournament(&self, tid: Uuid, buy_in: U256) -> anyhow::Result<()> {
+        tracing::info!(%tid, %buy_in, "settlement(log): open tournament");
+        Ok(())
+    }
+
+    async fn enter_tournament(&self, tid: Uuid, player: Address) -> anyhow::Result<()> {
+        tracing::info!(%tid, %player, "settlement(log): enter tournament");
+        Ok(())
+    }
+
+    /// Distribute a tournament pool to `payouts` (parallel to `players`).
+    async fn settle_tournament(
+        &self,
+        tid: Uuid,
+        _players: Vec<Address>,
+        _payouts: Vec<U256>,
+    ) -> anyhow::Result<()> {
+        tracing::info!(%tid, "settlement(log): settle tournament");
+        Ok(())
+    }
 }
 
 /// Default no-chain sink: logs what it *would* settle. Used when the server is
@@ -235,6 +258,57 @@ impl SettlementSink for OnchainSettlement {
             Err(_) => false,
         }
     }
+
+    async fn open_tournament(&self, tid: Uuid, buy_in: U256) -> anyhow::Result<()> {
+        let tidb = game_id_to_bytes32(tid);
+        self.contract()
+            .openTournament(tidb, buy_in)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        tracing::info!(%tid, %buy_in, "settlement(onchain): opened tournament");
+        Ok(())
+    }
+
+    async fn enter_tournament(&self, tid: Uuid, player: Address) -> anyhow::Result<()> {
+        let tidb = game_id_to_bytes32(tid);
+        self.contract()
+            .enterTournament(tidb, player)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        tracing::info!(%tid, %player, "settlement(onchain): tournament entry");
+        Ok(())
+    }
+
+    async fn settle_tournament(
+        &self,
+        tid: Uuid,
+        players: Vec<Address>,
+        payouts: Vec<U256>,
+    ) -> anyhow::Result<()> {
+        let tidb = game_id_to_bytes32(tid);
+        let deadline = U256::from(unix_now().saturating_add(3600));
+        let escrow = self.contract();
+        let digest = escrow
+            .digestTournamentResult(tidb, players.clone(), payouts.clone(), deadline)
+            .call()
+            .await?;
+        let sig = self.oracle.sign_hash(&digest).await?;
+        let v: u8 = if sig.v() { 28 } else { 27 };
+        let r = B256::from(sig.r());
+        let s = B256::from(sig.s());
+        escrow
+            .settleTournament(tidb, players, payouts, deadline, v, r, s)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        tracing::info!(%tid, "settlement(onchain): tournament settled");
+        Ok(())
+    }
 }
 
 fn unix_now() -> u64 {
@@ -331,6 +405,79 @@ mod tests {
         let b = read.bankroll(black.address()).call().await?;
         assert_eq!(w, U256::from(10_990_000u64), "winner bankroll");
         assert_eq!(b, U256::from(9_000_000u64), "loser bankroll");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn opens_enters_settles_tournament() -> anyhow::Result<()> {
+        let anvil = Anvil::new().try_spawn()?;
+        let url = anvil.endpoint_url();
+        let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
+        let oracle: PrivateKeySigner = anvil.keys()[1].clone().into();
+        let players: Vec<PrivateKeySigner> =
+            (2..5).map(|i| anvil.keys()[i].clone().into()).collect();
+
+        let dep = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(deployer.clone()))
+            .connect_http(url.clone());
+        let usdc = MockUSDC::deploy(&dep).await?;
+        // 0% rake so the test arithmetic is exact.
+        let escrow = ChessEscrow::deploy(
+            &dep,
+            *usdc.address(),
+            oracle.address(),
+            deployer.address(),
+            0u16,
+            3600u64,
+        )
+        .await?;
+        let escrow_addr = *escrow.address();
+
+        let bankroll = U256::from(10_000_000u64);
+        let buy_in = U256::from(1_000_000u64);
+        for who in &players {
+            let p = ProviderBuilder::new()
+                .wallet(EthereumWallet::from(who.clone()))
+                .connect_http(url.clone());
+            MockUSDC::new(*usdc.address(), &p)
+                .mint(who.address(), bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            MockUSDC::new(*usdc.address(), &p)
+                .approve(escrow_addr, bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            ChessEscrow::new(escrow_addr, &p)
+                .deposit(bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+        }
+
+        let sink = OnchainSettlement::new(url.clone(), escrow_addr, oracle.clone());
+        let tid = Uuid::new_v4();
+        sink.open_tournament(tid, buy_in).await?;
+        for who in &players {
+            sink.enter_tournament(tid, who.address()).await?;
+        }
+        // pool = 3 buy-ins; pay 2 / 1 / 0 (no rake)
+        let addrs: Vec<Address> = players.iter().map(|s| s.address()).collect();
+        let payouts = vec![
+            U256::from(2_000_000u64),
+            U256::from(1_000_000u64),
+            U256::from(0u64),
+        ];
+        sink.settle_tournament(tid, addrs.clone(), payouts).await?;
+
+        let read = ChessEscrow::new(escrow_addr, &dep);
+        assert_eq!(read.bankroll(addrs[0]).call().await?, U256::from(11_000_000u64));
+        assert_eq!(read.bankroll(addrs[1]).call().await?, U256::from(10_000_000u64));
+        assert_eq!(read.bankroll(addrs[2]).call().await?, U256::from(9_000_000u64));
         Ok(())
     }
 }

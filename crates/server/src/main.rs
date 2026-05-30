@@ -51,6 +51,8 @@ pub struct Inner {
     pub auth: auth::Auth,
     /// Rooms signal their game id here on finish so we can evict state.
     pub cleanup_tx: mpsc::Sender<GameId>,
+    /// Rooms report game outcomes here for mode standings.
+    pub results_tx: mpsc::Sender<GameOutcome>,
 }
 
 /// On-chain seats + stake for a wagered game.
@@ -59,6 +61,13 @@ pub struct WagerSeats {
     pub white: Address,
     pub black: Address,
     pub stake: U256,
+}
+
+/// Reported by a room when its game ends, so modes can update standings.
+#[derive(Clone, Copy)]
+pub struct GameOutcome {
+    pub game_id: GameId,
+    pub winner: Option<Color>,
 }
 
 #[tokio::main]
@@ -84,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (cleanup_tx, cleanup_rx) = mpsc::channel::<GameId>(256);
+    let (results_tx, results_rx) = mpsc::channel::<GameOutcome>(256);
 
     let state = AppState(Arc::new(Inner {
         rooms: Mutex::new(HashMap::new()),
@@ -93,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         lobby: Lobby::default(),
         auth: auth::Auth::default(),
         cleanup_tx,
+        results_tx,
     }));
 
     // Drain the settlement outbox on-chain in the background (durable path).
@@ -103,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
     // Evict finished games' rooms + tokens; periodically sweep stale lobby state.
     tokio::spawn(cleanup_task(state.clone(), cleanup_rx));
     tokio::spawn(sweep_task(state.clone()));
+    // Update mode standings (gauntlet/tournament) as games finish.
+    tokio::spawn(matchmaking::results_task(state.clone(), results_rx));
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
     // A malformed WEB_ORIGIN logs and falls back rather than panicking at boot.
@@ -374,6 +387,7 @@ impl AppState {
             stake_info,
             self.0.db.clone(),
             self.0.cleanup_tx.clone(),
+            self.0.results_tx.clone(),
         );
         self.0.rooms.lock().unwrap().insert(game_id, handle);
 
