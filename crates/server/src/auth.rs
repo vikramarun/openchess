@@ -178,9 +178,17 @@ impl SiweFields {
         if !address.starts_with("0x") || address.len() != 42 {
             return None;
         }
+        // Per EIP-4361 the labelled fields live in the structured block that
+        // starts at the `URI:` line. Anchor parsing there so a free-form
+        // statement line can't shadow `Nonce:`/`Chain ID:`.
+        let block_start = message
+            .lines()
+            .position(|l| l.trim_start().starts_with("URI:"))
+            .unwrap_or(0);
         let field = |key: &str| {
             message
                 .lines()
+                .skip(block_start)
                 .find_map(|l| l.trim().strip_prefix(key))
                 .map(|v| v.trim().to_string())
         };

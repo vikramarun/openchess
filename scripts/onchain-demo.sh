@@ -80,7 +80,8 @@ echo "offer=$OID"
 echo "== black accepts (authenticated) — seats bound to the two signed-in wallets =="
 ACC=$(curl -s -X POST $H/park/offers/$OID/accept -H "authorization: Bearer $BSESS" -H 'content-type: application/json' -d '{}')
 GID=$(echo "$ACC" | jget "['game_id']"); BT=$(echo "$ACC" | jget "['token']")
-WT=$(curl -s $H/park/offers/$OID | jget "['token']")
+# Only the authenticated poster can retrieve the white launch token.
+WT=$(curl -s $H/park/offers/$OID -H "authorization: Bearer $WSESS" | jget "['token']")
 echo "game=$GID"
 bankrolls "after open (stakes locked)"
 

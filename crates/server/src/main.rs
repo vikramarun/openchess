@@ -105,16 +105,18 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(sweep_task(state.clone()));
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
-    let cors = match std::env::var("WEB_ORIGIN") {
-        Ok(origin) => CorsLayer::new()
-            .allow_origin(origin.parse::<axum::http::HeaderValue>().expect("WEB_ORIGIN"))
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any),
-        Err(_) => CorsLayer::new()
-            .allow_origin("http://localhost:3000".parse::<axum::http::HeaderValue>().unwrap())
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any),
-    };
+    // A malformed WEB_ORIGIN logs and falls back rather than panicking at boot.
+    let web_origin = std::env::var("WEB_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
+    let origin_val = web_origin
+        .parse::<axum::http::HeaderValue>()
+        .unwrap_or_else(|_| {
+            tracing::warn!("invalid WEB_ORIGIN '{web_origin}', falling back to http://localhost:3000");
+            "http://localhost:3000".parse().unwrap()
+        });
+    let cors = CorsLayer::new()
+        .allow_origin(origin_val)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -174,8 +176,10 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
     loop {
         tick.tick().await;
 
-        // Reap rows stranded in `processing` by a crashed worker.
-        if let Err(e) = db.requeue_stale(30).await {
+        // Reap rows stranded in `processing` by a crashed worker. The lease must
+        // exceed worst-case on-chain confirmation so we don't requeue an
+        // in-flight submit.
+        if let Err(e) = db.requeue_stale(300).await {
             tracing::warn!("outbox reaper failed: {e:#}");
         }
 
@@ -193,16 +197,16 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                     Ok(addr) => Some(addr),
                     Err(_) => {
                         // Permanently malformed — never retryable.
-                        let _ = db.complete_settlement(row.id, "failed", Some("bad winner addr")).await;
-                        let _ = db.set_settlement_status(row.game_id, "failed").await;
+                        let _ = db
+                            .finalize_settlement(row.id, row.game_id, "failed", Some("bad winner addr"))
+                            .await;
                         continue;
                     }
                 },
             };
             match settlement.report_result(row.game_id, winner).await {
                 Ok(()) => {
-                    let _ = db.complete_settlement(row.id, "settled", None).await;
-                    let _ = db.set_settlement_status(row.game_id, "settled").await;
+                    let _ = db.finalize_settlement(row.id, row.game_id, "settled", None).await;
                     tracing::info!(game_id = %row.game_id, "outbox: settled on-chain");
                 }
                 Err(e) => {
@@ -210,16 +214,14 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                     // The submit may have actually landed (crash/replay): if the
                     // chain says it's settled, that's success, not failure.
                     if settlement.is_settled(row.game_id).await {
-                        let _ = db.complete_settlement(row.id, "settled", None).await;
-                        let _ = db.set_settlement_status(row.game_id, "settled").await;
+                        let _ = db.finalize_settlement(row.id, row.game_id, "settled", None).await;
                         tracing::info!(game_id = %row.game_id, "outbox: already settled on-chain");
                     } else if row.attempts >= persistence::MAX_SETTLE_ATTEMPTS {
-                        let _ = db.complete_settlement(row.id, "failed", Some(&msg)).await;
-                        let _ = db.set_settlement_status(row.game_id, "failed").await;
+                        let _ = db.finalize_settlement(row.id, row.game_id, "failed", Some(&msg)).await;
                         tracing::error!(game_id = %row.game_id, attempts = row.attempts, "outbox: giving up: {msg}");
                     } else {
                         // Transient: requeue for retry on a later tick.
-                        let _ = db.complete_settlement(row.id, "pending", Some(&msg)).await;
+                        let _ = db.requeue_settlement(row.id, Some(&msg)).await;
                         tracing::warn!(game_id = %row.game_id, attempts = row.attempts, "outbox: transient, will retry: {msg}");
                     }
                 }
@@ -359,7 +361,7 @@ impl AppState {
             {
                 tracing::error!(%game_id, "open_escrow failed, aborting wagered game: {e:#}");
                 if let Some(db) = &self.0.db {
-                    let _ = db.finish_game(game_id, "draw", "aborted", "", "").await;
+                    let _ = db.abort_game(game_id, "escrow_open_failed").await;
                 }
                 return Err(StatusCode::BAD_GATEWAY);
             }

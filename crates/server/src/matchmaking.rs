@@ -243,15 +243,35 @@ struct ParkGetResp {
     color: Option<String>,
 }
 
-async fn park_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<ParkGetResp> {
+async fn park_get(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Json<ParkGetResp> {
+    // For a wagered offer, only the authenticated poster may retrieve the white
+    // launch token (else anyone polling the id could grab it and throw the
+    // staked game). Casual offers carry no stake, so the token is returned freely.
     let park = state.0.lobby.park.lock().unwrap();
     match park.get(&id) {
-        Some(o) => Json(ParkGetResp {
-            status: o.status.clone(),
-            game_id: o.game_id,
-            token: o.poster_token.clone(),
-            color: o.poster_token.as_ref().map(|_| "white".into()),
-        }),
+        Some(o) => {
+            let authorized = match &o.poster_addr {
+                Some(addr) => state
+                    .authed_wallet(&headers)
+                    .map(|w| w.eq_ignore_ascii_case(addr))
+                    .unwrap_or(false),
+                None => true, // casual offer
+            };
+            Json(ParkGetResp {
+                status: o.status.clone(),
+                game_id: o.game_id,
+                token: if authorized { o.poster_token.clone() } else { None },
+                color: o
+                    .poster_token
+                    .as_ref()
+                    .filter(|_| authorized)
+                    .map(|_| "white".into()),
+            })
+        }
         None => Json(ParkGetResp {
             status: "not_found".into(),
             game_id: None,

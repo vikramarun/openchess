@@ -211,15 +211,6 @@ impl Db {
         Ok(())
     }
 
-    pub async fn set_settlement_status(&self, game_id: Uuid, status: &str) -> Result<()> {
-        sqlx::query("UPDATE games SET settlement_status=$2 WHERE id=$1")
-            .bind(game_id)
-            .bind(status)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn get_game(&self, game_id: Uuid) -> Result<Option<GameRow>> {
         let row = sqlx::query_as::<_, GameRow>(
             "SELECT id, mode, status, result, result_reason, pgn FROM games WHERE id=$1",
@@ -230,24 +221,19 @@ impl Db {
         Ok(row)
     }
 
-    // -- settlement outbox -------------------------------------------------
-
-    /// Enqueue a finished wagered game for on-chain settlement.
-    pub async fn enqueue_settlement(
-        &self,
-        game_id: Uuid,
-        winner_addr: Option<&str>,
-    ) -> Result<()> {
+    /// Mark a game aborted (e.g. escrow failed to open — it never really started).
+    pub async fn abort_game(&self, game_id: Uuid, reason: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO settlement_outbox (id, game_id, winner_addr) VALUES ($1,$2,$3)",
+            "UPDATE games SET status='aborted', result_reason=$2, finished_at=now() WHERE id=$1",
         )
-        .bind(Uuid::new_v4())
         .bind(game_id)
-        .bind(winner_addr)
+        .bind(reason)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
+
+    // -- settlement outbox -------------------------------------------------
 
     /// Atomically claim up to `limit` pending outbox rows under the attempt cap
     /// (marks them `processing` + stamps `claimed_at` so a second worker tick
@@ -286,18 +272,39 @@ impl Db {
         Ok(res.rows_affected())
     }
 
-    pub async fn complete_settlement(
-        &self,
-        id: Uuid,
-        status: &str,
-        error: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query("UPDATE settlement_outbox SET status=$2, last_error=$3 WHERE id=$1")
+    /// Requeue a row for retry (transient failure) — outbox only.
+    pub async fn requeue_settlement(&self, id: Uuid, error: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE settlement_outbox SET status='pending', last_error=$2 WHERE id=$1")
             .bind(id)
-            .bind(status)
             .bind(error)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Terminally finalize a settlement: update the outbox row AND the game's
+    /// mirrored `settlement_status` in a **single transaction**, so the two can
+    /// never disagree (a finished game can't be left stuck `pending`).
+    pub async fn finalize_settlement(
+        &self,
+        outbox_id: Uuid,
+        game_id: Uuid,
+        status: &str, // "settled" | "failed"
+        error: Option<&str>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE settlement_outbox SET status=$2, last_error=$3 WHERE id=$1")
+            .bind(outbox_id)
+            .bind(status)
+            .bind(error)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE games SET settlement_status=$2 WHERE id=$1")
+            .bind(game_id)
+            .bind(status)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 

@@ -202,6 +202,6 @@ deployment/ops or explicit product follow-ups.
 | M2 collusion/wash-trading | Deferred | Same-wallet seats rejected; rating/Sybil controls are product follow-ups. |
 | M3 reconnection | Fixed | `Detach` on drop + resend-state on re-attach (clock still runs during disconnect, by design). |
 | M4 input bounds | Fixed | Time-control + stake bounds; overflow-safe. |
-| M5 transport/token | Partly | Tokens now bound to the player's own staked wallet (residual risk self-affecting); TLS + token-off-query are deployment follow-ups. |
+| M5 transport/token | Partly | Launch tokens remain **bearer capabilities** (not wallet-bound), but the seat's *funds* are fixed to the authenticated wallet at escrow open — a leaked token cannot redirect winnings, only throw the game. Concurrent hijack is blocked by the seat-occupancy guard, and the staked-offer's white token is only returned to the authenticated poster. Wallet-bound/single-use tokens, token-off-query, and wss/TLS remain deployment/product follow-ups. |
 | M6 fee mid-game | Fixed | `feeBps` snapshotted at `openGame`. |
 | Hygiene (LICENSE/CI/shutdown/tests) | Fixed | MIT LICENSE, GitHub Actions CI (Postgres + forge-before-cargo), graceful shutdown, server unit tests, README corrected. |

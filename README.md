@@ -31,11 +31,13 @@ findings remediated (see *Security hardening* below).
   server-enforced clock; result is detected authoritatively. A Next.js spectator
   renders the live board (chessground), clocks, and SAN move list.
 - **Wagered games are authenticated**: SIWE sign-in → authenticated Park
-  offer/accept where each on-chain seat is bound to the signed-in wallet →
-  escrow opened → engines play → result enqueued to a durable, retrying
-  **settlement outbox** → a worker signs a time-bounded EIP-712 result and
-  settles on-chain. Verified live (decisive payout and draw refund) via
-  `scripts/onchain-demo.sh`.
+  offer/accept where each on-chain seat's **staked address** is the signed-in
+  wallet (fixed at escrow open) → escrow opened → engines play → result enqueued
+  to a durable, retrying **settlement outbox** → a worker signs a time-bounded
+  EIP-712 result and settles on-chain. Verified live (decisive payout and draw
+  refund) via `scripts/onchain-demo.sh`. (Launch tokens remain bearer
+  capabilities to *play* a seat — they can't redirect winnings; wallet-bound
+  single-use tokens are a follow-up.)
 - **Modes:** Park/Patzer is complete. Gauntlet is a fixed-tier queue that pairs
   the next two arrivals (continuous "play-until-you-stop" re-queue is **not yet**
   implemented). Tournament generates round-robin **pairings only** — scoring and
