@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { TimeControlChips } from "@/components/TimeControlChips";
 import { SERVER_HTTP } from "@/lib/config";
 
 type Offer = {
@@ -58,6 +59,7 @@ export default function ParkPage() {
           browser engine once a wallet is connected. Try <Link href="/play">Quick Play</Link>{" "}
           first — it’s free and needs no setup.
         </p>
+        <TimeControlChips note="bullet → rapid, same as Quick Play" />
       </div>
 
       <div className="panel">

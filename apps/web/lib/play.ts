@@ -54,7 +54,18 @@ export function playSeat(
           break;
         case "your_turn": {
           try {
-            const uci = await engine.bestMove(m.moves_uci ?? [], movetimeMs);
+            // Play to the authoritative clock when the server provides one, so
+            // the time control is real (the engine self-allocates and can
+            // flag). Fall back to a fixed think time if no clock is present.
+            const c = m.clock;
+            const uci = c
+              ? await engine.bestMoveWithClock(
+                  m.moves_uci ?? [],
+                  c.white_ms,
+                  c.black_ms,
+                  c.increment_ms ?? 0,
+                )
+              : await engine.bestMove(m.moves_uci ?? [], movetimeMs);
             if (cancelled()) {
               ws.close();
               return;

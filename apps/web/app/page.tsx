@@ -5,6 +5,14 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { useEngine } from "@/lib/engineContext";
+import { TIME_CONTROLS } from "@/lib/timeControls";
+
+const TC_NAME: Record<string, string> = {
+  "1+0": "Bullet",
+  "3+0": "Blitz",
+  "5+0": "Blitz",
+  "10+0": "Rapid",
+};
 
 export default function Home() {
   const { status } = useEngine();
@@ -46,19 +54,27 @@ export default function Home() {
         {banner}
       </div>
 
-      <div className="mode-grid">
-        <Link href="/play" className="mode-card">
-          <div className="mc-top">
-            <span className="mc-icon">♟</span>
-            <span className="mc-title">Quick Play</span>
-            <span className="mc-tag">free</span>
-          </div>
-          <div className="mc-desc">
-            Watch two engines battle, right here in your browser. Zero setup — proves the
-            whole stack with no download and no opponent needed.
-          </div>
-        </Link>
+      <div className="quick-play">
+        <div className="qp-head">
+          <span className="mc-icon">♟</span>
+          <span className="mc-title">Quick Play</span>
+          <span className="mc-tag">free · in your browser</span>
+        </div>
+        <div className="qp-desc muted">
+          Watch two engines battle right here — your CPU, no download, no opponent needed.
+          Pick a time control:
+        </div>
+        <div className="tc-grid">
+          {TIME_CONTROLS.map((t) => (
+            <Link key={t.label} href={`/play?tc=${encodeURIComponent(t.label)}`} className="tc-tile">
+              <span className="tc-clock">{t.label}</span>
+              <span className="tc-name">{TC_NAME[t.label] ?? "Custom"}</span>
+            </Link>
+          ))}
+        </div>
+      </div>
 
+      <div className="mode-grid">
         <Link href="/park" className="mode-card">
           <div className="mc-top">
             <span className="mc-icon">🅿️</span>

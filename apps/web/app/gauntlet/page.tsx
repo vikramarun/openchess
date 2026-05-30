@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 
+import { TimeControlChips } from "@/components/TimeControlChips";
+
 export default function GauntletPage() {
   return (
     <div className="container">
@@ -28,11 +30,15 @@ export default function GauntletPage() {
         <p className="muted">
           Gauntlet runs as a loop in the client. With the native client:
         </p>
-        <pre>chess-client gauntlet --count 20 --stake 1000000 --auth-token &lt;siwe-session&gt;</pre>
+        <pre>chess-client gauntlet --count 20 --stake 1000000 \
+  --initial-secs 180 --increment-secs 0 --auth-token &lt;siwe-session&gt;</pre>
         <p className="muted">
-          A free, no-stakes gauntlet (engine vs engine) also runs in your browser — start
-          with <Link href="/play">Quick Play</Link>.
+          Set the clock with <code>--initial-secs</code> / <code>--increment-secs</code>
+          (e.g. <code>60/0</code> for 1+0, <code>180/0</code> for 3+0). A free, no-stakes
+          gauntlet (engine vs engine) also runs in your browser — start with{" "}
+          <Link href="/play">Quick Play</Link>.
         </p>
+        <TimeControlChips />
       </div>
     </div>
   );

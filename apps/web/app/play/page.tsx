@@ -10,6 +10,7 @@ import { Chessboard } from "@/components/Chessboard";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
+import { DEFAULT_TC, TIME_CONTROLS, tcByLabel, type TimeControl } from "@/lib/timeControls";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number };
@@ -28,10 +29,29 @@ export default function PlayPage() {
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("loading engines…");
   const [nonce, setNonce] = useState(0); // bump to start a new game
+  const [tc, setTc] = useState<TimeControl | null>(null); // resolved on mount
 
   const pos = useRef(Chess.default());
 
+  // Resolve the time control from the ?tc= query param (set by the homepage),
+  // defaulting to 3+0. Done in an effect so SSR/CSR markup matches.
   useEffect(() => {
+    const q =
+      typeof window !== "undefined"
+        ? new URLSearchParams(window.location.search).get("tc")
+        : null;
+    setTc(tcByLabel(q ?? DEFAULT_TC.label));
+  }, []);
+
+  const pickTc = (next: TimeControl) => {
+    setResult(null);
+    setVerified(null);
+    setTc(next);
+    setNonce((n) => n + 1); // restart even if the same control is re-picked
+  };
+
+  useEffect(() => {
+    if (!tc) return; // wait until the time control is resolved
     let cancelled = false;
     const cancelledFn = () => cancelled;
     const engines: BrowserEngine[] = [];
@@ -55,7 +75,7 @@ export default function PlayPage() {
       const resp = await fetch(`${SERVER_HTTP}/games`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ initial_secs: 30, increment_secs: 0 }),
+        body: JSON.stringify({ initial_secs: tc.initial, increment_secs: tc.inc }),
       });
       if (!resp.ok) {
         setStatus(`server error (${resp.status}) — is the game server running?`);
@@ -123,7 +143,8 @@ export default function PlayPage() {
       seats.forEach((s) => s.close());
       engines.forEach((e) => e.dispose());
     };
-  }, [nonce]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nonce, tc?.label]);
 
   const winnerText = result
     ? result.winner
@@ -149,6 +170,20 @@ export default function PlayPage() {
             </div>
             <div className="muted" style={{ fontSize: 14 }}>
               Two Stockfish engines playing in your browser — your CPU, not our servers.
+            </div>
+            <div className="tc-row" role="group" aria-label="Time control">
+              {TIME_CONTROLS.map((t) => (
+                <button
+                  key={t.label}
+                  className={`tc-pill${tc?.label === t.label ? " active" : ""}`}
+                  onClick={() => pickTc(t)}
+                  title={`${t.initial / 60} minute${t.initial === 60 ? "" : "s"}${
+                    t.inc ? ` + ${t.inc}s` : ""
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
             <div className="muted" style={{ marginTop: 8 }}>
               Status: {status}

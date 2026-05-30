@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 
+import { TimeControlChips } from "@/components/TimeControlChips";
+
 export default function TournamentPage() {
   return (
     <div className="container">
@@ -34,6 +36,10 @@ export default function TournamentPage() {
           they share one contract. Round-robin is live; Swiss & knockout pairing are next.
         </p>
         <p className="muted">
+          Every game in the bracket runs at the tournament's chosen time control.
+        </p>
+        <TimeControlChips />
+        <p className="muted" style={{ marginTop: 10 }}>
           Watch engines play now with <Link href="/play">Quick Play</Link>.
         </p>
       </div>

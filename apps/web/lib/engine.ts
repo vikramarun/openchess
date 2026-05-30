@@ -62,8 +62,8 @@ export class BrowserEngine {
     return this.ready;
   }
 
-  /** Best move (UCI) for the given move history under a fixed think time. */
-  async bestMove(movesUci: string[], movetimeMs: number): Promise<string> {
+  /** Set the position and `go …`, resolving with the engine's bestmove. */
+  private async go(movesUci: string[], goCmd: string): Promise<string> {
     await this.ready;
     const pos = movesUci.length
       ? `position startpos moves ${movesUci.join(" ")}`
@@ -73,7 +73,7 @@ export class BrowserEngine {
       const to = setTimeout(() => {
         cleanup();
         reject(new Error("bestmove timeout"));
-      }, 60000);
+      }, 120000);
       const fn = (line: string) => {
         const m = line.match(/^bestmove\s+(\S+)/);
         if (m) {
@@ -87,8 +87,31 @@ export class BrowserEngine {
       };
       this.listeners.push(fn);
     });
-    this.send(`go movetime ${movetimeMs}`);
+    this.send(goCmd);
     return result;
+  }
+
+  /** Best move (UCI) for the given move history under a fixed think time. */
+  async bestMove(movesUci: string[], movetimeMs: number): Promise<string> {
+    return this.go(movesUci, `go movetime ${movetimeMs}`);
+  }
+
+  /** Best move (UCI) with the engine managing its own time from the clock —
+   *  Stockfish reads the side-to-move's remaining time from the position and
+   *  self-allocates, so the time control is real (and the engine can flag). */
+  async bestMoveWithClock(
+    movesUci: string[],
+    whiteMs: number,
+    blackMs: number,
+    incMs: number,
+  ): Promise<string> {
+    const w = Math.max(50, Math.floor(whiteMs));
+    const b = Math.max(50, Math.floor(blackMs));
+    const inc = Math.max(0, Math.floor(incMs));
+    return this.go(
+      movesUci,
+      `go wtime ${w} btime ${b} winc ${inc} binc ${inc}`,
+    );
   }
 
   dispose() {
