@@ -120,6 +120,41 @@ honest checklist.
   The escrow address + chain are single-sourced from the server's `GET /config`.
   The native client remains for headless / custom engines.
 
+## Deploying the game server (Fly.io / Railway / any Docker host)
+
+The Rust `chess-server` is a long-lived, stateful WebSocket process — host it on
+a platform that runs persistent containers (Fly.io, Railway, Render, a VM), **not
+Vercel**. A `Dockerfile` (multi-stage; builds the `chess-server` binary, runs it
+as non-root) and a `fly.toml` are in the repo root. Migrations are embedded and
+run on boot; queries are runtime sqlx, so the image builds without a database.
+
+**Fly.io (recommended — handles WebSockets + has managed Postgres):**
+
+```bash
+fly launch --no-deploy --copy-config --name openchess-server   # uses the repo Dockerfile + fly.toml
+fly postgres create --name openchess-db                        # managed Postgres
+fly postgres attach openchess-db                               # sets the DATABASE_URL secret
+# On-chain wagering (omit for a casual-only server):
+fly secrets set RPC_URL="https://..." ESCROW_ADDR="0x..." ORACLE_KEY="0x..."
+# Edit SIWE_DOMAIN + WEB_ORIGIN in fly.toml to your Vercel domain, then:
+fly deploy
+fly scale count 1                                              # exactly ONE instance (single-node)
+```
+
+Then point the Vercel app's `NEXT_PUBLIC_SERVER_HTTP` / `NEXT_PUBLIC_SERVER_WS`
+at `https://openchess-server.fly.dev` / `wss://openchess-server.fly.dev` and
+redeploy the web app.
+
+**Railway / Render / VM:** they auto-detect the root `Dockerfile`. Set the same
+env (`DATABASE_URL`, `BIND=0.0.0.0:8080`, `SIWE_DOMAIN`, `WEB_ORIGIN`, and the
+on-chain vars), expose port 8080, and run a **single** instance. Use the
+platform's health check on `/ready`.
+
+Critical reminders (see "Known limitations"): **one instance only**, don't
+auto-stop the machine (it holds live games in memory), set `WEB_ORIGIN` +
+`SIWE_DOMAIN` to the exact Vercel host, and set `REQUIRE_ONCHAIN=1` once the
+on-chain vars are in so a misconfigured node refuses to boot.
+
 ## Deploying the web app to Vercel
 
 Vercel hosts the **Next.js frontend only** (`apps/web`). The Rust game server is

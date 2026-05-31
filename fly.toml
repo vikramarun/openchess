@@ -1,0 +1,52 @@
+# Fly.io config for the OpenChess game server. Deploy with:
+#
+#   fly launch --no-deploy --copy-config --name openchess-server   # first time
+#   fly postgres create --name openchess-db                        # managed Postgres
+#   fly postgres attach openchess-db                               # sets DATABASE_URL secret
+#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...  # on-chain (wagering)
+#   fly deploy
+#   fly scale count 1                                              # exactly ONE instance
+#
+# IMPORTANT: this is a single-node, stateful server (live games + lobby + SIWE
+# sessions are in-process). Run exactly one machine and do NOT auto-stop it.
+
+app = "openchess-server"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  BIND = "0.0.0.0:8080"
+  SIWE_CHAIN_ID = "8453"            # 8453 = Base mainnet (84532 = Base Sepolia)
+  # Edit these two to your deployed Vercel domain, then `fly deploy`:
+  SIWE_DOMAIN = "your-app.vercel.app"
+  WEB_ORIGIN = "https://your-app.vercel.app"
+  # Set to "1" only once DATABASE_URL + RPC_URL + ESCROW_ADDR + ORACLE_KEY are
+  # all configured (it fails the boot otherwise — see main.rs REQUIRE_ONCHAIN).
+  # REQUIRE_ONCHAIN = "1"
+
+# Secrets (NOT in this file — set via `fly secrets set` / `fly postgres attach`):
+#   DATABASE_URL   (from `fly postgres attach`)
+#   RPC_URL        (Base RPC endpoint)
+#   ESCROW_ADDR    (deployed ChessEscrow address)
+#   ORACLE_KEY     (oracle signer key — use a KMS/HSM in real production)
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+  # WebSockets ride over the same HTTP service (Fly proxies WS transparently).
+
+  [[http_service.checks]]
+    method = "get"
+    path = "/ready"
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

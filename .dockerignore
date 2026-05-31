@@ -1,0 +1,16 @@
+# Keep the Docker build context small + the Rust build hermetic.
+target/
+**/target/
+apps/
+contracts/out/
+contracts/cache/
+contracts/lib/
+contracts/broadcast/
+.git/
+.github/
+**/node_modules/
+**/.next/
+*.log
+.env
+.env.*
+.claude/
