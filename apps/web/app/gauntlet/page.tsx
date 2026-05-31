@@ -8,6 +8,7 @@ import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { useAvailable } from "@/lib/useBankroll";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 type Stats = {
@@ -58,9 +59,20 @@ function GauntletClient() {
     setToken(authToken());
   }, [address, isConnected]);
 
+  const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
   const wantStake = stake.trim().length > 0;
   const running = !!session && stats?.status !== "stopped";
+  const stakeBig = (() => {
+    if (!wantStake) return 0n;
+    try {
+      return parseUsdc(stake);
+    } catch {
+      return null;
+    }
+  })();
+  const startUnderfunded =
+    wantStake && stakeBig != null && available != null && available < stakeBig;
 
   // Queue loop: while running with no active game, search for an opponent and
   // start the next game when matched.
@@ -263,10 +275,16 @@ function GauntletClient() {
               ))}
             </div>
           </label>
-          <button className="primary" onClick={start}>
+          <button className="primary" onClick={start} disabled={startUnderfunded}>
             {wantStake ? "Start staked gauntlet" : "Start casual gauntlet"}
           </button>
         </div>
+        {startUnderfunded && stakeBig != null && (
+          <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>
+            Available balance {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(stakeBig)} per game —
+            deposit more above.
+          </div>
+        )}
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
         <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
           Prefer the native client? <code>chess-client gauntlet --count 20 --stake 1000000</code>.

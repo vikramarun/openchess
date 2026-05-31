@@ -8,6 +8,7 @@ import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { useAvailable } from "@/lib/useBankroll";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 type TGame = {
@@ -96,6 +97,7 @@ function TournamentClient() {
     };
   }, [playingTid]);
 
+  const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
 
   const identityIn = (t: Tourney): string | null => {
@@ -317,11 +319,17 @@ function TournamentClient() {
                     </div>
                   </div>
                   <div className="tc-actions">
-                    {t.status === "open" && !joined && (
-                      <button className="ghost" onClick={() => join(t)}>
-                        Join
-                      </button>
-                    )}
+                    {t.status === "open" &&
+                      !joined &&
+                      (t.buy_in && available != null && available < BigInt(t.buy_in) ? (
+                        <span className="muted" title="Deposit more USDC to join">
+                          need {fmtUsdc(t.buy_in)}
+                        </span>
+                      ) : (
+                        <button className="ghost" onClick={() => join(t)}>
+                          Join
+                        </button>
+                      ))}
                     {t.status === "open" && joined && (
                       <button className="ghost" onClick={() => startT(t)}>
                         Start

@@ -8,7 +8,17 @@ import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { useAvailable } from "@/lib/useBankroll";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
+
+/** Parse a USDC amount to base units, or null if invalid. */
+function tryParse(s: string): bigint | null {
+  try {
+    return parseUsdc(s);
+  } catch {
+    return null;
+  }
+}
 
 type Offer = {
   offer_id: string;
@@ -119,8 +129,12 @@ function ParkClient() {
     };
   }, [pendingOffer, token, stake]);
 
+  const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
   const wantStake = stake.trim().length > 0;
+  const stakeBig = wantStake ? tryParse(stake) : 0n;
+  const postUnderfunded =
+    wantStake && stakeBig != null && available != null && available < stakeBig;
 
   const createOffer = async () => {
     setErr(null);
@@ -268,11 +282,17 @@ function ParkClient() {
           <button
             className="primary"
             onClick={createOffer}
-            disabled={creating || !!pendingOffer}
+            disabled={creating || !!pendingOffer || postUnderfunded}
           >
             {creating ? "Posting…" : wantStake ? "Post staked game" : "Post casual game"}
           </button>
         </div>
+        {postUnderfunded && stakeBig != null && (
+          <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>
+            Available balance {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(stakeBig)} — deposit
+            more above.
+          </div>
+        )}
         {pendingOffer && (
           <div className="muted" style={{ marginTop: 8 }}>
             Waiting for an opponent to accept… your engine will start automatically.{" "}
@@ -318,6 +338,10 @@ function ParkClient() {
                     <td style={{ textAlign: "right" }}>
                       {mine ? (
                         <span className="muted">your offer</span>
+                      ) : o.stake && available != null && available < BigInt(o.stake) ? (
+                        <span className="muted" title="Deposit more USDC to accept">
+                          need {fmtUsdc(o.stake)}
+                        </span>
                       ) : (
                         <button className="ghost" onClick={() => acceptOffer(o)}>
                           Accept &amp; play
