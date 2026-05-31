@@ -178,6 +178,56 @@ and `SIWE_DOMAIN=<your-app>.vercel.app` (must equal the browser origin host), pl
 `DATABASE_URL`, `RPC_URL`, `ESCROW_ADDR`, `ORACLE_KEY`, `REQUIRE_ONCHAIN=1`.
 Terminate TLS in front of it so the browser can reach it over `https`/`wss`.
 
+## Enabling on-chain wagering (Base Sepolia testnet)
+
+This turns the casual-only deployment into a real *staked* one you can test with
+a wallet, on testnet (no real money — defers the legal review).
+
+**1. Make the oracle keypair.** The server signs results with this key; the
+contract is told its *address*. They must match.
+
+```bash
+cast wallet new            # prints an Address (= ORACLE) and a Private Key (= ORACLE_KEY)
+```
+
+**2. Fund a deployer + get test USDC.**
+- Base Sepolia ETH for the deployer wallet (Coinbase / Alchemy / QuickNode faucet).
+- Test USDC for each player wallet — Circle faucet (https://faucet.circle.com),
+  Base Sepolia. USDC there is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`.
+
+**3. Deploy `ChessEscrow`** (the script auto-picks Base Sepolia USDC at chain
+84532; `FEE_RECIPIENT` defaults to the oracle, fee 1%, timeout 24h):
+
+```bash
+cd contracts
+ORACLE=0x<oracle-addr> forge script script/Deploy.s.sol:Deploy \
+  --rpc-url $BASE_SEPOLIA_RPC --private-key $DEPLOYER_KEY --broadcast --verify
+# (verification needs a Basescan API key: --verifier etherscan --etherscan-api-key $KEY)
+```
+
+Note the deployed escrow address.
+
+**4. Point the server at it** (Fly secrets), then redeploy:
+
+```bash
+fly secrets set \
+  RPC_URL="$BASE_SEPOLIA_RPC" \
+  ESCROW_ADDR="0x<deployed-escrow>" \
+  ORACLE_KEY="0x<oracle-private-key>"   # the key from step 1
+# in fly.toml [env]: SIWE_CHAIN_ID = "84532", REQUIRE_ONCHAIN = "1"
+fly deploy
+```
+
+**5. No frontend change.** `GET /config` now reports `wager_enabled` + the escrow
++ chain 84532; the web app already bundles Base Sepolia, and the bankroll panel
+prompts the wallet to switch networks. Just keep `NEXT_PUBLIC_SERVER_*` pointed
+at the server.
+
+**6. Test the loop.** Connect a wallet on Base Sepolia → deposit test USDC in the
+bankroll panel → post a staked Park game → accept from a second wallet → watch it
+settle and the winner's bankroll grow. (Mainnet is the same flow with real USDC —
+but do the contract audit + oracle-key hardening + legal review first.)
+
 ## Environment variables
 
 **Server** (`chess-server`):
