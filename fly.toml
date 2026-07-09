@@ -1,56 +1,34 @@
-# Fly.io config for the OpenChess game server. Deploy with:
+# fly.toml app configuration file generated for openchess on 2026-07-09T23:22:48Z
 #
-#   fly launch --no-deploy --copy-config --name openchess          # first time
-#   fly postgres create --name openchess-db                        # managed Postgres
-#   fly postgres attach openchess-db                               # sets DATABASE_URL secret
-#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...  # on-chain (wagering)
-#   fly deploy
-#   fly scale count 1                                              # exactly ONE instance
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# IMPORTANT: this is a single-node, stateful server (live games + lobby + SIWE
-# sessions are in-process). Run exactly one machine and do NOT auto-stop it.
 
-app = "openchess"
-primary_region = "iad"
+app = 'openchess'
+primary_region = 'dfw'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  BIND = "0.0.0.0:8080"
-  # The Vercel production host. SIWE_DOMAIN is host-only (must equal the browser
-  # URL); WEB_ORIGIN is the full origin (CORS). Update both if the domain changes.
-  SIWE_DOMAIN = "openchess-five.vercel.app"
-  WEB_ORIGIN = "https://openchess-five.vercel.app"
-  # Chain used for SIWE + escrow. Only matters once you enable wagering — flip to
-  # "84532" when you wager on Base Sepolia. (8453 = Base mainnet.)
-  SIWE_CHAIN_ID = "8453"
-  # REQUIRE_ONCHAIN is intentionally OFF while testing (casual play only). Turn it
-  # on ("1") only once DATABASE_URL + RPC_URL + ESCROW_ADDR + ORACLE_KEY are all
-  # set — it fails the boot otherwise (see main.rs REQUIRE_ONCHAIN).
-  # REQUIRE_ONCHAIN = "1"
-
-# Secrets (NOT in this file — set via `fly secrets set` / `fly postgres attach`):
-#   DATABASE_URL   (from `fly postgres attach`)
-#   RPC_URL        (Base RPC endpoint)
-#   ESCROW_ADDR    (deployed ChessEscrow address)
-#   ORACLE_KEY     (oracle signer key — use a KMS/HSM in real production)
+  BIND = '0.0.0.0:8080'
+  SIWE_CHAIN_ID = '8453'
+  SIWE_DOMAIN = 'openchess-five.vercel.app'
+  WEB_ORIGIN = 'https://openchess-five.vercel.app'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = false
   min_machines_running = 1
-  # WebSockets ride over the same HTTP service (Fly proxies WS transparently).
 
   [[http_service.checks]]
-    method = "get"
-    path = "/ready"
-    interval = "15s"
-    timeout = "3s"
-    grace_period = "10s"
+    interval = '15s'
+    timeout = '3s'
+    grace_period = '10s'
+    method = 'get'
+    path = '/ready'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
