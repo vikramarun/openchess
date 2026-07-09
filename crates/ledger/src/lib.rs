@@ -16,17 +16,23 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 // Bindings generated from the Foundry build artifacts (ABI + bytecode), so we
-// can both call and (in tests) deploy the contracts.
+// can both call and (in tests) deploy the contracts. The artifacts are VENDORED
+// under `abi/` (committed) rather than read from `contracts/out/` — that dir is
+// gitignored `forge build` output and isn't present in the Docker build context
+// or on a fresh clone. Regenerate after a contract change with:
+//   (cd contracts && forge build) && \
+//   cp contracts/out/ChessEscrow.sol/ChessEscrow.json crates/ledger/abi/ && \
+//   cp contracts/out/ChessEscrow.t.sol/MockUSDC.json  crates/ledger/abi/
 sol!(
     #[sol(rpc)]
     ChessEscrow,
-    "../../contracts/out/ChessEscrow.sol/ChessEscrow.json"
+    "abi/ChessEscrow.json"
 );
 
 sol!(
     #[sol(rpc)]
     MockUSDC,
-    "../../contracts/out/ChessEscrow.t.sol/MockUSDC.json"
+    "abi/MockUSDC.json"
 );
 
 // Re-exported so downstream crates (the server) don't depend on alloy directly.
