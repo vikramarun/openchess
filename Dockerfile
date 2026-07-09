@@ -4,7 +4,7 @@
 # Vercel (Root Directory = apps/web).
 
 # ---- build ----
-FROM rust:1.83-bookworm AS build
+FROM rust:1.90-bookworm AS build
 WORKDIR /app
 
 # Copy the whole Cargo workspace. (apps/, contracts/, target/ are excluded by
