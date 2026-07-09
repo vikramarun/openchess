@@ -4,7 +4,8 @@
 # Vercel (Root Directory = apps/web).
 
 # ---- build ----
-FROM rust:1.90-bookworm AS build
+# alloy 2.0.x requires rustc >= 1.91; keep this at/above that.
+FROM rust:1.91-bookworm AS build
 WORKDIR /app
 
 # Copy the whole Cargo workspace. (apps/, contracts/, target/ are excluded by
