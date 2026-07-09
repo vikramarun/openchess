@@ -173,6 +173,12 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers(tower_http::cors::Any);
 
     let app = Router::new()
+        // Friendly root so the API doesn't 404 (Fly's post-deploy smoke test
+        // curls `/`). This server is an API + WebSocket hub; the UI is elsewhere.
+        .route(
+            "/",
+            get(|| async { "OpenChess game server — API + WebSocket hub. Play at https://openchess.ai" }),
+        )
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(ready))
         .route("/oracle", get(oracle_info))
