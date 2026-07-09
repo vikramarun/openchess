@@ -18,10 +18,11 @@ primary_region = "iad"
 
 [env]
   BIND = "0.0.0.0:8080"
-  # The Vercel production host. SIWE_DOMAIN is host-only (must equal the browser
-  # URL); WEB_ORIGIN is the full origin (CORS). Update both if the domain changes.
-  SIWE_DOMAIN = "openchess-five.vercel.app"
-  WEB_ORIGIN = "https://openchess-five.vercel.app"
+  # The canonical frontend host. SIWE_DOMAIN is host-only (must equal the browser
+  # URL exactly); WEB_ORIGIN is the full origin (CORS). www.openchess.ai must
+  # redirect to the apex so the origin is always this one.
+  SIWE_DOMAIN = "openchess.ai"
+  WEB_ORIGIN = "https://openchess.ai"
   # Chain used for SIWE + escrow. Only matters once you enable wagering — flip to
   # "84532" when you wager on Base Sepolia. (8453 = Base mainnet.)
   SIWE_CHAIN_ID = "8453"
