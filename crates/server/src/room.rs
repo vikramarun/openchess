@@ -5,6 +5,7 @@
 //! task, so there are no locks on the hot path and move ordering is serialized
 //! by the command channel.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,11 +47,27 @@ pub enum RoomCmd {
     },
     /// A player resigned.
     Resign { color: Color },
+    /// A spectator joined: reply with the current game state so it can rebuild
+    /// the board from the full move history (it otherwise only sees new moves).
+    Snapshot {
+        resp: oneshot::Sender<Snapshot>,
+    },
+}
+
+/// Current game state for a mid-join spectator.
+pub struct Snapshot {
+    pub started: bool,
+    pub start_fen: String,
+    pub moves_uci: Vec<String>,
+    pub clock: protocol::Clock,
 }
 
 pub struct RoomHandle {
     pub cmd_tx: mpsc::Sender<RoomCmd>,
     pub spectate_tx: broadcast::Sender<ServerMessage>,
+    /// True once the game has actually begun (both engines ready). Lets the
+    /// lobby list only in-progress games, not idle rooms awaiting connections.
+    pub started: Arc<AtomicBool>,
 }
 
 /// Spawn a room task and return a handle for the HTTP/WS layer.
@@ -65,6 +82,9 @@ pub fn spawn_room(
 ) -> RoomHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (spectate_tx, _) = broadcast::channel(256);
+    // Shared with the RoomHandle so the lobby can list only games that have
+    // actually begun (both engines connected + ready), not idle/ghost rooms.
+    let started_flag = Arc::new(AtomicBool::new(false));
     let room = Room {
         game_id,
         tc,
@@ -76,6 +96,7 @@ pub fn spawn_room(
         wready: false,
         bready: false,
         started: false,
+        started_flag: started_flag.clone(),
         spectate: spectate_tx.clone(),
         base: Instant::now(),
         settlement,
@@ -88,6 +109,7 @@ pub fn spawn_room(
     RoomHandle {
         cmd_tx,
         spectate_tx,
+        started: started_flag,
     }
 }
 
@@ -102,6 +124,7 @@ struct Room {
     wready: bool,
     bready: bool,
     started: bool,
+    started_flag: Arc<AtomicBool>,
     spectate: broadcast::Sender<ServerMessage>,
     base: Instant,
     settlement: Arc<dyn SettlementSink>,
@@ -151,6 +174,12 @@ impl Room {
             if self.started && self.game.as_ref().map(|g| g.is_over()).unwrap_or(false) {
                 // Keep the task alive briefly so spectators can catch GameOver,
                 // then exit. For the slice we simply break.
+                break;
+            }
+            // Reap a room that never begins (engines never both connected) so it
+            // doesn't linger forever as a ghost in the lobby's "live" list.
+            if !self.started && self.base.elapsed() > Duration::from_secs(60) {
+                tracing::info!(game_id = %self.game_id, "room reaped: never started");
                 break;
             }
         }
@@ -250,6 +279,27 @@ impl Room {
                     }
                 }
             }
+            RoomCmd::Snapshot { resp } => {
+                let snap = match self.game.as_ref() {
+                    Some(g) => Snapshot {
+                        started: true,
+                        start_fen: g.start_fen().to_string(),
+                        moves_uci: g.moves_uci().to_vec(),
+                        clock: g.clock(self.now_ms()),
+                    },
+                    None => Snapshot {
+                        started: false,
+                        start_fen: String::new(),
+                        moves_uci: Vec::new(),
+                        clock: protocol::Clock {
+                            white_ms: self.tc.initial_ms,
+                            black_ms: self.tc.initial_ms,
+                            increment_ms: self.tc.increment_ms,
+                        },
+                    },
+                };
+                let _ = resp.send(snap);
+            }
         }
     }
 
@@ -260,6 +310,7 @@ impl Room {
         let start_fen = game.start_fen().to_string();
         self.game = Some(game);
         self.started = true;
+        self.started_flag.store(true, Ordering::Relaxed);
 
         if let Some(db) = &self.db {
             let _ = db.set_game_active(self.game_id).await;

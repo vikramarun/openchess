@@ -276,9 +276,26 @@ pub struct LiveGame {
     pub created_ms: u64,
 }
 
-/// List in-progress games so the lobby can offer them to spectate.
+/// List in-progress games so the lobby can offer them to spectate. Only games
+/// that have actually begun (both engines connected + ready) are listed — not
+/// idle rooms still waiting for connections.
 async fn live_games(State(state): State<AppState>) -> Json<Vec<LiveGame>> {
-    let mut list: Vec<LiveGame> = state.0.live_games.lock().values().cloned().collect();
+    let started: std::collections::HashSet<GameId> = {
+        let rooms = state.0.rooms.lock();
+        rooms
+            .iter()
+            .filter(|(_, h)| h.started.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    let mut list: Vec<LiveGame> = state
+        .0
+        .live_games
+        .lock()
+        .values()
+        .filter(|g| started.contains(&g.game_id))
+        .cloned()
+        .collect();
     // Newest first.
     list.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
     Json(list)

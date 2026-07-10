@@ -143,13 +143,53 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socke
 }
 
 async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
-    let Some((_cmd, mut spec_rx)) = state.room_channels(&game_id) else {
+    // Subscribe first (so no live move is missed), then snapshot the history.
+    let Some((cmd_tx, mut spec_rx)) = state.room_channels(&game_id) else {
         return;
+    };
+    let snapshot = {
+        let (tx, rx) = oneshot::channel();
+        if cmd_tx.send(crate::room::RoomCmd::Snapshot { resp: tx }).await.is_ok() {
+            rx.await.ok()
+        } else {
+            None
+        }
     };
     let (mut sink, mut stream) = socket.split();
 
     let writer = tokio::spawn(async move {
         let mut seq = 0u64;
+        // Replay the game so far to this spectator: game_start + one
+        // opponent_moved per historical move rebuilds the board to the current
+        // position (the client applies only legal moves, so any overlap with
+        // buffered live messages is harmless). Then stream live updates.
+        if let Some(snap) = snapshot {
+            if snap.started {
+                let mut replay = vec![ServerMessage::GameStart {
+                    game_id,
+                    start_fen: snap.start_fen,
+                    your_color: Color::White,
+                    clock: snap.clock,
+                }];
+                for (i, uci) in snap.moves_uci.into_iter().enumerate() {
+                    replay.push(ServerMessage::OpponentMoved {
+                        game_id,
+                        ply: i as u32,
+                        uci,
+                        clock: snap.clock,
+                    });
+                }
+                for msg in replay {
+                    seq += 1;
+                    let env = Envelope::new(seq, 0, msg);
+                    if let Ok(text) = serde_json::to_string(&env) {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         loop {
             match spec_rx.recv().await {
                 Ok(msg) => {
