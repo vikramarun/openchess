@@ -1,173 +1,177 @@
-# Machine-vs-Machine Chess Wagering Platform
+# OpenChess
 
-A chess platform in the spirit of lichess, with a twist: **engines play, and
-users wager crypto (USDC on Base) on the outcome.** Because machines play, the
-classic cheating problem dissolves — the server is simply the authority on
-legality, clock, and result. Players bring their own UCI engine via a client we
-ship; money settles non-custodially on-chain.
+**Machines play. You wager.** An engine-vs-engine chess platform in the spirit
+of lichess, with a twist: **bots play, and users stake USDC on Base** — settled
+non-custodially. Because engines play, the classic cheating problem dissolves —
+the server is simply the authority on legality, clock, and result. Players bring
+their own UCI engine (or use the Stockfish that runs in the browser); money
+settles on-chain, in a contract, never a platform wallet.
 
-See [the design plan](~/.claude/plans/i-want-to-make-binary-pelican.md) for the
-full architecture and rationale.
+**Live:** <https://openchess.ai>
+
+---
+
+## What it does
+
+- **Casual lobby (free, fully in-browser).** Pick a time control (1+0 / 3+0 /
+  5+0 / 10+0) and play instantly against the house, open a challenge for another
+  player's engine, or **watch live games**. Two Stockfish engines compiled to
+  **WASM** play on *your* CPU — zero download, zero server compute. A curated
+  opening book (from [official-stockfish/books](https://github.com/official-stockfish/books))
+  makes openings instant and varied.
+- **Wager modes (USDC on Base, non-custodial).**
+  - **Park / Patzer** — post a game at a stake; someone accepts; winner takes the
+    pot minus rake. Deposit + play **in the browser**.
+  - **Gauntlet** — your engine plays back-to-back games at a fixed tier until you
+    stop; each an independent on-chain settlement against a locked bankroll.
+  - **Tournament** — buy in to a prize pool; a round-robin runs; the pool is
+    distributed on-chain by final standings (direct, or a Merkle-root claim for
+    large fields).
+- **Player profiles** — per-address stats (games, W/L/D, win rate, net USDC,
+  Elo) and game history, chess.com-style, at `/player/<address>`.
+- **Verifiable results** — the oracle signs each result; the web app recovers the
+  signer against the published `/oracle` address and shows a "✓ Verified" badge.
+
+## How it works (one paragraph)
+
+Rust monorepo (Cargo workspace). The **game server** (axum + tokio) runs one
+actor task per live game and is the sole authority on move legality
+([shakmaty](https://github.com/niklasf/shakmaty)), the clock, and the result.
+Engines connect over WebSocket through a **bring-your-own-engine** protocol — the
+web app is itself a BYO client driving Stockfish WASM (`apps/web/lib/engine.ts`
++ `lib/play.ts`), and power users can point the native client at any UCI engine.
+On a finished wagered game the server (acting as the result **oracle**) signs an
+EIP-712 result and settles it on the non-custodial **`ChessEscrow`** contract via
+a durable transactional outbox. Funds live in the contract; the chain enforces
+`bankroll − lockedExposure` withdrawal limits, address-bound payouts, replay
+guards, and settlement timeouts. See **[ARCHITECTURE.md](ARCHITECTURE.md)** for
+system / flow / data diagrams.
+
+## Repo layout
+
+```
+crates/protocol      shared serde wire types (server + client)
+crates/game-engine   authoritative board, clock, result (shakmaty)
+crates/byo-client    chess-client: UCI driver, selfplay + networked play, Polyglot book
+crates/server        chess-server: HTTP + WS hub + per-game room actors, 3 modes, SIWE
+crates/ledger        on-chain settlement (alloy), EIP-712 results, SIWE recovery
+crates/persistence   Postgres (sqlx) + migrations + settlement outbox
+contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
+apps/web             Next.js UI: lobby, in-browser WASM engine, wallet/SIWE, spectator, profiles
+scripts/             onchain-demo.sh, tournament-demo.sh (local Anvil money-loop demos)
+Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
+```
 
 ## Status
 
-End-to-end and tested: **43 automated tests pass** (21 Rust + 22 Foundry). Three
-full audit rounds ([AUDIT.md](AUDIT.md)) with the Critical/High findings
-remediated. All three game modes work end-to-end (incl. on-chain tournament pool
-distribution + Merkle-claim for large fields), and the web app runs a Stockfish
-engine **in the browser** (WASM — the user's CPU, zero server cost).
+**43 automated tests pass** (21 Rust + 22 Foundry). Three audit rounds
+([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated. CI
+(`.github/workflows/ci.yml`) runs Postgres + `forge test` + `cargo test` + the
+web build on every push.
 
-Results are **client-verifiable**: the oracle signs each result and the web app
-recovers the signer against the published `/oracle` address ("✓ Verified"
-badge). Tournaments are **restart-safe**: a server restart re-derives standings
-from persisted results and settles completed tournaments by result.
-
-See **[ARCHITECTURE.md](ARCHITECTURE.md)** for system/flow/data diagrams and
-**[PRODUCTION.md](PRODUCTION.md)** for the go-live checklist + operator action
-items (third-party audit, oracle key/KMS, deploy, infra, legal).
-
-| Component | Crate / dir | Status |
+| Component | Dir | Status |
 |---|---|---|
 | Shared wire protocol | `crates/protocol` | ✅ 3 tests |
 | Authoritative game engine (shakmaty) | `crates/game-engine` | ✅ 6 tests |
-| BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish; 3 book tests |
-| Game server (WS hub + rooms + 3 modes + SIWE) | `crates/server` | ✅ live demos; 2 unit tests |
-| Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 18 Foundry tests |
-| On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests + live demo |
-| Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip test + live |
-| Web app (lichess-style UI + in-browser WASM engine) | `apps/web` | ✅ verified in-browser |
+| BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish + book tests |
+| Game server (WS hub + rooms + 3 modes + SIWE + lobby) | `crates/server` | ✅ live + unit tests |
+| Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 22 Foundry tests |
+| On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests |
+| Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip + live |
+| Web app (lobby, in-browser WASM engine, spectator, profiles) | `apps/web` | ✅ verified in-browser |
 
-**Verified end-to-end:**
-- Two BYO clients driving Stockfish play a full game over WebSocket with a
-  server-enforced clock; result is detected authoritatively. A Next.js spectator
-  renders the live board (chessground), clocks, and SAN move list.
-- **Wagered games are authenticated**: SIWE sign-in → authenticated Park
-  offer/accept where each on-chain seat's **staked address** is the signed-in
-  wallet (fixed at escrow open) → escrow opened → engines play → result enqueued
-  to a durable, retrying **settlement outbox** → a worker signs a time-bounded
-  EIP-712 result and settles on-chain. Verified live (decisive payout and draw
-  refund) via `scripts/onchain-demo.sh`. (Launch tokens remain bearer
-  capabilities to *play* a seat — they can't redirect winnings; wallet-bound
-  single-use tokens are a follow-up.)
-- **All three modes are complete:**
-  - **Park/Patzer** — post a priced offer, opponent accepts, single-game escrow.
-  - **Gauntlet** — a server session + client loop (`chess-client gauntlet`) keeps
-    playing back-to-back games at a fixed tier until stopped (or a game cap),
-    each an independent per-game escrow; server tracks W/L/D. Same contract.
-    Verified via a multi-game demo.
-  - **Tournament** — buy-in opens a pool on-chain (`openTournament`); each join
-    locks a buy-in (`enterTournament`); a round-robin runs; the server aggregates
-    standings as games finish and distributes the pool by a top-heavy split via
-    a signed `settleTournament`. Verified live on Anvil
-    (`scripts/tournament-demo.sh`): 3-player buy-in tournament, pool distributed
-    65/25/10, funds conserved.
+**This is not a turnkey production deployment.** Several items are ops/legal
+decisions only the operator can make — an **independent contract audit**, the
+**oracle key in a KMS/HSM behind a multisig+timelock**, single-node infra, and a
+**legal/regulatory review** for real-money gaming. See
+**[PRODUCTION.md](PRODUCTION.md)** for the full go-live checklist and the honest
+list of known limitations (single-node only; in-browser wagering is live for
+Park, native-client for Gauntlet/Tournament; no anti-collusion controls yet).
 
-### Security hardening (post-audit)
-- Wager endpoints require a SIWE session; seats derive from the authenticated
-  wallet (never the request body); identical seats rejected.
-- Contract: `white != black`, fee-recipient can't play, SafeERC20-style
-  transfers + deposit delta, `Ownable2Step` + `Pausable`, time-bounded results
-  (`deadline`) with a fork-safe domain separator, rake snapshot at open.
-- Settlement: transactional finish+enqueue, retry with attempt cap + stale-row
-  reaper, idempotent "already settled" handling, fail-closed (no wager without
-  on-chain settlement / on escrow-open failure).
-- Auth/DoS: full EIP-4361 verification (domain/chainId/address match), single-use
-  nonces + TTL, session TTL, evicted lobby/room/token state, restricted CORS,
-  input bounds, SHA-256 result commitment.
+## Run it locally
 
-### Not yet wired (next steps)
-- Redis pub/sub + game-node sharding (today: in-process broadcast, single node)
-- Glicko-2 ratings
-- Durable outbox for **tournament** settlement (per-game settlement already uses
-  the durable outbox; tournament settlement is currently direct-with-logging)
-- Result signature (`server_sig`) surfaced to clients; multisig/threshold oracle
-- Anti-collusion / wash-trading controls; per-move client signing; wss/TLS in
-  deployment; tokens off the WS query string
+**Prerequisites:** Rust (stable, ≥ 1.91 — required by `alloy`), Foundry
+(`forge`/`anvil`/`cast`), Node + pnpm, a UCI engine on PATH (`stockfish`), and
+Postgres (optional, for persistence).
 
-## Prerequisites
-- Rust (stable), Foundry (`forge`/`anvil`/`cast`), a UCI engine on PATH
-  (`stockfish`), Node/pnpm (web), and Postgres (optional, for persistence).
-
-## Build & test
 ```bash
-# 1. Build contracts FIRST — the `ledger` crate compiles against the Foundry
-#    artifacts in contracts/out/ (which are git-ignored).
-(cd contracts && forge build && forge test)
-
-# 2. Rust workspace
+# Rust workspace — contract ABIs are vendored (crates/ledger/abi), so this
+# builds without a prior `forge build`.
 cargo build
-cargo test                      # set DATABASE_URL to also run the persistence test
+cargo test                 # set DATABASE_URL to also run the persistence test
 
-# 3. Web app
-(cd apps/web && pnpm install && pnpm build)
+# Contracts
+(cd contracts && forge test)
+
+# Web app + server (casual play needs only the server running)
+cargo run -p server                        # terminal 1  → 127.0.0.1:8080
+cd apps/web && pnpm install && pnpm dev     # terminal 2  → http://localhost:3000
 ```
 
-## Run the slice
+Open <http://localhost:3000> → pick a time control → **Play now** runs two
+in-browser engines against the live server with no setup. The homepage is the
+casual lobby (create / join / watch); `/player/<address>` shows profiles.
 
-**1. Self-play (no network)** — referee two local engines via the authority:
+### Demo flows
+
 ```bash
+# Self-play (no network): referee two local engines via the authority
 cargo run -p byo-client -- selfplay --movetime-ms 50 --initial-secs 30 --max-plies 120
-```
 
-**2. Networked game** — server + two clients:
-```bash
-# terminal 1: server
-RUST_LOG=info cargo run -p server
-
-# terminal 2: create a game and grab the tokens
-curl -s -X POST http://127.0.0.1:8080/games \
-  -H 'content-type: application/json' \
-  -d '{"initial_secs":10,"increment_secs":0}'
-# -> { "game_id": "...", "white_token": "...", "black_token": "...", ... }
-
-# terminals 3 & 4: connect each engine to its seat
+# Networked game: create one, then connect each engine to its seat
+curl -s -X POST http://127.0.0.1:8080/games -H 'content-type: application/json' \
+  -d '{"initial_secs":10,"increment_secs":0}'          # -> game_id + white/black tokens
 cargo run -p byo-client -- play --game <GAME_ID> --token <WHITE_TOKEN>
 cargo run -p byo-client -- play --game <GAME_ID> --token <BLACK_TOKEN>
-```
-A spectator can connect (read-only, no token) to `ws://127.0.0.1:8080/ws/game/<GAME_ID>`.
+# spectate read-only (no token): ws://127.0.0.1:8080/ws/game/<GAME_ID>
 
-**3. Web UI** (lichess-style) — the homepage loads a **Stockfish engine in your
-browser** (WASM, runs on your CPU — zero download, zero server cost), then offers
-the game modes:
-```bash
-cd apps/web && pnpm install && pnpm dev   # http://localhost:3000
-```
-Open http://localhost:3000 → **Quick Play** runs two browser engines against the
-live server with no setup. The web page itself is a bring-your-own-engine client
-(`lib/engine.ts` + `lib/play.ts`) speaking the same WS protocol as the native
-client; advanced users still point the native client at a custom UCI engine.
+# Full on-chain money loop (Park/Patzer) on a local Anvil chain
+cargo build && (cd contracts && forge build) && bash scripts/onchain-demo.sh
 
-**4. On-chain money loop (Park/Patzer)** — the full wagered flow on a local
-Anvil chain: SIWE sign-in → authenticated offer/accept → escrow → play →
-durable outbox → settle → bankrolls move:
-```bash
-cargo build && (cd contracts && forge build)
-bash scripts/onchain-demo.sh
-```
-
-**5. Gauntlet** — keep playing back-to-back games at a tier:
-```bash
-# (server running) two casual gauntlets pair each other for N games:
+# Gauntlet — back-to-back games at a tier
 chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
-# staked: add --stake <usdc-base-units> --auth-token <siwe-session>
-```
+#   staked: add --stake <usdc-base-units> --auth-token <siwe-session>
 
-**6. Tournament (staked, on-chain pool)** — buy-in pool distributed by standings
-on Anvil (open pool → join/lock buy-ins → round-robin → distribute 65/25/10):
-```bash
+# Tournament — staked buy-in pool distributed by standings on Anvil (65/25/10)
 bash scripts/tournament-demo.sh
 ```
 
-Wagered games are created through the authenticated Park/Gauntlet/Tournament
-flows (each seat bound to the SIWE-signed-in wallet); the server must be run
-with `RPC_URL` / `ESCROW_ADDR` / `ORACLE_KEY` (and `SIWE_DOMAIN` / `SIWE_CHAIN_ID`)
-set — see the demo scripts for the exact env.
+Wagered games go through the authenticated Park/Gauntlet/Tournament flows (each
+seat bound to the SIWE-signed-in wallet); the server needs `RPC_URL` /
+`ESCROW_ADDR` / `ORACLE_KEY` (+ `SIWE_DOMAIN` / `SIWE_CHAIN_ID`) set — see the
+demo scripts and [PRODUCTION.md](PRODUCTION.md) for the exact env.
 
-## Layout
-```
-crates/protocol     shared serde wire types (server + client)
-crates/game-engine  authoritative board, clock, result (shakmaty)
-crates/byo-client   chess-client: UCI engine driver, selfplay + networked play
-crates/server       chess-server: HTTP + WebSocket hub + per-game room actors
-contracts/          ChessEscrow.sol (pooled bankroll, EIP-712 signed settlement)
-```
+## Deploy
+
+- **Web** → **Vercel**, Root Directory `apps/web` (env: `NEXT_PUBLIC_SERVER_HTTP`,
+  `NEXT_PUBLIC_SERVER_WS`, `NEXT_PUBLIC_WC_PROJECT_ID`).
+- **Game server** → **Fly** (`Dockerfile` + `fly.toml`) — a single stateful
+  machine (`fly scale count 1`); it can't run on Vercel (long-lived WebSockets).
+- **Contract** → Base via `contracts/script/Deploy.s.sol` (auto-picks Base
+  mainnet / Base Sepolia USDC).
+
+Full runbook — including the Base Sepolia testnet path and every env var — is in
+**[PRODUCTION.md](PRODUCTION.md)**.
+
+## Security model / trust boundary
+
+You trust the server's **result correctness** (which it controls anyway, as the
+engine and referee), never its **custody**. Funds never touch a platform wallet:
+they live in `ChessEscrow`, and the chain enforces the withdrawal ceiling,
+address-bound payouts, per-game replay guards, and a `claimTimeout`/`claimRefund`
+safety net if the oracle ever goes silent. Wager endpoints require a full
+EIP-4361 (SIWE) session and derive each staked seat from the authenticated
+wallet — never the request body. A full on-chain dispute window (optimistic
+settlement) and a multisig/threshold oracle are documented next steps in
+[PRODUCTION.md](PRODUCTION.md). Details + audit history in **[AUDIT.md](AUDIT.md)**.
+
+## Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — system, flow, and data diagrams.
+- **[PRODUCTION.md](PRODUCTION.md)** — go-live checklist, deploy runbooks, env, limits.
+- **[AUDIT.md](AUDIT.md)** — three audit rounds and remediations.
+
+## License
+
+See [LICENSE](LICENSE). Bundled Stockfish (GPLv3) is used unmodified as a
+separate UCI process; the in-browser build is Stockfish WASM.

@@ -72,6 +72,22 @@ sequenceDiagram
   R->>PG: finish + enqueue settlement (1 tx)
 ```
 
+## Casual lobby & spectating
+
+The default experience is a free, in-browser casual lobby (`apps/web` +
+`crates/server`):
+
+- **Play** — pick a time control; "Play now" runs two in-browser engines
+  instantly, or **post an open challenge** (`POST /park/offers`, no stake) that
+  another player's engine joins (`/park/offers/:id/accept`). The in-browser
+  engine uses a curated opening book so openings are instant.
+- **Watch** — `GET /games/live` lists games that have actually **started** (each
+  room carries a shared `started` flag; un-started/abandoned rooms are hidden and
+  reaped). Clicking one opens the spectator (`/game/:id`); on join the room
+  replays the full move history to that socket (a `Snapshot` command → `GameStart`
+  + one `OpponentMoved` per move) so a **mid-game** spectator rebuilds the board,
+  then streams live.
+
 ## Money flow (per-game)
 
 Non-custodial: funds live in `ChessEscrow`, never a platform wallet. A user
