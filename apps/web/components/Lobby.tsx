@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
@@ -9,7 +10,7 @@ import { SeatGame } from "@/components/SeatGame";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
-import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
+import { TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 function tryParse(s: string): bigint | null {
   try {
@@ -19,6 +20,12 @@ function tryParse(s: string): bigint | null {
   }
 }
 const short = (a?: string | null) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
+const TC_NAME: Record<string, string> = {
+  "1+0": "Bullet",
+  "3+0": "Blitz",
+  "5+0": "Blitz",
+  "10+0": "Rapid",
+};
 
 type Offer = {
   offer_id: string;
@@ -37,11 +44,12 @@ type LiveGame = {
   increment_secs: number;
 };
 type Active = { gameId: string; token: string; color: "white" | "black"; stake?: string | null };
+type Pending = { offerId: string; label: string; stakeBase: string | null };
 
-/** The casual-first play lobby: post/join open challenges (your engine vs
- *  theirs), watch games in progress, or run an instant engine-vs-engine game.
- *  Staking is optional — a blank stake is a free casual game. */
+/** The casual-first play lobby: pick a time control to play instantly or open a
+ *  challenge (your engine vs theirs), watch games in progress, or stake USDC. */
 export function Lobby() {
+  const router = useRouter();
   const { address, isConnected } = useAccount();
   const [config, setConfig] = useState<OnchainConfig | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -49,10 +57,10 @@ export function Lobby() {
   const [live, setLive] = useState<LiveGame[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
-  const [stake, setStake] = useState("");
-  const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
+  const [pickTc, setPickTc] = useState<TimeControl | null>(null); // stake modal open
+  const [modalStake, setModalStake] = useState("");
   const [creating, setCreating] = useState(false);
-  const [pendingOffer, setPendingOffer] = useState<string | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
   const [active, setActive] = useState<Active | null>(null);
 
   useEffect(() => {
@@ -88,13 +96,13 @@ export function Lobby() {
     };
   }, [active]);
 
-  // Poll a posted offer until an opponent accepts, then drop into the game.
+  // Poll a posted offer until an opponent joins, then drop into the game.
   useEffect(() => {
-    if (!pendingOffer) return;
+    if (!pending) return;
     let alive = true;
     const tick = async () => {
       try {
-        const r = await fetch(`${SERVER_HTTP}/park/offers/${pendingOffer}`, {
+        const r = await fetch(`${SERVER_HTTP}/park/offers/${pending.offerId}`, {
           headers: token ? { authorization: `Bearer ${token}` } : {},
         });
         if (!r.ok || !alive) return;
@@ -104,9 +112,9 @@ export function Lobby() {
             gameId: j.game_id,
             token: j.token,
             color: (j.color as "white" | "black") ?? "white",
-            stake: stake ? parseUsdc(stake).toString() : null,
+            stake: pending.stakeBase,
           });
-          setPendingOffer(null);
+          setPending(null);
         }
       } catch {
         /* keep polling */
@@ -118,21 +126,26 @@ export function Lobby() {
       alive = false;
       clearInterval(t);
     };
-  }, [pendingOffer, token, stake]);
+  }, [pending, token]);
 
   const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
-  const wantStake = stake.trim().length > 0;
-  const stakeBig = wantStake ? tryParse(stake) : 0n;
-  const postUnderfunded =
-    wantStake && stakeBig != null && available != null && available < stakeBig;
 
-  const createOffer = async () => {
+  const modalStakeBig = modalStake.trim() ? tryParse(modalStake) : 0n;
+  const modalUnderfunded =
+    !!modalStake.trim() && modalStakeBig != null && available != null && available < modalStakeBig;
+
+  const playNow = (tc: TimeControl) => {
+    router.push(`/play?tc=${encodeURIComponent(tc.label)}`);
+  };
+
+  const postChallenge = async (tc: TimeControl, stakeStr: string) => {
     setErr(null);
     let stakeBase: string | undefined;
+    const wantStake = stakeStr.trim().length > 0;
     if (wantStake) {
-      if (!token) return setErr("Connect a wallet and sign in to post a staked game.");
-      const amt = tryParse(stake);
+      if (!token) return setErr("Connect a wallet and sign in to stake.");
+      const amt = tryParse(stakeStr);
       if (amt == null || amt <= 0n) return setErr("Enter a valid USDC stake.");
       stakeBase = amt.toString();
     }
@@ -147,7 +160,13 @@ export function Lobby() {
         body: JSON.stringify({ stake: stakeBase, initial_secs: tc.initial, increment_secs: tc.inc }),
       });
       if (!r.ok) return setErr(`Couldn't post the game (${r.status}).`);
-      setPendingOffer((await r.json()).offer_id);
+      const j = await r.json();
+      setPending({
+        offerId: j.offer_id,
+        label: `${tc.label} · ${wantStake ? `${stakeStr} USDC` : "free"}`,
+        stakeBase: stakeBase ?? null,
+      });
+      setPickTc(null);
     } catch {
       setErr("Server unreachable.");
     } finally {
@@ -158,7 +177,7 @@ export function Lobby() {
   const acceptOffer = async (o: Offer) => {
     setErr(null);
     const wagered = !!o.stake;
-    if (wagered && !token) return setErr("Connect a wallet and sign in to accept a staked game.");
+    if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
     try {
       const r = await fetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
         method: "POST",
@@ -196,67 +215,53 @@ export function Lobby() {
 
   return (
     <>
-      {/* Create / play now */}
-      <div className="panel" style={{ marginBottom: 16 }}>
-        <div className="lobby-head">
-          <b style={{ color: "var(--text-strong)" }}>Start a game</b>
-          <Link href="/play" className="ghost play-now">
-            ⚡ Play now vs the house
-          </Link>
-        </div>
-        <div className="muted" style={{ fontSize: 13, margin: "4px 0 10px" }}>
-          Your in-browser engine plays. Post an open challenge and the next player’s engine
-          faces yours{wagerOn ? " — leave the stake blank for a free game" : " (free)"}.
-        </div>
-        <div className="offer-form">
-          <label className="of-field">
-            <span className="muted">Stake (USDC)</span>
-            <input
-              inputMode="decimal"
-              placeholder={wagerOn ? "blank = free casual game" : "casual only"}
-              value={stake}
-              onChange={(e) => setStake(e.target.value)}
-              disabled={!wagerOn || creating || !!pendingOffer}
-            />
-          </label>
-          <label className="of-field">
-            <span className="muted">Time control</span>
-            <div className="tc-row">
-              {TIME_CONTROLS.map((t) => (
-                <button
-                  key={t.label}
-                  type="button"
-                  className={`tc-pill${tc.label === t.label ? " active" : ""}`}
-                  onClick={() => setTc(t)}
-                  disabled={creating || !!pendingOffer}
-                >
-                  {t.label}
-                </button>
-              ))}
+      {/* Play: pick a time control */}
+      <div className="quick-play" style={{ marginBottom: 16 }}>
+        {pending ? (
+          <div>
+            <div className="qp-head">
+              <span className="mc-title">Waiting for an opponent…</span>
             </div>
-          </label>
-          <button
-            className="primary"
-            onClick={createOffer}
-            disabled={creating || !!pendingOffer || postUnderfunded}
-          >
-            {creating ? "Posting…" : wantStake ? "Post staked game" : "Post free game"}
-          </button>
-        </div>
-        {postUnderfunded && stakeBig != null && (
-          <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>
-            Available {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(stakeBig)} — deposit more below.
-          </div>
-        )}
-        {pendingOffer && (
-          <div className="muted" style={{ marginTop: 8 }}>
-            Waiting for an opponent… your engine starts automatically when someone joins.{" "}
-            <button className="ghost" style={{ padding: "2px 8px" }} onClick={() => setPendingOffer(null)}>
+            <div className="qp-desc muted">
+              Your <b>{pending.label}</b> game is posted. Your engine starts automatically when
+              someone joins.
+            </div>
+            <button className="ghost" onClick={() => setPending(null)}>
               Cancel
             </button>
           </div>
+        ) : (
+          <>
+            <div className="qp-head">
+              <span className="mc-icon">♟</span>
+              <span className="mc-title">Play</span>
+              <span className="mc-tag">free · in your browser</span>
+            </div>
+            <div className="qp-desc muted">
+              Pick a time control — play instantly against the house, or open a challenge for
+              another player{wagerOn ? " (free or for a USDC stake)" : ""}.
+            </div>
+            <div className="tc-grid">
+              {TIME_CONTROLS.map((t) => (
+                <button
+                  key={t.label}
+                  className="tc-tile"
+                  onClick={() => {
+                    setErr(null);
+                    setModalStake("");
+                    setPickTc(t);
+                  }}
+                >
+                  <span className="tc-clock">{t.label}</span>
+                  <span className="tc-name">{TC_NAME[t.label] ?? "Custom"}</span>
+                </button>
+              ))}
+            </div>
+          </>
         )}
-        {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
+        {err && !pickTc && (
+          <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 10 }}>{err}</div>
+        )}
       </div>
 
       {/* Open challenges to join */}
@@ -349,6 +354,52 @@ export function Lobby() {
       {/* Optional: deposit for staked play */}
       {wagerOn && config?.escrow && (
         <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
+      )}
+
+      {/* Stake modal (opens after picking a time control) */}
+      {pickTc && (
+        <div className="modal-overlay" onClick={() => setPickTc(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">
+              {pickTc.label} · {TC_NAME[pickTc.label] ?? "Custom"}
+            </div>
+            <button className="primary modal-play" onClick={() => playNow(pickTc)}>
+              ⚡ Play now — free, vs the house
+            </button>
+            <div className="modal-div">or open a challenge for another player</div>
+            {wagerOn && (
+              <input
+                inputMode="decimal"
+                placeholder="stake in USDC (blank = free)"
+                value={modalStake}
+                onChange={(e) => setModalStake(e.target.value)}
+                disabled={creating}
+                autoFocus
+              />
+            )}
+            <button
+              className="ghost modal-post"
+              onClick={() => postChallenge(pickTc, modalStake)}
+              disabled={creating || modalUnderfunded}
+            >
+              {creating
+                ? "Posting…"
+                : modalStake.trim()
+                  ? "Post staked challenge"
+                  : "Post free challenge"}
+            </button>
+            {modalUnderfunded && modalStakeBig != null && (
+              <div style={{ color: "#e0a96c", fontSize: 13 }}>
+                Available {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(modalStakeBig)} — deposit
+                more first.
+              </div>
+            )}
+            {err && <div style={{ color: "#e06c6c", fontSize: 13 }}>{err}</div>}
+            <button className="modal-cancel muted" onClick={() => setPickTc(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
     </>
   );

@@ -278,6 +278,8 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: inherit;
+  font: inherit;
+  cursor: pointer;
   transition: background 0.12s, transform 0.12s, box-shadow 0.12s;
 }
 .tc-tile:hover {
@@ -326,6 +328,60 @@ a:hover {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* stake modal (opens after picking a time control) */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000000aa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+.modal {
+  width: 100%;
+  max-width: 360px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 12px 40px #00000070;
+}
+.modal-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-strong);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.modal-play {
+  padding: 14px;
+  font-size: 15px;
+}
+.modal-div {
+  text-align: center;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin: 2px 0;
+}
+.modal-post {
+  padding: 10px;
+}
+.modal-cancel {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px;
 }
 
 /* lobby header row: title left, "play now" on the right */
