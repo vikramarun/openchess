@@ -2,22 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { Lobby } from "@/components/Lobby";
 import { useEngine } from "@/lib/engineContext";
-import { TIME_CONTROLS } from "@/lib/timeControls";
-
-const TC_NAME: Record<string, string> = {
-  "1+0": "Bullet",
-  "3+0": "Blitz",
-  "5+0": "Blitz",
-  "10+0": "Rapid",
-};
 
 export default function Home() {
   const { status } = useEngine();
   const router = useRouter();
   const [addr, setAddr] = useState("");
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   const banner =
     status === "ready" ? (
@@ -30,8 +25,8 @@ export default function Home() {
       <span>Loading Stockfish in your browser…</span>
     ) : status === "error" ? (
       <span>
-        Couldn’t load the in-browser engine — you can still bring your own with the
-        native client.
+        Couldn’t load the in-browser engine — you can still bring your own with the native
+        client.
       </span>
     ) : (
       <span>Preparing your engine…</span>
@@ -44,8 +39,8 @@ export default function Home() {
           <span className="king">♞</span> OpenChess
         </h1>
         <p>
-          Machines play. You wager. Bring your own engine — or use the one running in
-          your browser right now — and stake USDC on Base, settled non-custodially.
+          Machines play, you wager. Bring your own engine — or use the one in your browser —
+          post a game, join an open one, or watch bots battle live.
         </p>
       </div>
 
@@ -54,39 +49,9 @@ export default function Home() {
         {banner}
       </div>
 
-      <div className="quick-play">
-        <div className="qp-head">
-          <span className="mc-icon">♟</span>
-          <span className="mc-title">Quick Play</span>
-          <span className="mc-tag">free · in your browser</span>
-        </div>
-        <div className="qp-desc muted">
-          Watch two engines battle right here — your CPU, no download, no opponent needed.
-          Pick a time control:
-        </div>
-        <div className="tc-grid">
-          {TIME_CONTROLS.map((t) => (
-            <Link key={t.label} href={`/play?tc=${encodeURIComponent(t.label)}`} className="tc-tile">
-              <span className="tc-clock">{t.label}</span>
-              <span className="tc-name">{TC_NAME[t.label] ?? "Custom"}</span>
-            </Link>
-          ))}
-        </div>
-      </div>
+      {mounted ? <Lobby /> : null}
 
-      <div className="mode-grid">
-        <Link href="/park" className="mode-card">
-          <div className="mc-top">
-            <span className="mc-icon">🅿️</span>
-            <span className="mc-title">Park / Patzer</span>
-            <span className="mc-tag">wager</span>
-          </div>
-          <div className="mc-desc">
-            Post a game at a price. Someone accepts, both stake, the winner takes the pot
-            (minus a small rake).
-          </div>
-        </Link>
-
+      <div className="mode-grid" style={{ marginTop: 16 }}>
         <Link href="/gauntlet" className="mode-card">
           <div className="mc-top">
             <span className="mc-icon">🔥</span>
@@ -94,8 +59,8 @@ export default function Home() {
             <span className="mc-tag">wager</span>
           </div>
           <div className="mc-desc">
-            Your engine plays back-to-back games at a fixed tier (10¢ … $100) until you
-            stop. Lock a bankroll once, net-settle on-chain.
+            Your engine plays back-to-back games at a fixed tier until you stop. Lock a
+            bankroll once, net-settle on-chain.
           </div>
         </Link>
 
@@ -106,7 +71,7 @@ export default function Home() {
             <span className="mc-tag">wager</span>
           </div>
           <div className="mc-desc">
-            Buy in to a prize pool. Round-robin (Swiss & knockout soon). Pool distributed
+            Buy in to a prize pool. Round-robin now (Swiss & knockout soon). Pool distributed
             on-chain by final standings.
           </div>
         </Link>
@@ -126,19 +91,10 @@ export default function Home() {
             if (e.key === "Enter" && addr.trim()) router.push(`/player/${addr.trim()}`);
           }}
         />
-        <button
-          className="ghost"
-          onClick={() => addr.trim() && router.push(`/player/${addr.trim()}`)}
-        >
+        <button className="ghost" onClick={() => addr.trim() && router.push(`/player/${addr.trim()}`)}>
           View profile
         </button>
       </div>
-
-      <p className="muted" style={{ textAlign: "center", marginTop: 18, fontSize: 13 }}>
-        Every mode runs in your browser — connect a wallet, deposit USDC once, and play{" "}
-        <b>Park</b>, <b>Gauntlet</b>, or <b>Tournament</b> for stakes, settled non-custodially.
-        The native client is still available for headless / custom engines.
-      </p>
     </div>
   );
 }

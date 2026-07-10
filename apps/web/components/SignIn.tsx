@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useAccount, useChainId, useSignMessage } from "wagmi";
 
+import { fetchConfig } from "@/lib/escrow";
 import { signInWithEthereum } from "@/lib/siwe";
 
 /** Mount gate: the wagmi hooks live in SignInInner, which only renders on the
@@ -21,12 +22,17 @@ function SignInInner() {
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [wagerOn, setWagerOn] = useState(false);
 
   useEffect(() => {
     setSignedIn(!!localStorage.getItem("chess_token"));
+    fetchConfig().then((c) => setWagerOn(c.wagerEnabled));
   }, []);
 
   if (!isConnected || !address) return null;
+  // Sign-in (SIWE) is only needed for wagered play. On a casual-only server it's
+  // pure noise, so hide it unless wagering is enabled.
+  if (!wagerOn) return null;
   if (signedIn) return <span className="muted">signed in ✓</span>;
 
   return (

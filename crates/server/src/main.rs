@@ -46,6 +46,9 @@ pub struct AppState(pub Arc<Inner>);
 
 pub struct Inner {
     pub rooms: Mutex<HashMap<GameId, RoomHandle>>,
+    /// Public metadata for in-progress games, so the lobby can list games to
+    /// spectate. Populated at start, evicted with the room on finish.
+    pub live_games: Mutex<HashMap<GameId, LiveGame>>,
     /// launch token -> (game, color). Removed when the game ends.
     pub tokens: Mutex<HashMap<String, (GameId, Color)>>,
     pub settlement: Arc<dyn SettlementSink>,
@@ -100,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState(Arc::new(Inner {
         rooms: Mutex::new(HashMap::new()),
+        live_games: Mutex::new(HashMap::new()),
         tokens: Mutex::new(HashMap::new()),
         settlement: ledger::from_env(),
         db,
@@ -184,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/oracle", get(oracle_info))
         .route("/config", get(config_info))
         .route("/games", post(create_game))
+        .route("/games/live", get(live_games))
         .merge(auth::routes())
         .merge(matchmaking::routes())
         .merge(players::routes())
@@ -257,6 +262,28 @@ struct ConfigInfo {
     wager_enabled: bool,
 }
 
+/// Public snapshot of an in-progress game, for the spectate lobby.
+#[derive(Clone, Serialize)]
+pub struct LiveGame {
+    pub game_id: GameId,
+    pub mode: String,
+    /// Wallets for a wagered game; `None` for casual/engine-vs-engine games.
+    pub white: Option<String>,
+    pub black: Option<String>,
+    pub stake: Option<String>,
+    pub initial_secs: u64,
+    pub increment_secs: u64,
+    pub created_ms: u64,
+}
+
+/// List in-progress games so the lobby can offer them to spectate.
+async fn live_games(State(state): State<AppState>) -> Json<Vec<LiveGame>> {
+    let mut list: Vec<LiveGame> = state.0.live_games.lock().values().cloned().collect();
+    // Newest first.
+    list.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+    Json(list)
+}
+
 /// Publishes the on-chain config the web app needs to wire deposits/wagers:
 /// the escrow address and expected chain — single-sourced from the server.
 async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
@@ -294,6 +321,7 @@ async fn shutdown_signal() {
 async fn cleanup_task(state: AppState, mut rx: mpsc::Receiver<GameId>) {
     while let Some(game_id) = rx.recv().await {
         state.0.rooms.lock().remove(&game_id);
+        state.0.live_games.lock().remove(&game_id);
         state
             .0
             .tokens
@@ -628,6 +656,22 @@ impl AppState {
             self.0.results_tx.clone(),
         );
         self.0.rooms.lock().insert(game_id, handle);
+        self.0.live_games.lock().insert(
+            game_id,
+            LiveGame {
+                game_id,
+                mode: mode.to_string(),
+                white: wager.map(|w| w.white.to_string()),
+                black: wager.map(|w| w.black.to_string()),
+                stake: wager.map(|w| w.stake.to_string()),
+                initial_secs: tc.initial_ms / 1000,
+                increment_secs: tc.increment_ms / 1000,
+                created_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            },
+        );
 
         let white_token = Uuid::new_v4().simple().to_string();
         let black_token = Uuid::new_v4().simple().to_string();
