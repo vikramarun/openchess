@@ -9,7 +9,7 @@
 |---|---|
 | Token (USDC) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (canonical Base USDC) |
 | Oracle (result signer) | `0xE41Aa20B37a93DA94B22b0c9c2B5CC0691077B53` |
-| Owner | `0x4392d34Cc747160f8F749d1e249e2595f191DF6A` (hardware wallet, via `Ownable2Step` — accept to finalize) |
+| Owner | `0x4392d34Cc747160f8F749d1e249e2595f191DF6A` (hardware wallet — `Ownable2Step` transfer **accepted**) |
 | Fee recipient | `0x4392d34Cc747160f8F749d1e249e2595f191DF6A` |
 | Fee (rake) | 100 bps (1%) |
 | Settle timeout | 86400 s (24h) |
