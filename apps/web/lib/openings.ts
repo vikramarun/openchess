@@ -47,15 +47,37 @@ const LINES: string[][] = [
 
 // prefix (space-joined UCI) -> possible next moves
 const BOOK = new Map<string, string[]>();
-for (const line of LINES) {
+function addLine(line: string[]) {
   for (let i = 0; i < line.length; i++) {
     const key = line.slice(0, i).join(" ");
-    const next = line[i];
     const arr = BOOK.get(key) ?? [];
-    if (!arr.includes(next)) arr.push(next);
+    // Keep duplicates so a random pick is weighted by how often a continuation
+    // appears across the book — mainlines (e4/d4) dominate offbeat lines.
+    arr.push(line[i]);
     BOOK.set(key, arr);
   }
 }
+// Curated lines are always available instantly (bundled). The big precomputed
+// book (public/book.json, ~1800 real Stockfish opening lines from
+// official-stockfish/books) is merged in lazily on the client for breadth.
+LINES.forEach(addLine);
+
+let bookRequested = false;
+export function loadOpeningBook(): void {
+  if (bookRequested || typeof window === "undefined") return;
+  bookRequested = true;
+  fetch("/book.json")
+    .then((r) => (r.ok ? r.json() : []))
+    .then((lines: string[]) => {
+      for (const l of lines) addLine(l.split(" "));
+    })
+    .catch(() => {
+      /* fall back to the curated lines */
+    });
+}
+// Kick off the fetch as soon as this module is imported (client-side), so the
+// broad book is usually ready by the time the first moves are played.
+loadOpeningBook();
 
 /** A book continuation (UCI) for the given move history, or null if out of book.
  *  Picks randomly among known continuations for variety. Index varies by move
