@@ -7,7 +7,13 @@ the server is simply the authority on legality, clock, and result. Players bring
 their own UCI engine (or use the Stockfish that runs in the browser); money
 settles on-chain, in a contract, never a platform wallet.
 
-**Live:** <https://openchess.ai>
+**Live:** <https://openchess.ai> · **`ChessEscrow` on Base mainnet:**
+[`0x7Cc1…923D`](https://basescan.org/address/0x7cc1dd4f12bbfb40fca6ec2334a27c646fcf923d)
+(verified). New here? Start with **[HANDOFF.md](HANDOFF.md)**.
+
+> **Status:** deployed and running, but **single-node** (one Fly machine) and
+> **not independently audited** — stakes are capped at 25 USDC. Making it
+> multi-node (true HA) is the next task; see [HANDOFF.md](HANDOFF.md).
 
 ---
 
@@ -167,9 +173,12 @@ settlement) and a multisig/threshold oracle are documented next steps in
 
 ## Documentation
 
+- **[HANDOFF.md](HANDOFF.md)** — current state + the next task (multi-node). Start here.
+- **[CLAUDE.md](CLAUDE.md)** — agent/dev orientation: build, test, run, gotchas.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system, flow, and data diagrams.
 - **[PRODUCTION.md](PRODUCTION.md)** — go-live checklist, deploy runbooks, env, limits.
-- **[AUDIT.md](AUDIT.md)** — three audit rounds and remediations.
+- **[AUDIT.md](AUDIT.md)** — four review rounds and remediations.
+- **[DEPLOYMENTS.md](DEPLOYMENTS.md)** — live Base mainnet addresses.
 
 ## License
 
