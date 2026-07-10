@@ -1,14 +1,24 @@
 # Fly.io config for the OpenChess game server. Deploy with:
 #
-#   fly launch --no-deploy --copy-config --name openchess          # first time
-#   fly postgres create --name openchess-db                        # managed Postgres
-#   fly postgres attach openchess-db                               # sets DATABASE_URL secret
-#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...  # on-chain (wagering)
-#   fly deploy
-#   fly scale count 1                                              # exactly ONE instance
+#   fly launch --no-deploy --copy-config --ha=false --name openchess   # first time
+#   fly postgres create --name openchess-db                            # managed Postgres
+#   fly postgres attach openchess-db                                   # sets DATABASE_URL
+#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...      # on-chain (wagering)
+#   fly deploy --ha=false                                              # ALWAYS --ha=false
+#   fly scale count 1                                                  # exactly ONE instance
+#   fly machines list                                                  # verify: one machine
 #
-# IMPORTANT: this is a single-node, stateful server (live games + lobby + SIWE
-# sessions are in-process). Run exactly one machine and do NOT auto-stop it.
+# IMPORTANT: this is a single-node, stateful server (live games, lobby, rooms,
+# launch tokens, and SIWE sessions are all in-process memory). It MUST run
+# exactly ONE machine. Fly defaults to a 2-machine HA pair, which silently
+# breaks everything (each request hits a different machine's memory: offers
+# vanish, games won't start, sign-in doesn't stick). So:
+#   - deploy with  --ha=false  EVERY time (a plain `fly deploy` re-adds the HA
+#     machine),
+#   - keep `fly scale count 1`, and
+#   - check `fly machines list` after each deploy.
+# (True HA needs the Redis-backed session/lobby + sharded-rooms work — see
+# PRODUCTION.md — until then, one machine only.)
 
 app = "openchess"
 primary_region = "iad"
