@@ -15,9 +15,9 @@ type TGame = {
   game_id: string;
   white: string;
   black: string;
-  white_token: string;
-  black_token: string;
+  // seat tokens are NOT in the public view — fetched per-entrant via /my-games
 };
+type MyGame = { game_id: string; color: "white" | "black"; token: string };
 type Tourney = {
   id: string;
   name: string;
@@ -61,6 +61,8 @@ function TournamentClient() {
   const [joinedAs, setJoinedAs] = useState<Record<string, string>>({});
   const [playingTid, setPlayingTid] = useState<string | null>(null);
   const [playedIds, setPlayedIds] = useState<Set<string>>(new Set());
+  // My own seat tokens for the tournament I'm playing (game_id -> {token,color}).
+  const [myTokens, setMyTokens] = useState<Record<string, MyGame>>({});
 
   useEffect(() => {
     fetchConfig().then(setConfig);
@@ -175,9 +177,44 @@ function TournamentClient() {
 
   const startT = async (t: Tourney) => {
     setErr(null);
+    if (t.buy_in && !token) return setErr("Sign in (top right) to start your tournament.");
     try {
-      const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/start`, { method: "POST" });
-      if (!r.ok) setErr(r.status === 409 ? "Need at least 2 players." : `Couldn't start (${r.status}).`);
+      const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/start`, {
+        method: "POST",
+        headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
+      });
+      if (!r.ok)
+        setErr(
+          r.status === 409
+            ? "Need at least 2 players."
+            : r.status === 403
+              ? "Only the organizer can start this tournament."
+              : `Couldn't start (${r.status}).`,
+        );
+    } catch {
+      setErr("Server unreachable.");
+    }
+  };
+
+  /// Fetch only MY seat tokens (never exposed in the public view) and enter play.
+  const enterPlay = async (t: Tourney) => {
+    setErr(null);
+    const me = identityIn(t);
+    if (!me) return setErr("Join the tournament first.");
+    try {
+      const url = t.buy_in
+        ? `${SERVER_HTTP}/tournaments/${t.id}/my-games`
+        : `${SERVER_HTTP}/tournaments/${t.id}/my-games?player=${encodeURIComponent(me)}`;
+      const r = await fetch(url, {
+        headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
+      });
+      if (!r.ok) return setErr(`Couldn't load your games (${r.status}).`);
+      const games: MyGame[] = await r.json();
+      const map: Record<string, MyGame> = {};
+      for (const g of games) map[g.game_id] = g;
+      setMyTokens(map);
+      setPlayedIds(new Set());
+      setPlayingTid(t.id);
     } catch {
       setErr("Server unreachable.");
     }
@@ -191,22 +228,27 @@ function TournamentClient() {
   if (playingTid && activeT) {
     const mine = myGames(activeT);
     const next = mine.find((g) => !playedIds.has(g.game_id));
-    if (next) {
-      const me = identityIn(activeT)!;
-      const color = next.white.toLowerCase() === me ? "white" : "black";
-      const seatToken = color === "white" ? next.white_token : next.black_token;
+    const seat = next ? myTokens[next.game_id] : undefined;
+    if (next && seat) {
       const idx = mine.findIndex((g) => g.game_id === next.game_id);
       return (
         <SeatGame
           key={next.game_id}
           gameId={next.game_id}
-          token={seatToken}
-          color={color}
+          token={seat.token}
+          color={seat.color}
           subtitle={`${activeT.name} · game ${idx + 1} of ${mine.length}`}
           onResult={() =>
             setTimeout(() => setPlayedIds((s) => new Set(s).add(next.game_id)), 3500)
           }
         />
+      );
+    }
+    if (next && !seat) {
+      return (
+        <div className="panel">
+          <span className="muted">Loading your game…</span>
+        </div>
       );
     }
     // all my games done
@@ -336,13 +378,7 @@ function TournamentClient() {
                       </button>
                     )}
                     {t.status !== "open" && mine.length > 0 && (
-                      <button
-                        className="primary"
-                        onClick={() => {
-                          setPlayedIds(new Set());
-                          setPlayingTid(t.id);
-                        }}
-                      >
+                      <button className="primary" onClick={() => enterPlay(t)}>
                         Play my {mine.length} game{mine.length === 1 ? "" : "s"}
                       </button>
                     )}

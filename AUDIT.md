@@ -283,3 +283,39 @@ live-verified:
   on restart with standings alice 1.5 / carol 1.5 / bob 0). Tournaments with
   games still in flight are marked `abandoned` (entrants refund via
   `claimRefund`), since in-flight rooms aren't resumable on a single node.
+
+---
+
+## Round 4: pre-handoff review (contract deep-dependency + full-surface security)
+
+Two independent reviews before handoff: a Foundry deep-test pass on the escrow
+and a full-surface security review of the money/auth code.
+
+**Contract:** added a handler-driven **solvency invariant** (escrow USDC balance
+always equals the sum of tracked bankrolls; `locked ≤ bankroll`), which held
+across 128k random calls; plus a **conservation fuzz** test and a
+**signature-malleability** (upper-half-`s`) test. 25 Foundry tests total.
+
+**Security review — one High finding, now fixed; rest verified sound.**
+
+- **[Fixed] Tournament seat tokens leaked to unauthenticated callers (High).**
+  `GET /tournaments/{id}` and `POST /tournaments/{id}/start` returned every
+  game's `white_token`/`black_token`. A launch token is the sole authorization
+  for a WebSocket seat, so anyone could connect to any entrant's game and throw
+  it — steering standings and thus the on-chain pool payout to other entrants.
+  (The same class of bug was already guarded for 1v1 in `park_get`.) **Fix:**
+  tokens are `#[serde(skip)]` in the public view; each entrant fetches only its
+  own seat token via the authenticated `GET /tournaments/{id}/my-games` (wallet
+  for buy-in tournaments; display name for casual, where no money is at stake).
+  `tourney_start` is now organizer-gated for buy-in tournaments. Verified: the
+  public view exposes only `game_id`/`white`/`black`; `/my-games` returns only
+  the caller's token.
+- **Verified sound (no findings):** seat→SIWE-wallet binding across all modes;
+  SIWE nonce/session handling; contract access control (oracle-only opens,
+  signature-gated settles, Ownable2Step); EIP-712 verification (low-`s`,
+  `deadline`, `settled` replay guard, no digest collision with `sign_result`);
+  accounting/solvency; Merkle-claim double-spend guards; fail-closed settlement
+  worker; parameterized SQL (no injection).
+
+Remaining (tracked, not security-blocking): Merkle-claim and refund browser UIs,
+and Swiss/knockout tournament pairing (only round-robin is implemented).

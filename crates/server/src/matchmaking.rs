@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -147,6 +147,7 @@ pub fn routes() -> Router<AppState> {
         .route("/gauntlet/{id}/stop", post(gauntlet_stop))
         .route("/tournaments", post(tourney_create).get(tourney_list))
         .route("/tournaments/{id}", get(tourney_get))
+        .route("/tournaments/{id}/my-games", get(tourney_my_games))
         .route("/tournaments/{id}/join", post(tourney_join))
         .route("/tournaments/{id}/start", post(tourney_start))
         .route("/tournaments/{id}/claim/{address}", get(tourney_claim_proof))
@@ -682,6 +683,9 @@ async fn gauntlet_stop(
 struct Tournament {
     name: String,
     buy_in: Option<String>,
+    /// The authenticated wallet that created the tournament (if any). Only the
+    /// organizer may start it.
+    organizer: Option<String>,
     initial_secs: u64,
     increment_secs: u64,
     status: String, // open | running | complete | settled
@@ -700,7 +704,13 @@ struct TourneyGame {
     game_id: GameId,
     white: String,
     black: String,
+    // Launch tokens are seat capabilities — never serialize them into the public
+    // tournament view. Each entrant fetches only its own via GET
+    // /tournaments/{id}/my-games (authenticated). Leaking them lets anyone play
+    // (and throw) any game, steering the on-chain pool payout.
+    #[serde(skip)]
     white_token: String,
+    #[serde(skip)]
     black_token: String,
 }
 
@@ -726,6 +736,8 @@ async fn tourney_create(
 ) -> Result<Json<IdResp>, StatusCode> {
     validate_tc(req.initial_secs, req.increment_secs)?;
     let id = Uuid::new_v4();
+    // The creating wallet (if authenticated) — only they may start it later.
+    let organizer = state.authed_wallet(&headers);
 
     // A buy-in tournament opens its on-chain pool now (fail-closed). Require an
     // authenticated caller so an anonymous request can't burn oracle gas.
@@ -755,6 +767,7 @@ async fn tourney_create(
         Tournament {
             name: req.name,
             buy_in: req.buy_in,
+            organizer,
             initial_secs: req.initial_secs,
             increment_secs: req.increment_secs,
             status: "open".into(),
@@ -917,16 +930,86 @@ async fn tourney_list(State(state): State<AppState>) -> Json<Vec<IdResp>> {
     Json(t.keys().map(|id| IdResp { tournament_id: *id }).collect())
 }
 
-/// Start a round-robin: every player pairs with every other once. Games are
-/// created **unwagered** for now (pool prize distribution needs a dedicated
-/// contract method and is not yet wired — tracked in AUDIT.md / README).
+#[derive(Serialize)]
+struct MyGame {
+    game_id: GameId,
+    color: String, // "white" | "black"
+    token: String,
+    opponent: String,
+}
+
+#[derive(Deserialize)]
+struct MyGamesQuery {
+    /// Casual (no buy-in) tournament display name. Ignored for buy-in
+    /// tournaments, where identity is the authenticated wallet.
+    player: Option<String>,
+}
+
+/// Return only the CALLER's own seat tokens for this tournament, so an entrant
+/// can play its games without exposing any other entrant's token (a token is a
+/// seat capability — leaking it lets anyone throw the game and steer the pool
+/// payout). For a **buy-in** tournament identity is the authenticated wallet
+/// (money is at stake, so this is gated). For a **casual** tournament identity
+/// is the chosen display name (no money — name-based lookup is fine).
+async fn tourney_my_games(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<MyGamesQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MyGame>>, StatusCode> {
+    let t = state.0.lobby.tournaments.lock();
+    let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let me = if t.buy_in.is_some() {
+        state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?
+    } else {
+        q.player.ok_or(StatusCode::BAD_REQUEST)?
+    };
+    let mut mine = Vec::new();
+    for g in &t.games {
+        if g.white.eq_ignore_ascii_case(&me) {
+            mine.push(MyGame {
+                game_id: g.game_id,
+                color: "white".into(),
+                token: g.white_token.clone(),
+                opponent: g.black.clone(),
+            });
+        } else if g.black.eq_ignore_ascii_case(&me) {
+            mine.push(MyGame {
+                game_id: g.game_id,
+                color: "black".into(),
+                token: g.black_token.clone(),
+                opponent: g.white.clone(),
+            });
+        }
+    }
+    Ok(Json(mine))
+}
+
+/// Start a round-robin: every player pairs with every other once. The games
+/// themselves are unwagered — the buy-in *pool* is the money, and game results
+/// only decide standings for the on-chain payout. Organizer-authenticated: an
+/// anonymous caller must not be able to lock the field before it fills.
 async fn tourney_start(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
+    let caller = state.authed_wallet(&headers);
     let (players, tc) = {
         let mut t = state.0.lobby.tournaments.lock();
         let t = t.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+        // Buy-in tournaments (money at stake) may only be started by the
+        // organizer — an anonymous caller must not lock the field before it
+        // fills. Casual tournaments have no pool, so anyone may start.
+        if t.buy_in.is_some() {
+            let ok = matches!(
+                (&t.organizer, &caller),
+                (Some(org), Some(c)) if org.eq_ignore_ascii_case(c)
+            );
+            if !ok {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
         if t.status != "open" || t.players.len() < 2 {
             return Err(StatusCode::CONFLICT);
         }
@@ -1050,6 +1133,7 @@ pub async fn recover_tournaments(state: &AppState) {
                 Tournament {
                     name: "recovered".into(),
                     buy_in: t.buy_in.clone(),
+                    organizer: None, // recovered tournaments are already past 'open'
                     initial_secs: 0,
                     increment_secs: 0,
                     status: "complete".into(),
