@@ -411,4 +411,37 @@ contract ChessEscrowTest {
         vm.expectRevert();
         escrow.claimTournament(tid, white, 3 * STAKE, empty);
     }
+
+    // --- signature malleability + fuzz -----------------------------------
+
+    /// The upper-half-`s` counterpart of a valid signature must be rejected, so
+    /// a relayer can't reshape a settled result's signature into a second valid
+    /// one (EIP-2 low-s enforcement).
+    function test_malleable_signature_rejected() public {
+        bytes32 g = keccak256("gmal");
+        _open(g);
+        bytes32 digest = escrow.digestGameResult(g, white, DEADLINE);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(oracleKey, digest);
+        uint256 N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+        bytes32 sHigh = bytes32(N - uint256(s)); // the malleable (high-s) form
+        uint8 vFlip = v == 27 ? 28 : 27;
+        vm.expectRevert();
+        escrow.settleGame(g, white, DEADLINE, vFlip, r, sHigh);
+    }
+
+    /// For ANY stake and outcome, settling a game conserves total bankroll and
+    /// releases both locks (no funds minted, burned, or stranded).
+    function testFuzz_settle_conserves(uint96 stakeRaw, uint8 outcome) public {
+        uint256 stake = (uint256(stakeRaw) % (10 * STAKE)) + 1; // [1, 10*STAKE]
+        bytes32 g = keccak256(abi.encode("fuzz", stakeRaw, outcome));
+        vm.prank(oracle);
+        escrow.openGame(g, white, black, stake);
+        address winner = outcome % 3 == 0 ? white : (outcome % 3 == 1 ? black : address(0));
+        _settle(g, winner, DEADLINE);
+        _assert(
+            escrow.bankroll(white) + escrow.bankroll(black) + escrow.bankroll(fee) == 20 * STAKE,
+            "fuzz conservation"
+        );
+        _assert(escrow.locked(white) == 0 && escrow.locked(black) == 0, "fuzz unlocked");
+    }
 }
