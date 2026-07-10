@@ -1,12 +1,32 @@
 // Browser bring-your-own-engine client: connects to the game server over the
 // same WebSocket protocol the native client uses, and drives a BrowserEngine.
 
+import { Chess } from "chessops/chess";
+import { parseUci } from "chessops/util";
+
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
+import { bookMove } from "./openings";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
 };
+
+/** A book move for this history, but only if it's actually legal in the
+ *  reconstructed position — so a typo in the book can never send an illegal
+ *  move (it just falls through to the engine). */
+function legalBookMove(movesUci: string[]): string | null {
+  const candidate = bookMove(movesUci);
+  if (!candidate) return null;
+  const pos = Chess.default();
+  for (const u of movesUci) {
+    const m = parseUci(u);
+    if (!m || !pos.isLegal(m)) return null;
+    pos.play(m);
+  }
+  const cm = parseUci(candidate);
+  return cm && pos.isLegal(cm) ? candidate : null;
+}
 
 /** Play one seat of a game in the browser, driving `engine`. Resolves when the
  *  game ends or the socket closes. `cancelled()` lets the caller tear it down. */
@@ -54,18 +74,24 @@ export function playSeat(
           break;
         case "your_turn": {
           try {
+            const history: string[] = m.moves_uci ?? [];
+            // Opening book first: play known lines instantly instead of burning
+            // clock on move 1. Falls through to the engine once out of book.
+            const booked = legalBookMove(history);
             // Play to the authoritative clock when the server provides one, so
             // the time control is real (the engine self-allocates and can
             // flag). Fall back to a fixed think time if no clock is present.
             const c = m.clock;
-            const uci = c
-              ? await engine.bestMoveWithClock(
-                  m.moves_uci ?? [],
-                  c.white_ms,
-                  c.black_ms,
-                  c.increment_ms ?? 0,
-                )
-              : await engine.bestMove(m.moves_uci ?? [], movetimeMs);
+            const uci =
+              booked ??
+              (c
+                ? await engine.bestMoveWithClock(
+                    history,
+                    c.white_ms,
+                    c.black_ms,
+                    c.increment_ms ?? 0,
+                  )
+                : await engine.bestMove(history, movetimeMs));
             if (cancelled()) {
               ws.close();
               return;
