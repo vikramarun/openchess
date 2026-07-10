@@ -37,9 +37,11 @@ use crate::room::{spawn_room, RoomHandle, StakeInfo};
 /// Input bounds (reject absurd / overflow-inducing values).
 pub const MAX_INITIAL_SECS: u64 = 3 * 60 * 60; // 3 hours
 pub const MAX_INCREMENT_SECS: u64 = 180;
-/// Max stake in USDC base units (6 dp) — 1,000,000 USDC. Bounds the U256→u128
-/// conversion and absurd wagers.
-pub const MAX_STAKE: u128 = 1_000_000_000_000;
+/// Max stake in USDC base units (6 dp). Deliberately small — **25 USDC** — for
+/// the unaudited mainnet launch, so the blast radius is capped while the oracle
+/// is a single hot key and the contract hasn't had an independent audit. Raise
+/// it once those are addressed. Also bounds the U256→u128 conversion.
+pub const MAX_STAKE: u128 = 25_000_000;
 
 #[derive(Clone)]
 pub struct AppState(pub Arc<Inner>);
