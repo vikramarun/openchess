@@ -52,6 +52,13 @@ docs.
   gauntlet/tournament web pages still drive the browser engine, but the
   `SeatDelivery` plumbing means adding them is a per-endpoint claim, not a
   re-implementation.
+- **Distribution:** prebuilt `chess-client` binaries ship from
+  `.github/workflows/release.yml` on `v*` tags (artifact names are
+  load-bearing — the web `/connect` page links to
+  `releases/latest/download/<name>`). Cut a release with
+  `git tag v0.1.0 && git push origin v0.1.0`. `scripts/house-bot.sh` runs one
+  casual autopilot per lobby time control under an UNFUNDED wallet so the
+  park is never empty — run it 24/7 somewhere cheap.
 - **Guardrails for the unaudited launch:** server `MAX_STAKE` capped at **25
   USDC** (`crates/server/src/main.rs`), 1% rake, 24h settle timeout.
 - **Tests:** 21 Rust + 25 Foundry (incl. a 128k-call solvency invariant). CI in

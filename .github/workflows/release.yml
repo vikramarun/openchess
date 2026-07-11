@@ -1,0 +1,127 @@
+# Build and publish prebuilt `chess-client` binaries on version tags, so
+# players can bring their engines without installing a Rust toolchain.
+#
+# Cut a release with:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Artifact names are LOAD-BEARING: the web app's /connect page links to
+# .../releases/latest/download/<name>, so keep them stable:
+#   chess-client-macos-arm64.tar.gz
+#   chess-client-macos-x64.tar.gz
+#   chess-client-linux-x64.tar.gz
+#   chess-client-windows-x64.zip
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual runs build the artifacts (uploaded to the run) without publishing.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14 # Apple Silicon
+            target: aarch64-apple-darwin
+            artifact: chess-client-macos-arm64
+          - os: macos-13 # Intel
+            target: x86_64-apple-darwin
+            artifact: chess-client-macos-x64
+          # ubuntu-22.04 keeps the glibc floor low for older distros.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: chess-client-linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: chess-client-windows-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag must ship a binary that says what it is: --version reports the
+      # crate version, so the two may never drift.
+      - name: Check tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' crates/byo-client/Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match byo-client crate version $crate — bump Cargo.toml first"
+            exit 1
+          fi
+
+      # Same toolchain action as ci.yml so conventions can't drift.
+      # No build cache: tag runs can only restore default-branch caches, which
+      # CI never writes for these job/target/profile combos — a cache step
+      # here would only burn minutes saving unreachable tag-scoped caches.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p byo-client --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/chess-client dist/
+          cp README.md dist/
+          tar -czf ${{ matrix.artifact }}.tar.gz -C dist chess-client README.md
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/chess-client.exe dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/chess-client.exe, dist/README.md -DestinationPath ${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only tags publish; workflow_dispatch stops at build artifacts.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # The web /connect page hardlinks these exact names — fail the release
+      # rather than publish a set the download buttons can't reach.
+      - name: Check load-bearing artifact names
+        run: |
+          for f in chess-client-macos-arm64.tar.gz \
+                   chess-client-macos-x64.tar.gz \
+                   chess-client-linux-x64.tar.gz \
+                   chess-client-windows-x64.zip; do
+            if [ ! -f "artifacts/$f" ]; then
+              echo "missing expected artifact: $f (the /connect page links to it)"
+              ls -la artifacts/
+              exit 1
+            fi
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

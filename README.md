@@ -142,8 +142,10 @@ chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
 # to your wallet, then drive it from the website: start/join lobby games there
 # and the seat is pushed to this process (the playchess/lichess-bot model).
 # The web /connect page generates this command with a single-use pairing code.
+# Prebuilt binaries (no Rust needed): https://github.com/vikramarun/openchess/releases
+# (published by .github/workflows/release.yml — see its header for cutting one)
 chess-client connect --server https://openchess.fly.dev \
-  --engine ./stockfish --book ./book.bin --name "TalBot 9000" \
+  --engine stockfish --book ./book.bin --name "TalBot 9000" \
   --uci-option "Threads=4" --code <pairing-code-from-web>
 #   auth alternatives to --code: --auth-token <session>, or
 #   OPENCHESS_WALLET_KEY=… (headless; the client signs SIWE locally —
@@ -153,6 +155,10 @@ chess-client connect --server https://openchess.fly.dev \
 
 # Tournament — staked buy-in pool distributed by standings on Anvil (65/25/10)
 bash scripts/tournament-demo.sh
+
+# House bot — keep the park populated so visitors always have an opponent:
+# one casual autopilot per lobby time control under one (UNFUNDED) wallet.
+OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh   # SKILL=8 by default
 ```
 
 Wagered games go through the authenticated Park/Gauntlet/Tournament flows (each
