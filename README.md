@@ -143,9 +143,9 @@ chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
 # and the seat is pushed to this process (the playchess/lichess-bot model).
 # The web /connect page generates this command with a single-use pairing code.
 # Prebuilt binaries (no Rust needed): https://github.com/vikramarun/openchess/releases
-# (published by .github/workflows/release.yml on v* tags — `git tag v0.1.0 && git push origin v0.1.0`)
+# (published by .github/workflows/release.yml — see its header for cutting one)
 chess-client connect --server https://openchess.fly.dev \
-  --engine ./stockfish --book ./book.bin --name "TalBot 9000" \
+  --engine stockfish --book ./book.bin --name "TalBot 9000" \
   --uci-option "Threads=4" --code <pairing-code-from-web>
 #   auth alternatives to --code: --auth-token <session>, or
 #   OPENCHESS_WALLET_KEY=… (headless; the client signs SIWE locally —

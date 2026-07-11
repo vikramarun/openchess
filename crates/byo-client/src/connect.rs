@@ -279,15 +279,17 @@ async fn run_autopilot(
         );
     }
 
-    // On Ctrl-C: withdraw any posted challenge so the lobby doesn't show a
-    // ghost offer for the next hour, then exit.
+    // On Ctrl-C OR SIGTERM (service managers stop with TERM): withdraw any
+    // posted challenge so the lobby doesn't show a ghost offer for the next
+    // hour, then exit. A lingering offer isn't just cosmetic — a restarted
+    // same-wallet autopilot could otherwise accept its own stale offer.
     let posted: PostedOffer = Arc::new(Mutex::new(None));
     {
         let posted = posted.clone();
         let client = client.clone();
         let http = http.to_string();
         tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            wait_for_shutdown_signal().await;
             let open = posted.lock().unwrap().take();
             if let Some((id, key)) = open {
                 let _ = client
@@ -301,15 +303,35 @@ async fn run_autopilot(
     }
 
     let mut played = 0u32;
+    let mut backoff = 5u64;
     loop {
         if opts.games > 0 && played >= opts.games {
             break;
         }
 
-        let seat = match find_and_accept(client, http, opts, session, engine_name).await? {
-            Some(seat) => Some(seat),
-            None => post_and_wait(client, http, opts, session, engine_name, &posted).await?,
+        // Transient server/network errors must not kill the autopilot (an
+        // exit strands the posted offer for its 1h TTL) — log and retry.
+        let seat = match find_and_accept(client, http, opts, session, engine_name).await {
+            Ok(Some(seat)) => Some(seat),
+            Ok(None) => {
+                match post_and_wait(client, http, opts, session, engine_name, &posted).await {
+                    Ok(seat) => seat,
+                    Err(e) => {
+                        eprintln!("matchmaking error: {e:#}; retrying in {backoff}s");
+                        tokio::time::sleep(Duration::from_secs(backoff)).await;
+                        backoff = (backoff * 2).min(60);
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("matchmaking error: {e:#}; retrying in {backoff}s");
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(60);
+                continue;
+            }
         };
+        backoff = 5;
         let Some((game_id, token, color)) = seat else {
             continue; // lost a race; rescan
         };
@@ -332,6 +354,27 @@ async fn run_autopilot(
     }
     println!("autopilot finished after {played} game(s)");
     Ok(())
+}
+
+/// Resolve on Ctrl-C (SIGINT) or, on unix, SIGTERM — what service managers
+/// send on stop. Windows only has Ctrl-C.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return tokio::signal::ctrl_c().await.unwrap_or(()),
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn auth_rb(rb: reqwest::RequestBuilder, session: &Session) -> reqwest::RequestBuilder {
@@ -446,7 +489,11 @@ async fn post_and_wait(
 
     let mut ticks = 0u32;
     loop {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Poll fast while a match is likely imminent, then back off to 10s —
+        // a 24/7 house bot otherwise hammers the single-node server with
+        // "still waiting" requests all night.
+        let interval = if ticks < 30 { 2 } else { 10 };
+        tokio::time::sleep(Duration::from_secs(interval)).await;
         ticks += 1;
 
         // Did someone take our challenge?

@@ -253,7 +253,10 @@ async fn park_create(
     validate_tc(req.initial_secs, req.increment_secs)?;
     let bot = is_bot_seat(&req.seat);
     // Wagered offers AND bot seats require auth: the seat (and the agent it
-    // dispatches to) is always the authed wallet's.
+    // dispatches to) is always the authed wallet's. For casual offers the
+    // wallet is recorded when known — clients rely on `poster_addr` to avoid
+    // accepting their own offers (e.g. a restarted autopilot vs its stale
+    // offer), so an authed poster must never appear anonymous.
     let poster_addr = if req.stake.is_some() || bot {
         Some(
             state
@@ -261,7 +264,7 @@ async fn park_create(
                 .ok_or(StatusCode::UNAUTHORIZED)?,
         )
     } else {
-        None
+        state.authed_wallet(&headers)
     };
 
     let mut poster_name = req.name.as_deref().and_then(sanitize_label);

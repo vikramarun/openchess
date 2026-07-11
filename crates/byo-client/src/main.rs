@@ -25,7 +25,11 @@ use crate::engine::UciEngine;
 use crate::net::{play, PlayOpts};
 
 #[derive(Parser)]
-#[command(name = "chess-client", about = "Bring-your-own-engine chess client")]
+#[command(
+    name = "chess-client",
+    version,
+    about = "Bring-your-own-engine chess client"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -174,6 +178,11 @@ fn parse_uci_option(s: &str) -> Result<(String, String), String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The dependency tree enables both rustls crypto backends (ring via
+    // tungstenite, aws-lc-rs via alloy), so rustls needs an explicit
+    // process-level default or every wss:// connect panics.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

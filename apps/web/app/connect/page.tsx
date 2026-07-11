@@ -4,12 +4,13 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { BOT_OFFLINE, fetchBot, loadBotOptions, saveBotOptions, type BotStatus } from "@/lib/bot";
-import { SERVER_HTTP } from "@/lib/config";
+import { GITHUB_REPO, SERVER_HTTP } from "@/lib/config";
 import { authToken } from "@/lib/escrow";
 
 /** Prebuilt client binaries published by .github/workflows/release.yml —
- *  artifact names there are load-bearing for these URLs. */
-const RELEASES = "https://github.com/vikramarun/openchess/releases/latest/download";
+ *  artifact names there are load-bearing for these URLs (the workflow's
+ *  publish job asserts they exist before releasing). */
+const RELEASES = `${GITHUB_REPO}/releases/latest/download`;
 const DOWNLOADS = [
   { key: "macos-arm64", label: "macOS (Apple Silicon)", file: "chess-client-macos-arm64.tar.gz" },
   { key: "macos-x64", label: "macOS (Intel)", file: "chess-client-macos-x64.tar.gz" },
@@ -19,9 +20,12 @@ const DOWNLOADS = [
 
 /** Best-effort platform guess for the primary download button. Browsers hide
  *  Apple Silicon vs Intel, so default Macs to arm64 (the common case) and
- *  list every platform below it. */
-function guessPlatform(): (typeof DOWNLOADS)[number]["key"] {
+ *  list every platform below it. iOS UAs contain "like Mac OS X" and Android
+ *  contains "Linux", so mobile must be detected FIRST — those visitors get a
+ *  "runs on desktop" note instead of a binary they can't execute. */
+function guessPlatform(): (typeof DOWNLOADS)[number]["key"] | "mobile" {
   const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  if (/iPhone|iPad|iPod|Android|Mobile/i.test(ua)) return "mobile";
   if (/Windows/i.test(ua)) return "windows-x64";
   if (/Mac/i.test(ua)) return "macos-arm64";
   return "linux-x64";
@@ -40,7 +44,8 @@ export default function ConnectPage() {
   const [name, setName] = useState("");
   const [copied, setCopied] = useState(false);
   const [opts, setOpts] = useState<Record<string, string>>({});
-  const [platform, setPlatform] = useState<(typeof DOWNLOADS)[number]["key"]>("macos-arm64");
+  const [platform, setPlatform] =
+    useState<(typeof DOWNLOADS)[number]["key"] | "mobile">("macos-arm64");
 
   useEffect(() => {
     setToken(authToken());
@@ -78,8 +83,12 @@ export default function ConnectPage() {
     };
   }, [token]);
 
+  const isWindows = platform === "windows-x64";
   const command = useMemo(() => {
-    const bin = platform === "windows-x64" ? "chess-client.exe" : "./chess-client";
+    // PowerShell needs the .\ prefix to run a CWD executable, and neither
+    // PowerShell nor cmd accept bash's backslash line continuations — so the
+    // Windows command is a single line.
+    const bin = isWindows ? ".\\chess-client.exe" : "./chess-client";
     const parts = [
       `${bin} connect`,
       `--server ${SERVER_HTTP}`,
@@ -88,8 +97,8 @@ export default function ConnectPage() {
     if (bookPath.trim()) parts.push(`--book ${bookPath.trim()}`);
     if (name.trim()) parts.push(`--name "${name.trim().replace(/"/g, "")}"`);
     parts.push(`--code ${code ?? "<sign in to get a code>"}`);
-    return parts.join(" \\\n  ");
-  }, [enginePath, bookPath, name, code, platform]);
+    return parts.join(isWindows ? " " : " \\\n  ");
+  }, [enginePath, bookPath, name, code, isWindows]);
 
   const copy = async () => {
     try {
@@ -181,17 +190,27 @@ export default function ConnectPage() {
               A single small binary that drives any UCI engine — Stockfish, Lc0, or your own. No
               Rust toolchain needed.
             </p>
-            <p style={{ margin: "10px 0" }}>
-              <a
-                className="primary"
-                style={{ textDecoration: "none", padding: "8px 14px", borderRadius: 6 }}
-                href={`${RELEASES}/${DOWNLOADS.find((d) => d.key === platform)!.file}`}
-              >
-                ⬇ Download for {DOWNLOADS.find((d) => d.key === platform)!.label}
-              </a>
-            </p>
+            {(() => {
+              const dl = DOWNLOADS.find((d) => d.key === platform);
+              return dl ? (
+                <p style={{ margin: "10px 0" }}>
+                  <a
+                    className="primary"
+                    style={{ textDecoration: "none", padding: "8px 14px", borderRadius: 6 }}
+                    href={`${RELEASES}/${dl.file}`}
+                  >
+                    ⬇ Download for {dl.label}
+                  </a>
+                </p>
+              ) : (
+                <p className="muted" style={{ fontSize: 14 }}>
+                  📱 The client runs on a desktop or server — grab the right build from your
+                  computer:
+                </p>
+              );
+            })()}
             <div className="muted" style={{ fontSize: 13 }}>
-              Other platforms:{" "}
+              {platform === "mobile" ? "Downloads:" : "Other platforms:"}{" "}
               {DOWNLOADS.filter((d) => d.key !== platform).map((d, i) => (
                 <span key={d.key}>
                   {i > 0 && " · "}
@@ -200,21 +219,39 @@ export default function ConnectPage() {
               ))}
             </div>
             <pre style={{ marginTop: 10 }}>
-              {platform === "windows-x64"
+              {isWindows
                 ? "# unzip, then run from a terminal in that folder"
                 : "tar -xzf chess-client-*.tar.gz   # then run ./chess-client from that folder"}
             </pre>
             <p className="muted" style={{ fontSize: 13 }}>
-              You also need a UCI engine on your machine — e.g.{" "}
-              <code>brew install stockfish</code> (macOS) or <code>apt install stockfish</code>{" "}
-              (Linux), or point <code>--engine</code> at any engine binary you like.
+              You also need a UCI engine on your machine —{" "}
+              {isWindows ? (
+                <>
+                  download Stockfish from <a href="https://stockfishchess.org/download/">
+                    stockfishchess.org
+                  </a>{" "}
+                  and point <code>--engine</code> at the unzipped .exe
+                </>
+              ) : (
+                <>
+                  e.g. <code>brew install stockfish</code> (macOS) or{" "}
+                  <code>apt install stockfish</code> (Linux), or point <code>--engine</code> at
+                  any engine binary
+                </>
+              )}
+              .
+            </p>
+            <p className="muted" style={{ fontSize: 13 }}>
+              If the download 404s, the first release hasn't been cut yet — build from source
+              below. If macOS blocks the app ("developer cannot be verified"), run{" "}
+              <code>xattr -d com.apple.quarantine chess-client</code> or right-click → Open once.
             </p>
             <details>
               <summary className="muted" style={{ cursor: "pointer", fontSize: 13 }}>
                 Prefer building from source?
               </summary>
               <pre style={{ marginTop: 8 }}>
-                {"git clone https://github.com/vikramarun/openchess && cd openchess\ncargo build --release -p byo-client\n# binary: ./target/release/chess-client"}
+                {`git clone ${GITHUB_REPO} && cd openchess\ncargo build --release -p byo-client\n# binary: ./target/release/chess-client`}
               </pre>
             </details>
           </div>

@@ -20,9 +20,16 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-tokio-tungstenite = "0.29"
+# rustls (not native-tls) so prebuilt binaries carry their own TLS and never
+# depend on the user's system OpenSSL. Without a TLS feature, wss:// fails at
+# runtime with "TLS support not compiled in" — production is wss.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# The dep tree enables both rustls crypto backends (alloy pulls aws-lc-rs,
+# tungstenite pulls ring), so rustls can't auto-select one — main() installs
+# ring as the process default. Direct dep exists only for that call.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 futures-util = "0.3"
 uuid = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

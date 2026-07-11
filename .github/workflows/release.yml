@@ -46,12 +46,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # A tag must ship a binary that says what it is: --version reports the
+      # crate version, so the two may never drift.
+      - name: Check tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' crates/byo-client/Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$crate" ]; then
+            echo "tag v$tag does not match byo-client crate version $crate — bump Cargo.toml first"
+            exit 1
+          fi
 
-      - uses: Swatinem/rust-cache@v2
+      # Same toolchain action as ci.yml so conventions can't drift.
+      # No build cache: tag runs can only restore default-branch caches, which
+      # CI never writes for these job/target/profile combos — a cache step
+      # here would only burn minutes saving unreachable tag-scoped caches.
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          key: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release -p byo-client --target ${{ matrix.target }}
@@ -90,6 +104,21 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      # The web /connect page hardlinks these exact names — fail the release
+      # rather than publish a set the download buttons can't reach.
+      - name: Check load-bearing artifact names
+        run: |
+          for f in chess-client-macos-arm64.tar.gz \
+                   chess-client-macos-x64.tar.gz \
+                   chess-client-linux-x64.tar.gz \
+                   chess-client-windows-x64.zip; do
+            if [ ! -f "artifacts/$f" ]; then
+              echo "missing expected artifact: $f (the /connect page links to it)"
+              ls -la artifacts/
+              exit 1
+            fi
+          done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
