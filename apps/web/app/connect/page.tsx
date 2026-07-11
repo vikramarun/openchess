@@ -7,6 +7,26 @@ import { BOT_OFFLINE, fetchBot, loadBotOptions, saveBotOptions, type BotStatus }
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken } from "@/lib/escrow";
 
+/** Prebuilt client binaries published by .github/workflows/release.yml —
+ *  artifact names there are load-bearing for these URLs. */
+const RELEASES = "https://github.com/vikramarun/openchess/releases/latest/download";
+const DOWNLOADS = [
+  { key: "macos-arm64", label: "macOS (Apple Silicon)", file: "chess-client-macos-arm64.tar.gz" },
+  { key: "macos-x64", label: "macOS (Intel)", file: "chess-client-macos-x64.tar.gz" },
+  { key: "linux-x64", label: "Linux (x64)", file: "chess-client-linux-x64.tar.gz" },
+  { key: "windows-x64", label: "Windows (x64)", file: "chess-client-windows-x64.zip" },
+] as const;
+
+/** Best-effort platform guess for the primary download button. Browsers hide
+ *  Apple Silicon vs Intel, so default Macs to arm64 (the common case) and
+ *  list every platform below it. */
+function guessPlatform(): (typeof DOWNLOADS)[number]["key"] {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  if (/Windows/i.test(ua)) return "windows-x64";
+  if (/Mac/i.test(ua)) return "macos-arm64";
+  return "linux-x64";
+}
+
 /** "Connect your engine": pair a UCI engine running on your machine with your
  *  wallet, once. After that the website is the remote control — start or join
  *  games in the lobby and your bot plays them. */
@@ -15,15 +35,17 @@ export default function ConnectPage() {
   const [code, setCode] = useState<string | null>(null);
   const [codeErr, setCodeErr] = useState<string | null>(null);
   const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
-  const [enginePath, setEnginePath] = useState("./stockfish");
+  const [enginePath, setEnginePath] = useState("stockfish");
   const [bookPath, setBookPath] = useState("");
   const [name, setName] = useState("");
   const [copied, setCopied] = useState(false);
   const [opts, setOpts] = useState<Record<string, string>>({});
+  const [platform, setPlatform] = useState<(typeof DOWNLOADS)[number]["key"]>("macos-arm64");
 
   useEffect(() => {
     setToken(authToken());
     setOpts(loadBotOptions());
+    setPlatform(guessPlatform());
   }, []);
 
   // Signed in → mint the pairing code automatically (single-use, 10 min).
@@ -57,16 +79,17 @@ export default function ConnectPage() {
   }, [token]);
 
   const command = useMemo(() => {
+    const bin = platform === "windows-x64" ? "chess-client.exe" : "./chess-client";
     const parts = [
-      "chess-client connect",
+      `${bin} connect`,
       `--server ${SERVER_HTTP}`,
-      `--engine ${enginePath || "./stockfish"}`,
+      `--engine ${enginePath || "stockfish"}`,
     ];
     if (bookPath.trim()) parts.push(`--book ${bookPath.trim()}`);
     if (name.trim()) parts.push(`--name "${name.trim().replace(/"/g, "")}"`);
     parts.push(`--code ${code ?? "<sign in to get a code>"}`);
     return parts.join(" \\\n  ");
-  }, [enginePath, bookPath, name, code]);
+  }, [enginePath, bookPath, name, code, platform]);
 
   const copy = async () => {
     try {
@@ -155,12 +178,45 @@ export default function ConnectPage() {
           <div className="panel" style={{ marginBottom: 16 }}>
             <b style={{ color: "var(--text-strong)" }}>1 · Get the client</b>
             <p className="muted" style={{ fontSize: 14 }}>
-              Build the native client from source (Rust required). It drives any UCI engine
-              binary — Stockfish, Lc0, or your own.
+              A single small binary that drives any UCI engine — Stockfish, Lc0, or your own. No
+              Rust toolchain needed.
             </p>
-            <pre>
-              {"git clone https://github.com/vikramarun/openchess && cd openchess\ncargo build --release -p byo-client\n# binary: ./target/release/chess-client"}
+            <p style={{ margin: "10px 0" }}>
+              <a
+                className="primary"
+                style={{ textDecoration: "none", padding: "8px 14px", borderRadius: 6 }}
+                href={`${RELEASES}/${DOWNLOADS.find((d) => d.key === platform)!.file}`}
+              >
+                ⬇ Download for {DOWNLOADS.find((d) => d.key === platform)!.label}
+              </a>
+            </p>
+            <div className="muted" style={{ fontSize: 13 }}>
+              Other platforms:{" "}
+              {DOWNLOADS.filter((d) => d.key !== platform).map((d, i) => (
+                <span key={d.key}>
+                  {i > 0 && " · "}
+                  <a href={`${RELEASES}/${d.file}`}>{d.label}</a>
+                </span>
+              ))}
+            </div>
+            <pre style={{ marginTop: 10 }}>
+              {platform === "windows-x64"
+                ? "# unzip, then run from a terminal in that folder"
+                : "tar -xzf chess-client-*.tar.gz   # then run ./chess-client from that folder"}
             </pre>
+            <p className="muted" style={{ fontSize: 13 }}>
+              You also need a UCI engine on your machine — e.g.{" "}
+              <code>brew install stockfish</code> (macOS) or <code>apt install stockfish</code>{" "}
+              (Linux), or point <code>--engine</code> at any engine binary you like.
+            </p>
+            <details>
+              <summary className="muted" style={{ cursor: "pointer", fontSize: 13 }}>
+                Prefer building from source?
+              </summary>
+              <pre style={{ marginTop: 8 }}>
+                {"git clone https://github.com/vikramarun/openchess && cd openchess\ncargo build --release -p byo-client\n# binary: ./target/release/chess-client"}
+              </pre>
+            </details>
           </div>
 
           <div className="panel" style={{ marginBottom: 16 }}>
