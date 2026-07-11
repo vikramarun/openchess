@@ -6,9 +6,9 @@
 //! loser's bankroll to the winner's (minus rake). Funds live in the contract,
 //! never in a platform wallet.
 
+use alloy::network::EthereumWallet;
 use alloy::primitives::{keccak256, B256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
-use alloy::network::EthereumWallet;
 use alloy::signers::Signer;
 use alloy::sol;
 use alloy::sol_types::SolValue;
@@ -59,7 +59,9 @@ pub fn from_env() -> Arc<dyn SettlementSink> {
                     Arc::new(OnchainSettlement::new(url, escrow, oracle))
                 }
                 _ => {
-                    tracing::warn!("settlement: bad RPC_URL/ESCROW_ADDR/ORACLE_KEY, using log sink");
+                    tracing::warn!(
+                        "settlement: bad RPC_URL/ESCROW_ADDR/ORACLE_KEY, using log sink"
+                    );
                     Arc::new(LogSettlement)
                 }
             }
@@ -77,6 +79,21 @@ pub fn from_env() -> Arc<dyn SettlementSink> {
 pub fn recover_personal_sign(message: &str, sig_hex: &str) -> Option<Address> {
     let sig: alloy::primitives::Signature = sig_hex.parse().ok()?;
     sig.recover_address_from_msg(message).ok()
+}
+
+/// EIP-191 `personal_sign` over `message` with a raw private key — the inverse
+/// of [`recover_personal_sign`]. Returns the signer address and the 65-byte
+/// signature as 0x-prefixed hex. Used by the native BYO client for SIWE.
+pub fn personal_sign(key: &str, message: &str) -> anyhow::Result<(Address, String)> {
+    use alloy::signers::SignerSync;
+    let signer: PrivateKeySigner = key
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid private key"))?;
+    let sig = signer.sign_message_sync(message.as_bytes())?;
+    Ok((
+        signer.address(),
+        alloy::hex::encode_prefixed(sig.as_bytes()),
+    ))
 }
 
 /// Map our 16-byte UUID game id into the contract's `bytes32` game id.
@@ -166,8 +183,7 @@ pub trait SettlementSink: Send + Sync {
     ) -> anyhow::Result<()>;
 
     /// Settle a finished game. `winner == None` is a draw (both refunded).
-    async fn report_result(&self, game_id: Uuid, winner: Option<Address>)
-        -> anyhow::Result<()>;
+    async fn report_result(&self, game_id: Uuid, winner: Option<Address>) -> anyhow::Result<()>;
 
     /// Whether this sink actually settles on-chain. The server refuses wagered
     /// games when this is false (fail-closed — never take money it can't settle).
@@ -261,11 +277,7 @@ impl SettlementSink for LogSettlement {
         Ok(())
     }
 
-    async fn report_result(
-        &self,
-        game_id: Uuid,
-        winner: Option<Address>,
-    ) -> anyhow::Result<()> {
+    async fn report_result(&self, game_id: Uuid, winner: Option<Address>) -> anyhow::Result<()> {
         tracing::info!(%game_id, ?winner, "settlement(log): report result");
         Ok(())
     }
@@ -327,11 +339,7 @@ impl SettlementSink for OnchainSettlement {
         Ok(())
     }
 
-    async fn report_result(
-        &self,
-        game_id: Uuid,
-        winner: Option<Address>,
-    ) -> anyhow::Result<()> {
+    async fn report_result(&self, game_id: Uuid, winner: Option<Address>) -> anyhow::Result<()> {
         let gid = game_id_to_bytes32(game_id);
         let winner_addr = winner.unwrap_or(Address::ZERO);
         let escrow = self.contract();
@@ -343,7 +351,10 @@ impl SettlementSink for OnchainSettlement {
         // Ask the contract for the exact EIP-712 digest, sign it with the
         // oracle key, and submit. (Signing the contract's own digest avoids
         // re-deriving the domain separator in Rust.)
-        let digest = escrow.digestGameResult(gid, winner_addr, deadline).call().await?;
+        let digest = escrow
+            .digestGameResult(gid, winner_addr, deadline)
+            .call()
+            .await?;
         let sig = self.oracle.sign_hash(&digest).await?;
         let v: u8 = if sig.v() { 28 } else { 27 };
         let r = B256::from(sig.r());
@@ -427,8 +438,10 @@ impl SettlementSink for OnchainSettlement {
         tid: Uuid,
         leaves: Vec<(Address, U256)>,
     ) -> anyhow::Result<B256> {
-        let leaf_hashes: Vec<B256> =
-            leaves.iter().map(|(a, amt)| tournament_leaf(*a, *amt)).collect();
+        let leaf_hashes: Vec<B256> = leaves
+            .iter()
+            .map(|(a, amt)| tournament_leaf(*a, *amt))
+            .collect();
         let root = merkle_root(&leaf_hashes);
         let total: U256 = leaves.iter().fold(U256::ZERO, |acc, (_, amt)| acc + *amt);
         let tidb = game_id_to_bytes32(tid);
@@ -497,7 +510,10 @@ mod tests {
         let recovered = recover_personal_sign(msg, &sig_hex).expect("recover");
         assert_eq!(recovered, signer.address());
         // a tampered message recovers a different address
-        assert_ne!(recover_personal_sign("different", &sig_hex), Some(signer.address()));
+        assert_ne!(
+            recover_personal_sign("different", &sig_hex),
+            Some(signer.address())
+        );
         Ok(())
     }
 
@@ -638,9 +654,18 @@ mod tests {
         sink.settle_tournament(tid, addrs.clone(), payouts).await?;
 
         let read = ChessEscrow::new(escrow_addr, &dep);
-        assert_eq!(read.bankroll(addrs[0]).call().await?, U256::from(11_000_000u64));
-        assert_eq!(read.bankroll(addrs[1]).call().await?, U256::from(10_000_000u64));
-        assert_eq!(read.bankroll(addrs[2]).call().await?, U256::from(9_000_000u64));
+        assert_eq!(
+            read.bankroll(addrs[0]).call().await?,
+            U256::from(11_000_000u64)
+        );
+        assert_eq!(
+            read.bankroll(addrs[1]).call().await?,
+            U256::from(10_000_000u64)
+        );
+        assert_eq!(
+            read.bankroll(addrs[2]).call().await?,
+            U256::from(9_000_000u64)
+        );
         Ok(())
     }
 
@@ -662,9 +687,7 @@ mod tests {
     #[test]
     fn merkle_root_and_proof_self_consistent() {
         // Rebuilding the root from a leaf + its proof must reproduce the root.
-        let leaves: Vec<B256> = (0u64..5)
-            .map(|i| keccak256(i.to_be_bytes()))
-            .collect();
+        let leaves: Vec<B256> = (0u64..5).map(|i| keccak256(i.to_be_bytes())).collect();
         let root = merkle_root(&leaves);
         for i in 0..leaves.len() {
             let proof = merkle_proof(&leaves, i);
@@ -689,9 +712,15 @@ mod tests {
             .wallet(EthereumWallet::from(deployer.clone()))
             .connect_http(url.clone());
         let usdc = MockUSDC::deploy(&dep).await?;
-        let escrow =
-            ChessEscrow::deploy(&dep, *usdc.address(), oracle.address(), deployer.address(), 0u16, 3600u64)
-                .await?;
+        let escrow = ChessEscrow::deploy(
+            &dep,
+            *usdc.address(),
+            oracle.address(),
+            deployer.address(),
+            0u16,
+            3600u64,
+        )
+        .await?;
         let escrow_addr = *escrow.address();
 
         let bankroll = U256::from(10_000_000u64);
@@ -700,9 +729,24 @@ mod tests {
             let p = ProviderBuilder::new()
                 .wallet(EthereumWallet::from(who.clone()))
                 .connect_http(url.clone());
-            MockUSDC::new(*usdc.address(), &p).mint(who.address(), bankroll).send().await?.get_receipt().await?;
-            MockUSDC::new(*usdc.address(), &p).approve(escrow_addr, bankroll).send().await?.get_receipt().await?;
-            ChessEscrow::new(escrow_addr, &p).deposit(bankroll).send().await?.get_receipt().await?;
+            MockUSDC::new(*usdc.address(), &p)
+                .mint(who.address(), bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            MockUSDC::new(*usdc.address(), &p)
+                .approve(escrow_addr, bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            ChessEscrow::new(escrow_addr, &p)
+                .deposit(bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
         }
 
         let sink = OnchainSettlement::new(url.clone(), escrow_addr, oracle.clone());
@@ -720,8 +764,10 @@ mod tests {
         sink.settle_tournament_root(tid, leaves.clone()).await?;
 
         // Each winner claims with a Rust-built proof verified by the Solidity tree.
-        let leaf_hashes: Vec<B256> =
-            leaves.iter().map(|(a, amt)| tournament_leaf(*a, *amt)).collect();
+        let leaf_hashes: Vec<B256> = leaves
+            .iter()
+            .map(|(a, amt)| tournament_leaf(*a, *amt))
+            .collect();
         let read = ChessEscrow::new(escrow_addr, &dep);
         for (i, (acct, amt)) in leaves.iter().enumerate() {
             let proof = merkle_proof(&leaf_hashes, i);
@@ -732,9 +778,18 @@ mod tests {
                 .await?;
         }
 
-        assert_eq!(read.bankroll(players[0].address()).call().await?, U256::from(11_000_000u64));
-        assert_eq!(read.bankroll(players[1].address()).call().await?, U256::from(10_000_000u64));
-        assert_eq!(read.bankroll(players[2].address()).call().await?, U256::from(9_000_000u64));
+        assert_eq!(
+            read.bankroll(players[0].address()).call().await?,
+            U256::from(11_000_000u64)
+        );
+        assert_eq!(
+            read.bankroll(players[1].address()).call().await?,
+            U256::from(10_000_000u64)
+        );
+        assert_eq!(
+            read.bankroll(players[2].address()).call().await?,
+            U256::from(9_000_000u64)
+        );
         Ok(())
     }
 }

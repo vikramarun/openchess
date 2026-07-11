@@ -138,6 +138,19 @@ cargo build && (cd contracts && forge build) && bash scripts/onchain-demo.sh
 chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
 #   staked: add --stake <usdc-base-units> --auth-token <siwe-session>
 
+# Connect — put YOUR engine (+ optional Polyglot book) online as a bot bound
+# to your wallet, then drive it from the website: start/join lobby games there
+# and the seat is pushed to this process (the playchess/lichess-bot model).
+# The web /connect page generates this command with a single-use pairing code.
+chess-client connect --server https://openchess.fly.dev \
+  --engine ./stockfish --book ./book.bin --name "TalBot 9000" \
+  --uci-option "Threads=4" --code <pairing-code-from-web>
+#   auth alternatives to --code: --auth-token <session>, or
+#   OPENCHESS_WALLET_KEY=… (headless; the client signs SIWE locally —
+#   `chess-client login` prints a session token for scripting)
+#   unattended matchmaking instead of web-driven: add --auto
+#     [--stake <usdc-base-units> --initial-secs N --increment-secs N --games N]
+
 # Tournament — staked buy-in pool distributed by standings on Anvil (65/25/10)
 bash scripts/tournament-demo.sh
 ```

@@ -7,6 +7,7 @@
 //! in production). On-chain settlement is wired when `RPC_URL`/`ESCROW_ADDR`/
 //! `ORACLE_KEY` are set, else it logs.
 
+mod agents;
 mod auth;
 mod matchmaking;
 mod players;
@@ -57,10 +58,65 @@ pub struct Inner {
     pub db: Option<Arc<Db>>,
     pub lobby: Lobby,
     pub auth: auth::Auth,
+    /// Connected user-run engines (bots), keyed by owner wallet.
+    pub agents: agents::Agents,
     /// Rooms signal their game id here on finish so we can evict state.
     pub cleanup_tx: mpsc::Sender<GameId>,
     /// Rooms report game outcomes here for mode standings.
     pub results_tx: mpsc::Sender<GameOutcome>,
+}
+
+/// Self-declared identity for one seat: a display name and the engine the
+/// player claims to run. Informational only — never used for auth or money.
+#[derive(Clone, Default)]
+pub struct SeatMeta {
+    pub name: Option<String>,
+    pub engine: Option<String>,
+}
+
+/// Clean a client-supplied display label: strip control characters, collapse
+/// surrounding whitespace, and cap the length so the lobby can't be defaced.
+pub fn sanitize_label(s: &str) -> Option<String> {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(48)
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Shorten a wallet address for display: `0x1234…abcd`. Operates on chars, not
+/// bytes — inputs can be arbitrary user-supplied strings (tournament names).
+pub fn short_addr(a: &str) -> String {
+    let chars: Vec<char> = a.chars().collect();
+    if chars.len() > 12 {
+        let head: String = chars[..6].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}…{tail}")
+    } else {
+        a.to_string()
+    }
+}
+
+/// How a seat's launch credential is delivered when a game starts.
+pub enum SeatDelivery {
+    /// The token is returned to the HTTP caller (browser/native polls it).
+    Browser,
+    /// The seat is pushed to the owner's connected agent; the token never
+    /// leaves the server. `wallet` lets the registry tie the game to the
+    /// agent so its busy flag is cleared when the room dies.
+    Agent {
+        wallet: String,
+        tx: mpsc::Sender<protocol::ServerToAgent>,
+        uci_options: Vec<(String, String)>,
+    },
 }
 
 /// On-chain seats + stake for a wagered game.
@@ -111,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         lobby: Lobby::default(),
         auth: auth::Auth::default(),
+        agents: agents::Agents::default(),
         cleanup_tx,
         results_tx,
     }));
@@ -132,9 +189,14 @@ async fn main() -> anyhow::Result<()> {
             problems.push("WEB_ORIGIN unset");
         }
         if !problems.is_empty() {
-            anyhow::bail!("REQUIRE_ONCHAIN set but misconfigured: {}", problems.join("; "));
+            anyhow::bail!(
+                "REQUIRE_ONCHAIN set but misconfigured: {}",
+                problems.join("; ")
+            );
         }
-        tracing::info!("production profile OK (db + on-chain settlement + SIWE_DOMAIN + WEB_ORIGIN)");
+        tracing::info!(
+            "production profile OK (db + on-chain settlement + SIWE_DOMAIN + WEB_ORIGIN)"
+        );
     }
 
     // Drain the per-game + tournament settlement outboxes on-chain (durable).
@@ -143,7 +205,9 @@ async fn main() -> anyhow::Result<()> {
         let s = state.0.settlement.clone();
         {
             let (db, s) = (db.clone(), s.clone());
-            supervise("settlement", move || settlement_worker(db.clone(), s.clone()));
+            supervise("settlement", move || {
+                settlement_worker(db.clone(), s.clone())
+            });
         }
         {
             let (db, s) = (db.clone(), s.clone());
@@ -170,7 +234,9 @@ async fn main() -> anyhow::Result<()> {
     let origin_val = web_origin
         .parse::<axum::http::HeaderValue>()
         .unwrap_or_else(|_| {
-            tracing::warn!("invalid WEB_ORIGIN '{web_origin}', falling back to http://localhost:3000");
+            tracing::warn!(
+                "invalid WEB_ORIGIN '{web_origin}', falling back to http://localhost:3000"
+            );
             "http://localhost:3000".parse().unwrap()
         });
     let cors = CorsLayer::new()
@@ -183,7 +249,9 @@ async fn main() -> anyhow::Result<()> {
         // curls `/`). This server is an API + WebSocket hub; the UI is elsewhere.
         .route(
             "/",
-            get(|| async { "OpenChess game server — API + WebSocket hub. Play at https://openchess.ai" }),
+            get(|| async {
+                "OpenChess game server — API + WebSocket hub. Play at https://openchess.ai"
+            }),
         )
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(ready))
@@ -194,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth::routes())
         .merge(matchmaking::routes())
         .merge(players::routes())
+        .merge(agents::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
@@ -209,7 +278,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn env_flag(key: &str) -> bool {
-    matches!(std::env::var(key).ok().as_deref(), Some("1") | Some("true") | Some("TRUE"))
+    matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
 }
 
 /// Spawn a long-lived worker and restart it if it ever exits or panics, so a
@@ -262,6 +334,9 @@ struct ConfigInfo {
     chain_id: u64,
     /// Whether wagered play is available (on-chain settlement is configured).
     wager_enabled: bool,
+    /// Domain SIWE messages must be bound to — native clients need it to build
+    /// a message this server will accept.
+    siwe_domain: String,
 }
 
 /// Public snapshot of an in-progress game, for the spectate lobby.
@@ -272,6 +347,11 @@ pub struct LiveGame {
     /// Wallets for a wagered game; `None` for casual/engine-vs-engine games.
     pub white: Option<String>,
     pub black: Option<String>,
+    /// Self-declared display names + engines (informational, sanitized).
+    pub white_name: Option<String>,
+    pub black_name: Option<String>,
+    pub white_engine: Option<String>,
+    pub black_engine: Option<String>,
     pub stake: Option<String>,
     pub initial_secs: u64,
     pub increment_secs: u64,
@@ -314,6 +394,7 @@ async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
         escrow: state.0.settlement.escrow_address(),
         chain_id,
         wager_enabled: state.0.settlement.is_onchain(),
+        siwe_domain: auth::expected_domain(),
     })
 }
 
@@ -324,8 +405,7 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let term = async {
         // SIGTERM is what Kubernetes/systemd send on stop.
-        if let Ok(mut s) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         {
             s.recv().await;
         }
@@ -336,16 +416,15 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
-/// Remove a finished game's room handle and its launch tokens.
+/// Remove a finished game's room handle and its launch tokens, and free any
+/// agents seated in it (the server owns the busy flag — a crashed or silent
+/// client can't leave its bot claimed forever).
 async fn cleanup_task(state: AppState, mut rx: mpsc::Receiver<GameId>) {
     while let Some(game_id) = rx.recv().await {
         state.0.rooms.lock().remove(&game_id);
         state.0.live_games.lock().remove(&game_id);
-        state
-            .0
-            .tokens
-            .lock()
-            .retain(|_, (g, _)| *g != game_id);
+        state.0.tokens.lock().retain(|_, (g, _)| *g != game_id);
+        state.0.agents.game_ended(game_id);
         tracing::debug!(%game_id, "evicted finished game state");
     }
 }
@@ -397,7 +476,12 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                     Err(_) => {
                         // Permanently malformed — never retryable.
                         let _ = db
-                            .finalize_settlement(row.id, row.game_id, "failed", Some("bad winner addr"))
+                            .finalize_settlement(
+                                row.id,
+                                row.game_id,
+                                "failed",
+                                Some("bad winner addr"),
+                            )
                             .await;
                         continue;
                     }
@@ -405,7 +489,9 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
             };
             match settlement.report_result(row.game_id, winner).await {
                 Ok(()) => {
-                    let _ = db.finalize_settlement(row.id, row.game_id, "settled", None).await;
+                    let _ = db
+                        .finalize_settlement(row.id, row.game_id, "settled", None)
+                        .await;
                     tracing::info!(game_id = %row.game_id, "outbox: settled on-chain");
                 }
                 Err(e) => {
@@ -413,10 +499,14 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                     // The submit may have actually landed (crash/replay): if the
                     // chain says it's settled, that's success, not failure.
                     if settlement.is_settled(row.game_id).await {
-                        let _ = db.finalize_settlement(row.id, row.game_id, "settled", None).await;
+                        let _ = db
+                            .finalize_settlement(row.id, row.game_id, "settled", None)
+                            .await;
                         tracing::info!(game_id = %row.game_id, "outbox: already settled on-chain");
                     } else if row.attempts >= persistence::MAX_SETTLE_ATTEMPTS {
-                        let _ = db.finalize_settlement(row.id, row.game_id, "failed", Some(&msg)).await;
+                        let _ = db
+                            .finalize_settlement(row.id, row.game_id, "failed", Some(&msg))
+                            .await;
                         tracing::error!(game_id = %row.game_id, attempts = row.attempts, "outbox: giving up: {msg}");
                     } else {
                         // Transient: requeue for retry on a later tick.
@@ -448,18 +538,26 @@ async fn tournament_settlement_worker(db: Arc<Db>, settlement: Arc<dyn Settlemen
         for row in rows {
             match settle_tournament_row(&settlement, &row).await {
                 Ok(()) => {
-                    let _ = db.set_tournament_settlement_status(row.id, "settled", None).await;
+                    let _ = db
+                        .set_tournament_settlement_status(row.id, "settled", None)
+                        .await;
                     tracing::info!(tid = %row.tid, "tournament outbox: settled on-chain");
                 }
                 Err(e) => {
                     let msg = e.to_string();
                     if settlement.is_tournament_settled(row.tid).await {
-                        let _ = db.set_tournament_settlement_status(row.id, "settled", None).await;
+                        let _ = db
+                            .set_tournament_settlement_status(row.id, "settled", None)
+                            .await;
                     } else if row.attempts >= persistence::MAX_SETTLE_ATTEMPTS {
-                        let _ = db.set_tournament_settlement_status(row.id, "failed", Some(&msg)).await;
+                        let _ = db
+                            .set_tournament_settlement_status(row.id, "failed", Some(&msg))
+                            .await;
                         tracing::error!(tid = %row.tid, "tournament outbox: giving up: {msg}");
                     } else {
-                        let _ = db.set_tournament_settlement_status(row.id, "pending", Some(&msg)).await;
+                        let _ = db
+                            .set_tournament_settlement_status(row.id, "pending", Some(&msg))
+                            .await;
                         tracing::warn!(tid = %row.tid, "tournament outbox: transient, will retry: {msg}");
                     }
                 }
@@ -476,11 +574,16 @@ async fn settle_tournament_row(
         "direct" => {
             let winners = json_addrs(&row.payload, "winners")?;
             let payouts = json_u256s(&row.payload, "payouts")?;
-            settlement.settle_tournament(row.tid, winners, payouts).await
+            settlement
+                .settle_tournament(row.tid, winners, payouts)
+                .await
         }
         "root" => {
             let leaves = json_leaves(&row.payload)?;
-            settlement.settle_tournament_root(row.tid, leaves).await.map(|_| ())
+            settlement
+                .settle_tournament_root(row.tid, leaves)
+                .await
+                .map(|_| ())
         }
         other => Err(anyhow::anyhow!("unknown tournament settle mode: {other}")),
     }
@@ -518,8 +621,14 @@ fn json_leaves(v: &serde_json::Value) -> anyhow::Result<Vec<(Address, U256)>> {
         .ok_or_else(|| anyhow::anyhow!("missing leaves"))?
         .iter()
         .map(|pair| {
-            let a = pair.get(0).and_then(|x| x.as_str()).and_then(|s| s.parse::<Address>().ok());
-            let amt = pair.get(1).and_then(|x| x.as_str()).and_then(|s| s.parse::<U256>().ok());
+            let a = pair
+                .get(0)
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse::<Address>().ok());
+            let amt = pair
+                .get(1)
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse::<U256>().ok());
             match (a, amt) {
                 (Some(a), Some(amt)) => Ok((a, amt)),
                 _ => Err(anyhow::anyhow!("bad leaf")),
@@ -558,7 +667,15 @@ async fn create_game(
     Json(req): Json<CreateGameReq>,
 ) -> Result<Json<CreateGameResp>, StatusCode> {
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
-    let resp = state.start_game(tc, "casual", None).await?;
+    let resp = state
+        .start_game(
+            tc,
+            "casual",
+            None,
+            Default::default(),
+            [SeatDelivery::Browser, SeatDelivery::Browser],
+        )
+        .await?;
     Ok(Json(resp))
 }
 
@@ -576,8 +693,12 @@ pub fn validate_tc(initial_secs: u64, increment_secs: u64) -> Result<TimeControl
 /// Build wager seats from authenticated wallet strings + a stake string.
 /// Rejects identical seats and out-of-range stakes.
 pub fn build_wager(white: &str, black: &str, stake: &str) -> Result<WagerSeats, StatusCode> {
-    let white = white.parse::<Address>().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let black = black.parse::<Address>().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let white = white
+        .parse::<Address>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let black = black
+        .parse::<Address>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let stake = stake.parse::<U256>().map_err(|_| StatusCode::BAD_REQUEST)?;
     if white == black {
         return Err(StatusCode::BAD_REQUEST);
@@ -585,18 +706,26 @@ pub fn build_wager(white: &str, black: &str, stake: &str) -> Result<WagerSeats, 
     if stake == U256::ZERO || stake > U256::from(MAX_STAKE) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    Ok(WagerSeats { white, black, stake })
+    Ok(WagerSeats {
+        white,
+        black,
+        stake,
+    })
 }
 
 impl AppState {
     /// Create a game (optionally wagered), spawn its room, persist it, open
-    /// escrow if wagered, and register launch tokens. Shared by /games, park
-    /// accept, and the matchmaking queue.
+    /// escrow if wagered, register launch tokens, and deliver each seat
+    /// (return the token, or push it to the owner's agent). Shared by /games,
+    /// park accept, and the matchmaking queue — any mode can seat a bot by
+    /// passing an Agent delivery.
     pub async fn start_game(
         &self,
         tc: TimeControl,
         mode: &str,
         wager: Option<WagerSeats>,
+        meta: [SeatMeta; 2],         // [white, black] self-declared identity
+        delivery: [SeatDelivery; 2], // [white, black] seat delivery
     ) -> Result<CreateGameResp, StatusCode> {
         let game_id = Uuid::new_v4();
         let stake_info = wager.map(|w| StakeInfo {
@@ -665,11 +794,27 @@ impl AppState {
             }
         }
 
+        // Resolve each seat's display identity: declared name, else shortened
+        // wallet (wagered games), else "anonymous".
+        let seat_info = |m: &SeatMeta, wallet: Option<String>| protocol::OpponentInfo {
+            name: m
+                .name
+                .clone()
+                .or_else(|| wallet.map(|w| short_addr(&w)))
+                .unwrap_or_else(|| "anonymous".into()),
+            declared_engine: m.engine.clone(),
+        };
+        let players = [
+            seat_info(&meta[0], wager.map(|w| w.white.to_string())),
+            seat_info(&meta[1], wager.map(|w| w.black.to_string())),
+        ];
+
         let handle = spawn_room(
             game_id,
             tc,
             self.0.settlement.clone(),
             stake_info,
+            players,
             self.0.db.clone(),
             self.0.cleanup_tx.clone(),
             self.0.results_tx.clone(),
@@ -682,6 +827,10 @@ impl AppState {
                 mode: mode.to_string(),
                 white: wager.map(|w| w.white.to_string()),
                 black: wager.map(|w| w.black.to_string()),
+                white_name: meta[0].name.clone(),
+                black_name: meta[1].name.clone(),
+                white_engine: meta[0].engine.clone(),
+                black_engine: meta[1].engine.clone(),
                 stake: wager.map(|w| w.stake.to_string()),
                 initial_secs: tc.initial_ms / 1000,
                 increment_secs: tc.increment_ms / 1000,
@@ -700,6 +849,44 @@ impl AppState {
             tokens.insert(black_token.clone(), (game_id, Color::Black));
         }
 
+        // Deliver bot seats to their agents. A failed push means the agent
+        // vanished after being claimed — the game can never start, so abort it
+        // NOW (refund escrow, evict state) rather than stranding locked stakes
+        // behind the contract's 24h claimTimeout.
+        let stake_str = wager.map(|w| w.stake.to_string());
+        let seats = [
+            (Color::White, &white_token, &delivery[0]),
+            (Color::Black, &black_token, &delivery[1]),
+        ];
+        for (color, token, d) in seats {
+            let SeatDelivery::Agent {
+                wallet,
+                tx,
+                uci_options,
+            } = d
+            else {
+                continue;
+            };
+            let sent = tx
+                .send(protocol::ServerToAgent::AssignSeat {
+                    game_id,
+                    token: token.clone(),
+                    color,
+                    time_control: tc,
+                    stake: stake_str.clone(),
+                    uci_options: uci_options.clone(),
+                })
+                .await;
+            if sent.is_err() {
+                tracing::error!(%game_id, %wallet, ?color, "agent vanished before seat dispatch — aborting game");
+                self.abort_started_game(game_id, wager).await;
+                return Err(StatusCode::FAILED_DEPENDENCY);
+            }
+            // Tie the game to the agent so the registry can clear its busy
+            // flag when the room dies, even if the client never reports idle.
+            self.0.agents.bind_game(game_id, wallet);
+        }
+
         tracing::info!(%game_id, mode, wagered = wager.is_some(), "game created");
         Ok(CreateGameResp {
             game_id,
@@ -707,6 +894,28 @@ impl AppState {
             black_token,
             spectate_path: format!("/ws/game/{game_id}"),
         })
+    }
+
+    /// Roll back a game that was fully created (room spawned, escrow possibly
+    /// locked) but can never be played. Refunds a wagered escrow by settling
+    /// it as a draw; evicts room/tokens/live-game state.
+    async fn abort_started_game(&self, game_id: GameId, wager: Option<WagerSeats>) {
+        if wager.is_some() {
+            // Draw settlement refunds both stakes. If this fails the funds are
+            // still recoverable via the contract's claimTimeout — log loudly.
+            if let Err(e) = self.0.settlement.report_result(game_id, None).await {
+                tracing::error!(
+                    %game_id,
+                    "escrow refund after aborted dispatch FAILED (funds recoverable via claimTimeout): {e:#}"
+                );
+            }
+        }
+        if let Some(db) = &self.0.db {
+            let _ = db.abort_game(game_id, "seat_dispatch_failed").await;
+        }
+        // Evict room handle, live-game entry, and launch tokens; the room task
+        // itself exits via its never-started reap.
+        let _ = self.0.cleanup_tx.send(game_id).await;
     }
 
     /// Resolve a launch token to its (game, color) seat.
@@ -735,5 +944,36 @@ impl AppState {
         let rooms = self.0.rooms.lock();
         let handle = rooms.get(game_id)?;
         Some((handle.cmd_tx.clone(), handle.spectate_tx.subscribe()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_addr_is_char_safe_on_multibyte_input() {
+        // A 42-BYTE string that passes byte-length guards but whose char
+        // boundaries don't align with the old byte slicing (regression:
+        // crafted casual-tournament names used to panic tourney_start).
+        let evil = format!("0x{}a", "€".repeat(13));
+        assert_eq!(evil.len(), 42);
+        let s = short_addr(&evil);
+        assert!(s.contains('…'));
+        // Normal wallet addresses render as before.
+        assert_eq!(
+            short_addr("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+            "0xf39F…2266"
+        );
+        // Short strings pass through untouched.
+        assert_eq!(short_addr("casual"), "casual");
+    }
+
+    #[test]
+    fn sanitize_label_caps_by_chars() {
+        assert_eq!(sanitize_label("  hi\u{0007} "), Some("hi".into()));
+        assert!(sanitize_label(" \t").is_none());
+        let long = "é".repeat(100);
+        assert_eq!(sanitize_label(&long).unwrap().chars().count(), 48);
     }
 }

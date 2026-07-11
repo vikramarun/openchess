@@ -9,8 +9,8 @@
 //! body. Casual (unwagered) games need no auth. Lobby state is in-memory with
 //! TTL eviction (the Redis layer in production).
 
-use std::collections::{HashMap, VecDeque};
 use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
@@ -25,7 +25,11 @@ use uuid::Uuid;
 
 use ledger::{merkle_proof, tournament_leaf, Address, U256};
 
-use crate::{build_wager, validate_tc, AppState, GameOutcome, MAX_STAKE};
+use crate::agents::AgentUnavailable;
+use crate::{
+    build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, SeatDelivery,
+    SeatMeta, MAX_STAKE,
+};
 
 /// Fields larger than this settle via a Merkle root (winners claim individually)
 /// instead of a single direct payout transaction.
@@ -53,10 +57,18 @@ pub struct Lobby {
 
 impl Lobby {
     pub fn sweep_expired(&self) {
-        self.park.lock().retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
-        self.tickets.lock().retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
-        self.tournaments.lock().retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
-        self.gauntlets.lock().retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
+        self.park
+            .lock()
+            .retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
+        self.tickets
+            .lock()
+            .retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
+        self.tournaments
+            .lock()
+            .retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
+        self.gauntlets
+            .lock()
+            .retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
     }
 
     /// Drop game->mode routing entries for games that no longer exist (e.g. a
@@ -64,7 +76,9 @@ impl Lobby {
     /// two routing maps so an abandoned game can't leak an entry forever.
     pub fn prune_games(&self, live: &std::collections::HashSet<GameId>) {
         self.game_to_gauntlet.lock().retain(|g, _| live.contains(g));
-        self.game_to_tournament.lock().retain(|g, _| live.contains(g));
+        self.game_to_tournament
+            .lock()
+            .retain(|g, _| live.contains(g));
     }
 
     /// Update mode standings when a game finishes. Returns a follow-up action
@@ -138,7 +152,7 @@ pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/park/offers", post(park_create).get(park_list))
-        .route("/park/offers/{id}", get(park_get))
+        .route("/park/offers/{id}", get(park_get).delete(park_cancel))
         .route("/park/offers/{id}/accept", post(park_accept))
         .route("/queue", post(queue_join))
         .route("/queue/{id}", get(queue_get))
@@ -150,7 +164,10 @@ pub fn routes() -> Router<AppState> {
         .route("/tournaments/{id}/my-games", get(tourney_my_games))
         .route("/tournaments/{id}/join", post(tourney_join))
         .route("/tournaments/{id}/start", post(tourney_start))
-        .route("/tournaments/{id}/claim/{address}", get(tourney_claim_proof))
+        .route(
+            "/tournaments/{id}/claim/{address}",
+            get(tourney_claim_proof),
+        )
 }
 
 fn di() -> u64 {
@@ -161,17 +178,46 @@ fn dinc() -> u64 {
 }
 
 // --------------------------------------------------------------------------
+// Bot seats (played by the user's connected agent, driven from the web)
+// --------------------------------------------------------------------------
+
+fn is_bot_seat(seat: &Option<String>) -> bool {
+    seat.as_deref() == Some("bot")
+}
+
+/// Sanitize user-supplied UCI option overrides before relaying them to the
+/// user's own agent (bounded count + label-cleaned keys/values).
+fn clean_uci_options(opts: Option<HashMap<String, String>>) -> Vec<(String, String)> {
+    opts.unwrap_or_default()
+        .into_iter()
+        .filter_map(|(k, v)| Some((sanitize_label(&k)?, sanitize_label(&v)?)))
+        .take(32)
+        .collect()
+}
+
+// Seat dispatch itself lives in `AppState::start_game` (a `SeatDelivery` per
+// seat), so every mode shares one claim/dispatch/rollback implementation.
+
+// --------------------------------------------------------------------------
 // Park / Patzer
 // --------------------------------------------------------------------------
 
 struct ParkOffer {
-    poster_addr: Option<String>, // authenticated wallet (Some only if wagered)
+    poster_addr: Option<String>, // authenticated wallet (wagered or bot seats)
+    poster_name: Option<String>, // self-declared display name (sanitized)
+    poster_engine: Option<String>, // self-declared engine (sanitized)
+    /// The poster's seat is played by their connected agent, not a browser.
+    poster_seat_bot: bool,
+    /// UCI option overrides for the poster's bot (relayed on dispatch).
+    poster_uci_options: Vec<(String, String)>,
     stake: Option<String>,
     initial_secs: u64,
     increment_secs: u64,
     status: String, // open | matching | matched
     game_id: Option<GameId>,
     poster_token: Option<String>,
+    /// Capability to cancel this offer, returned only to its creator.
+    cancel_key: String,
     created_at: Instant,
 }
 
@@ -182,11 +228,21 @@ struct ParkCreateReq {
     initial_secs: u64,
     #[serde(default = "dinc")]
     increment_secs: u64,
+    /// Optional self-declared display name (shown in the lobby).
+    name: Option<String>,
+    /// Optional self-declared engine name (shown in the lobby; unverified).
+    engine: Option<String>,
+    /// "bot" seats the poster's connected agent; anything else = browser.
+    seat: Option<String>,
+    /// UCI option overrides for a bot seat (applied by the agent per game).
+    uci_options: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
 struct ParkCreateResp {
     offer_id: Uuid,
+    /// Present this to DELETE /park/offers/{id} to withdraw the offer.
+    cancel_key: String,
 }
 
 async fn park_create(
@@ -195,33 +251,98 @@ async fn park_create(
     Json(req): Json<ParkCreateReq>,
 ) -> Result<Json<ParkCreateResp>, StatusCode> {
     validate_tc(req.initial_secs, req.increment_secs)?;
-    // Wagered offers require auth; the poster's seat is their authed wallet.
-    let poster_addr = if req.stake.is_some() {
-        Some(state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?)
+    let bot = is_bot_seat(&req.seat);
+    // Wagered offers AND bot seats require auth: the seat (and the agent it
+    // dispatches to) is always the authed wallet's.
+    let poster_addr = if req.stake.is_some() || bot {
+        Some(
+            state
+                .authed_wallet(&headers)
+                .ok_or(StatusCode::UNAUTHORIZED)?,
+        )
     } else {
         None
     };
+
+    let mut poster_name = req.name.as_deref().and_then(sanitize_label);
+    let mut poster_engine = req.engine.as_deref().and_then(sanitize_label);
+    if bot {
+        // The bot must be online to post as it; default identity from its
+        // registration so the lobby shows what it actually runs.
+        let wallet = poster_addr.as_deref().unwrap_or_default();
+        let Some((meta, _busy)) = state.0.agents.view(wallet) else {
+            return Err(StatusCode::FAILED_DEPENDENCY); // 424: bot offline
+        };
+        poster_name = poster_name.or(Some(meta.name));
+        poster_engine = poster_engine.or(Some(meta.engine));
+    }
+
     let id = Uuid::new_v4();
+    let cancel_key = Uuid::new_v4().simple().to_string();
     state.0.lobby.park.lock().insert(
         id,
         ParkOffer {
             poster_addr,
+            poster_name,
+            poster_engine,
+            poster_seat_bot: bot,
+            poster_uci_options: clean_uci_options(req.uci_options),
             stake: req.stake,
             initial_secs: req.initial_secs,
             increment_secs: req.increment_secs,
             status: "open".into(),
             game_id: None,
             poster_token: None,
+            cancel_key: cancel_key.clone(),
             created_at: Instant::now(),
         },
     );
-    Ok(Json(ParkCreateResp { offer_id: id }))
+    Ok(Json(ParkCreateResp {
+        offer_id: id,
+        cancel_key,
+    }))
+}
+
+#[derive(Deserialize)]
+struct CancelQuery {
+    key: Option<String>,
+}
+
+/// Withdraw an open offer. Authorized by the `cancel_key` returned at creation,
+/// or (for a wagered offer) by the poster's authenticated wallet. Offers that
+/// already matched are immutable — the game exists.
+async fn park_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<CancelQuery>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let caller = state.authed_wallet(&headers);
+    let mut park = state.0.lobby.park.lock();
+    let Some(o) = park.get(&id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    let by_key = q.key.as_deref() == Some(o.cancel_key.as_str());
+    let by_wallet = match (&o.poster_addr, &caller) {
+        (Some(p), Some(c)) => p.eq_ignore_ascii_case(c),
+        _ => false,
+    };
+    if !(by_key || by_wallet) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if o.status != "open" {
+        return StatusCode::CONFLICT;
+    }
+    park.remove(&id);
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Serialize)]
 struct OfferSummary {
     offer_id: Uuid,
     poster_addr: Option<String>,
+    poster_name: Option<String>,
+    poster_engine: Option<String>,
     stake: Option<String>,
     initial_secs: u64,
     increment_secs: u64,
@@ -235,6 +356,8 @@ async fn park_list(State(state): State<AppState>) -> Json<Vec<OfferSummary>> {
             .map(|(id, o)| OfferSummary {
                 offer_id: *id,
                 poster_addr: o.poster_addr.clone(),
+                poster_name: o.poster_name.clone(),
+                poster_engine: o.poster_engine.clone(),
                 stake: o.stake.clone(),
                 initial_secs: o.initial_secs,
                 increment_secs: o.increment_secs,
@@ -246,18 +369,38 @@ async fn park_list(State(state): State<AppState>) -> Json<Vec<OfferSummary>> {
 #[derive(Serialize)]
 struct ParkAcceptResp {
     game_id: GameId,
-    token: String,
+    /// Launch token for the acceptor's seat — absent when their bot plays it
+    /// (the seat was dispatched to the agent; the browser just spectates).
+    token: Option<String>,
     color: String,
+    /// "bot" | "browser" — which client got the acceptor's seat.
+    seat: String,
     spectate_path: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ParkAcceptReq {
+    /// Optional self-declared display name / engine for the acceptor's seat.
+    name: Option<String>,
+    engine: Option<String>,
+    /// "bot" seats the acceptor's connected agent; anything else = browser.
+    seat: Option<String>,
+    /// UCI option overrides for a bot seat.
+    uci_options: Option<HashMap<String, String>>,
 }
 
 async fn park_accept(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
+    body: Option<Json<ParkAcceptReq>>,
 ) -> Result<Json<ParkAcceptResp>, StatusCode> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let acceptor_bot = is_bot_seat(&req.seat);
+    let acceptor_wallet = state.authed_wallet(&headers);
+
     // Claim the offer (open -> matching), capturing its terms.
-    let (poster_addr, stake, initial_secs, increment_secs) = {
+    let claim = {
         let mut park = state.0.lobby.park.lock();
         let offer = park.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
         if offer.status != "open" {
@@ -266,15 +409,31 @@ async fn park_accept(
         offer.status = "matching".into();
         (
             offer.poster_addr.clone(),
+            SeatMeta {
+                name: offer.poster_name.clone(),
+                engine: offer.poster_engine.clone(),
+            },
+            offer.poster_seat_bot,
+            offer.poster_uci_options.clone(),
             offer.stake.clone(),
             offer.initial_secs,
             offer.increment_secs,
         )
     };
+    let (poster_addr, poster_meta, poster_bot, poster_uci, stake, initial_secs, increment_secs) =
+        claim;
 
     let unclaim = || {
         if let Some(o) = state.0.lobby.park.lock().get_mut(&id) {
             o.status = "open".into();
+        }
+    };
+    // Wallets whose agents we claimed; any failure before the game exists
+    // releases exactly these (correct-by-construction rollback).
+    let mut claimed: Vec<String> = Vec::new();
+    let release = |claimed: &[String]| {
+        for w in claimed {
+            state.0.agents.release(w);
         }
     };
 
@@ -286,21 +445,35 @@ async fn park_accept(
         }
     };
 
+    // A bot seat is always wallet-bound; and a bot can't play itself.
+    if acceptor_bot && acceptor_wallet.is_none() {
+        unclaim();
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if poster_bot || acceptor_bot {
+        if let (Some(p), Some(a)) = (&poster_addr, &acceptor_wallet) {
+            if p.eq_ignore_ascii_case(a) {
+                unclaim();
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+    }
+
     // Build the wager from authenticated wallets (poster + acceptor).
-    let wager = if let Some(stake) = stake {
-        let acceptor = match state.authed_wallet(&headers) {
-            Some(a) => a,
+    let wager = if let Some(stake) = &stake {
+        let acceptor = match &acceptor_wallet {
+            Some(a) => a.clone(),
             None => {
                 unclaim();
                 return Err(StatusCode::UNAUTHORIZED);
             }
         };
-        let poster = poster_addr.unwrap_or_default();
+        let poster = poster_addr.clone().unwrap_or_default();
         if poster.eq_ignore_ascii_case(&acceptor) {
             unclaim();
             return Err(StatusCode::BAD_REQUEST); // no self-play wagers
         }
-        match build_wager(&poster, &acceptor, &stake) {
+        match build_wager(&poster, &acceptor, stake) {
             Ok(w) => Some(w),
             Err(e) => {
                 unclaim();
@@ -311,9 +484,93 @@ async fn park_accept(
         None
     };
 
-    let resp = match state.start_game(tc, "park", wager).await {
+    // Claim both bots BEFORE creating the game, so we never open a game (or
+    // an escrow) whose engine can't show up.
+    let poster_delivery = if poster_bot {
+        let wallet = poster_addr.clone().unwrap_or_default();
+        match state.0.agents.claim(&wallet) {
+            Ok(tx) => {
+                claimed.push(wallet.clone());
+                SeatDelivery::Agent {
+                    wallet,
+                    tx,
+                    uci_options: poster_uci,
+                }
+            }
+            // Mid-game is not gone: keep the offer open, tell the acceptor to
+            // retry (mirrors the acceptor arm below).
+            Err(AgentUnavailable::Busy) => {
+                unclaim();
+                return Err(StatusCode::CONFLICT);
+            }
+            // Truly offline — the offer can never be honored; remove it.
+            Err(AgentUnavailable::Offline) => {
+                state.0.lobby.park.lock().remove(&id);
+                return Err(StatusCode::GONE);
+            }
+        }
+    } else {
+        SeatDelivery::Browser
+    };
+    let (acceptor_delivery, acceptor_agent_meta) = if acceptor_bot {
+        let wallet = acceptor_wallet.clone().unwrap_or_default();
+        let meta = state.0.agents.view(&wallet).map(|(m, _)| m);
+        match state.0.agents.claim(&wallet) {
+            Ok(tx) => {
+                claimed.push(wallet.clone());
+                (
+                    SeatDelivery::Agent {
+                        wallet,
+                        tx,
+                        uci_options: clean_uci_options(req.uci_options),
+                    },
+                    meta,
+                )
+            }
+            Err(e) => {
+                release(&claimed);
+                unclaim();
+                return Err(match e {
+                    AgentUnavailable::Offline => StatusCode::FAILED_DEPENDENCY,
+                    AgentUnavailable::Busy => StatusCode::CONFLICT,
+                });
+            }
+        }
+    } else {
+        (SeatDelivery::Browser, None)
+    };
+
+    // Acceptor identity: explicit > their bot's registration > wallet/anon.
+    let acceptor_meta = SeatMeta {
+        name: req
+            .name
+            .as_deref()
+            .and_then(sanitize_label)
+            .or_else(|| acceptor_agent_meta.as_ref().map(|m| m.name.clone())),
+        engine: req
+            .engine
+            .as_deref()
+            .and_then(sanitize_label)
+            .or_else(|| acceptor_agent_meta.as_ref().map(|m| m.engine.clone())),
+    };
+
+    // start_game creates the room, locks escrow, and DISPATCHES bot seats —
+    // and aborts the game (escrow refunded) if an agent vanished, returning
+    // Err. On any Err the claims are released and the offer reopens.
+    let meta = [poster_meta, acceptor_meta];
+    let resp = match state
+        .start_game(
+            tc,
+            "park",
+            wager,
+            meta,
+            [poster_delivery, acceptor_delivery],
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
+            release(&claimed);
             unclaim();
             return Err(e);
         }
@@ -322,12 +579,14 @@ async fn park_accept(
     if let Some(offer) = state.0.lobby.park.lock().get_mut(&id) {
         offer.status = "matched".into();
         offer.game_id = Some(resp.game_id);
-        offer.poster_token = Some(resp.white_token.clone());
+        // A bot-held seat's token stays server-side — the agent has it.
+        offer.poster_token = (!poster_bot).then(|| resp.white_token.clone());
     }
     Ok(Json(ParkAcceptResp {
         game_id: resp.game_id,
-        token: resp.black_token,
+        token: (!acceptor_bot).then_some(resp.black_token),
         color: "black".into(),
+        seat: if acceptor_bot { "bot" } else { "browser" }.into(),
         spectate_path: resp.spectate_path,
     }))
 }
@@ -338,6 +597,9 @@ struct ParkGetResp {
     game_id: Option<GameId>,
     token: Option<String>,
     color: Option<String>,
+    /// "bot" when the poster's seat was dispatched to their agent (the browser
+    /// should spectate instead of driving the seat).
+    seat: Option<String>,
 }
 
 async fn park_get(
@@ -361,12 +623,15 @@ async fn park_get(
             Json(ParkGetResp {
                 status: o.status.clone(),
                 game_id: o.game_id,
-                token: if authorized { o.poster_token.clone() } else { None },
-                color: o
-                    .poster_token
-                    .as_ref()
-                    .filter(|_| authorized)
-                    .map(|_| "white".into()),
+                token: if authorized {
+                    o.poster_token.clone()
+                } else {
+                    None
+                },
+                color: (o.poster_token.is_some() || o.poster_seat_bot)
+                    .then(|| "white".into())
+                    .filter(|_| authorized),
+                seat: Some(if o.poster_seat_bot { "bot" } else { "browser" }.into()),
             })
         }
         None => Json(ParkGetResp {
@@ -374,6 +639,7 @@ async fn park_get(
             game_id: None,
             token: None,
             color: None,
+            seat: None,
         }),
     }
 }
@@ -384,6 +650,8 @@ async fn park_get(
 
 struct Ticket {
     addr: Option<String>,
+    /// Self-declared identity for this queued player's seat (sanitized).
+    meta: SeatMeta,
     status: String, // waiting | matched
     game_id: Option<GameId>,
     token: Option<String>,
@@ -402,6 +670,9 @@ struct QueueReq {
     increment_secs: u64,
     /// Optional gauntlet session id to attribute the game's result to.
     session_id: Option<Uuid>,
+    /// Optional self-declared display name / engine (shown to the opponent).
+    name: Option<String>,
+    engine: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -417,7 +688,11 @@ async fn queue_join(
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     // Wagered tiers require auth; the seat is the authed wallet.
     let addr = if req.stake.is_some() {
-        Some(state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?)
+        Some(
+            state
+                .authed_wallet(&headers)
+                .ok_or(StatusCode::UNAUTHORIZED)?,
+        )
     } else {
         None
     };
@@ -442,11 +717,16 @@ async fn queue_join(
         req.initial_secs,
         req.increment_secs
     );
+    let my_meta = SeatMeta {
+        name: req.name.as_deref().and_then(sanitize_label),
+        engine: req.engine.as_deref().and_then(sanitize_label),
+    };
     let my_id = Uuid::new_v4();
     state.0.lobby.tickets.lock().insert(
         my_id,
         Ticket {
             addr: addr.clone(),
+            meta: my_meta.clone(),
             status: "waiting".into(),
             game_id: None,
             token: None,
@@ -462,14 +742,14 @@ async fn queue_join(
     };
 
     if let Some(opp_id) = opponent {
-        let (opp_addr, opp_session) = state
+        let (opp_addr, opp_meta, opp_session) = state
             .0
             .lobby
             .tickets
             .lock()
             .get(&opp_id)
-            .map(|t| (t.addr.clone(), t.session_id))
-            .unwrap_or((None, None));
+            .map(|t| (t.addr.clone(), t.meta.clone(), t.session_id))
+            .unwrap_or((None, SeatMeta::default(), None));
 
         // opponent = white, me = black
         let wager = if let Some(stake) = req.stake.clone() {
@@ -483,7 +763,15 @@ async fn queue_join(
             None
         };
 
-        let resp = state.start_game(tc, "gauntlet", wager).await?;
+        let resp = state
+            .start_game(
+                tc,
+                "gauntlet",
+                wager,
+                [opp_meta, my_meta],
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await?;
 
         // Attribute the game's result to any gauntlet sessions involved.
         let mut links = Vec::new();
@@ -596,7 +884,11 @@ async fn gauntlet_start(
 ) -> Result<Json<GauntletStartResp>, StatusCode> {
     validate_tc(req.initial_secs, req.increment_secs)?;
     let addr = if req.stake.is_some() {
-        Some(state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?)
+        Some(
+            state
+                .authed_wallet(&headers)
+                .ok_or(StatusCode::UNAUTHORIZED)?,
+        )
     } else {
         None
     };
@@ -745,7 +1037,9 @@ async fn tourney_create(
         if state.authed_wallet(&headers).is_none() {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        let buy_in = buy_in_str.parse::<U256>().map_err(|_| StatusCode::BAD_REQUEST)?;
+        let buy_in = buy_in_str
+            .parse::<U256>()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
         if buy_in == U256::ZERO || buy_in > U256::from(MAX_STAKE) {
             return Err(StatusCode::BAD_REQUEST);
         }
@@ -883,8 +1177,9 @@ async fn tourney_join(
         persist_tournament(&state, id).await;
         StatusCode::OK
     } else {
-        // Casual tournament: a display name.
-        let name = match req.player {
+        // Casual tournament: a display name (sanitized — it flows into lobby
+        // views and display helpers, so control chars / absurd input are out).
+        let name = match req.player.as_deref().and_then(sanitize_label) {
             Some(n) => n,
             None => return StatusCode::BAD_REQUEST,
         };
@@ -960,7 +1255,9 @@ async fn tourney_my_games(
     let t = state.0.lobby.tournaments.lock();
     let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     let me = if t.buy_in.is_some() {
-        state.authed_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?
+        state
+            .authed_wallet(&headers)
+            .ok_or(StatusCode::UNAUTHORIZED)?
     } else {
         q.player.ok_or(StatusCode::BAD_REQUEST)?
     };
@@ -1020,10 +1317,28 @@ async fn tourney_start(
         )
     };
 
+    // Entrant identity for display: buy-in entrants are wallet addresses
+    // (shorten them); casual entrants chose a display name.
+    let seat_meta = |p: &str| SeatMeta {
+        name: Some(if p.starts_with("0x") && p.len() == 42 {
+            short_addr(p)
+        } else {
+            p.to_string()
+        }),
+        engine: None,
+    };
     let mut games = Vec::new();
     for i in 0..players.len() {
         for j in (i + 1)..players.len() {
-            let resp = state.start_game(tc, "tournament", None).await?;
+            let resp = state
+                .start_game(
+                    tc,
+                    "tournament",
+                    None,
+                    [seat_meta(&players[i]), seat_meta(&players[j])],
+                    [SeatDelivery::Browser, SeatDelivery::Browser],
+                )
+                .await?;
             games.push(TourneyGame {
                 game_id: resp.game_id,
                 white: players[i].clone(),
@@ -1050,7 +1365,9 @@ async fn tourney_start(
     if let Some(db) = &state.0.db {
         let _ = db.set_tournament_status(id, "running").await;
         for g in &games {
-            let _ = db.add_tournament_game(id, g.game_id, &g.white, &g.black).await;
+            let _ = db
+                .add_tournament_game(id, g.game_id, &g.white, &g.black)
+                .await;
         }
     }
     Ok(Json(games))
@@ -1244,10 +1561,16 @@ async fn distribute_pool(
                         .map(|(a, p)| [format!("{a:?}"), p.to_string()])
                         .collect::<Vec<_>>()
                 });
-                db.enqueue_tournament_settlement(tid, "root", payload).await?;
+                db.enqueue_tournament_settlement(tid, "root", payload)
+                    .await?;
                 Ok(())
             }
-            None => state.0.settlement.settle_tournament_root(tid, leaves).await.map(|_| ()),
+            None => state
+                .0
+                .settlement
+                .settle_tournament_root(tid, leaves)
+                .await
+                .map(|_| ()),
         }
     } else {
         match &state.0.db {
@@ -1256,10 +1579,17 @@ async fn distribute_pool(
                     "winners": addrs.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
                     "payouts": payouts.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
                 });
-                db.enqueue_tournament_settlement(tid, "direct", payload).await?;
+                db.enqueue_tournament_settlement(tid, "direct", payload)
+                    .await?;
                 Ok(())
             }
-            None => state.0.settlement.settle_tournament(tid, addrs, payouts).await,
+            None => {
+                state
+                    .0
+                    .settlement
+                    .settle_tournament(tid, addrs, payouts)
+                    .await
+            }
         }
     }
 }
@@ -1295,7 +1625,9 @@ async fn tourney_claim_proof(
     // proofs survive a server restart.
     let mem = {
         let t = state.0.lobby.tournaments.lock();
-        t.get(&id).map(|t| t.payout_leaves.clone()).unwrap_or_default()
+        t.get(&id)
+            .map(|t| t.payout_leaves.clone())
+            .unwrap_or_default()
     };
     let leaves = if !mem.is_empty() {
         mem
@@ -1317,7 +1649,11 @@ async fn tourney_claim_proof(
     let amount = leaves[idx].1;
     let hashes: Vec<_> = leaves
         .iter()
-        .filter_map(|(a, amt)| a.parse::<Address>().ok().map(|a| tournament_leaf(a, U256::from(*amt))))
+        .filter_map(|(a, amt)| {
+            a.parse::<Address>()
+                .ok()
+                .map(|a| tournament_leaf(a, U256::from(*amt)))
+        })
         .collect();
     if hashes.len() != leaves.len() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);

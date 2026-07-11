@@ -7,7 +7,9 @@
 //! server-side clock + legality + terminal detection) against a real engine
 //! before the networked `play` path is wired up.
 
+mod auth;
 mod book;
+mod connect;
 mod engine;
 mod gauntlet;
 mod net;
@@ -103,14 +105,78 @@ enum Command {
         #[arg(long)]
         auth_token: Option<String>,
     },
+    /// Put your engine online as a bot bound to your wallet. By default you
+    /// then drive it from the website (start/join games there — the seat is
+    /// pushed here and the engine plays). `--auto` instead matches unattended.
+    Connect {
+        /// HTTP base URL of the server (ws URL is derived from it).
+        #[arg(long, default_value = "https://openchess.fly.dev")]
+        server: String,
+        /// Path to your UCI engine binary.
+        #[arg(long, default_value = "stockfish")]
+        engine: String,
+        /// Extra argument to pass to the engine (repeatable).
+        #[arg(long = "engine-arg")]
+        engine_args: Vec<String>,
+        /// Optional Polyglot opening book (.bin) consulted before the engine.
+        #[arg(long)]
+        book: Option<String>,
+        /// Stop using the book after this many plies.
+        #[arg(long, default_value_t = 16)]
+        book_max_ply: u32,
+        /// Display name shown to opponents (defaults to the engine name).
+        #[arg(long)]
+        name: Option<String>,
+        /// UCI option applied to every game, as Name=Value (repeatable),
+        /// e.g. --uci-option "Threads=4" --uci-option "Skill Level=15".
+        #[arg(long = "uci-option", value_parser = parse_uci_option)]
+        uci_options: Vec<(String, String)>,
+        /// Single-use pairing code from the web app's "Connect your engine"
+        /// page. Required unless --auth-token / OPENCHESS_WALLET_KEY is used.
+        #[arg(long)]
+        code: Option<String>,
+        /// Existing SIWE session token (alternative to --code).
+        #[arg(long)]
+        auth_token: Option<String>,
+        /// Autopilot: match unattended (accept-or-post loop) instead of being
+        /// driven from the website.
+        #[arg(long)]
+        auto: bool,
+        /// Autopilot: stake per game in USDC base units (omit for free games).
+        #[arg(long)]
+        stake: Option<String>,
+        /// Autopilot: time control to seek.
+        #[arg(long, default_value_t = 180)]
+        initial_secs: u64,
+        #[arg(long, default_value_t = 2)]
+        increment_secs: u64,
+        /// Autopilot: stop after this many games (0 = play until Ctrl-C).
+        #[arg(long, default_value_t = 0)]
+        games: u32,
+    },
+    /// Print a SIWE session token for this wallet (for scripting). Uses
+    /// OPENCHESS_WALLET_KEY or claims a --code from the web app.
+    Login {
+        #[arg(long, default_value = "https://openchess.fly.dev")]
+        server: String,
+        #[arg(long)]
+        code: Option<String>,
+    },
+}
+
+/// Parse `Name=Value` (the name may contain spaces, e.g. "Skill Level=15").
+fn parse_uci_option(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.trim().is_empty() => Ok((k.trim().to_string(), v.trim().to_string())),
+        _ => Err(format!("expected Name=Value, got '{s}'")),
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -144,10 +210,10 @@ async fn main() -> Result<()> {
             book_max_ply,
         } => {
             let book = match book {
-                Some(p) => Some(crate::book::OpeningBook::open(
+                Some(p) => Some(std::sync::Arc::new(crate::book::OpeningBook::open(
                     std::path::Path::new(&p),
                     book_max_ply,
-                )?),
+                )?)),
                 None => None,
             };
             play(PlayOpts {
@@ -157,6 +223,7 @@ async fn main() -> Result<()> {
                 engine_path: engine,
                 engine_args,
                 book,
+                uci_options: Vec::new(),
             })
             .await
         }
@@ -185,6 +252,53 @@ async fn main() -> Result<()> {
                 auth_token,
             })
             .await
+        }
+        Command::Connect {
+            server,
+            engine,
+            engine_args,
+            book,
+            book_max_ply,
+            name,
+            uci_options,
+            code,
+            auth_token,
+            auto,
+            stake,
+            initial_secs,
+            increment_secs,
+            games,
+        } => {
+            connect::run_connect(connect::ConnectOpts {
+                http_server: server,
+                name,
+                engine_path: engine,
+                engine_args,
+                book_path: book,
+                book_max_ply,
+                uci_options,
+                auth_token,
+                code,
+                auto,
+                stake,
+                initial_secs,
+                increment_secs,
+                games,
+            })
+            .await
+        }
+        Command::Login { server, code } => {
+            let client = reqwest::Client::new();
+            let http = server.trim_end_matches('/').to_string();
+            let session = auth::resolve_session(&client, &http, None, code)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no credential: pass --code or set OPENCHESS_WALLET_KEY")
+                })?;
+            println!("address: {}", session.address);
+            println!("token:   {}", session.token);
+            println!("(session bearer token, expires in 24h — treat it like a password)");
+            Ok(())
         }
     }
 }

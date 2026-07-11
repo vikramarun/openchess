@@ -26,7 +26,8 @@ cargo run -p server                # game server on 127.0.0.1:8080
 ```
 crates/protocol      shared serde wire types (server + client)
 crates/game-engine   authoritative board/clock/result (shakmaty) — the referee
-crates/byo-client    native client: UCI driver, selfplay + networked play, book
+crates/byo-client    native client: UCI driver, selfplay/play/gauntlet, `connect` bot agent
+                     (web-driven seats or --auto), Polyglot book, SIWE/link-code auth, login
 crates/server        chess-server: axum HTTP + WS hub, per-game room actors, 3 modes, SIWE
 crates/ledger        on-chain settlement (alloy), EIP-712, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox

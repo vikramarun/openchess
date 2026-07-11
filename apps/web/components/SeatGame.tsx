@@ -15,6 +15,7 @@ import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number };
 type Result = { winner: "white" | "black" | null; reason: string };
+type Opponent = { name: string; declared_engine: string | null };
 
 function fmt(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -46,6 +47,7 @@ export function SeatGame({
   const [moves, setMoves] = useState<string[]>([]);
   const [clock, setClock] = useState<Clock | null>(null);
   const [result, setResult] = useState<Result | null>(null);
+  const [opponent, setOpponent] = useState<Opponent | null>(null);
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("loading engine…");
   const pos = useRef(Chess.default());
@@ -108,7 +110,18 @@ export function SeatGame({
 
       // Drive only our seat; the fixed movetime is a fallback — playSeat uses
       // the authoritative clock from your_turn when present.
-      seat = playSeat(gameId, token, engine, 400, {}, cancelledFn);
+      seat = playSeat(
+        gameId,
+        token,
+        engine,
+        400,
+        {
+          onEvent: (m) => {
+            if (m?.type === "game_start" && m.opponent) setOpponent(m.opponent);
+          },
+        },
+        cancelledFn,
+      );
     };
 
     run().catch(() => {
@@ -149,6 +162,12 @@ export function SeatGame({
           <div className="muted" style={{ fontSize: 14 }}>
             Your engine plays your seat in your browser; your opponent runs theirs.
           </div>
+          {opponent && (
+            <div className="muted" style={{ marginTop: 6, fontSize: 14 }}>
+              Opponent: <b style={{ color: "var(--text-strong)" }}>{opponent.name}</b>
+              {opponent.declared_engine && <> · 🤖 {opponent.declared_engine}</>}
+            </div>
+          )}
           {stake && (
             <div className="muted" style={{ marginTop: 6 }}>
               Stake: <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(stake)} USDC</b>

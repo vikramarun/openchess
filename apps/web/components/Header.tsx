@@ -25,6 +25,7 @@ export function Header() {
       <nav className="nav">
         <Link href="/">Play</Link>
         <Link href="/play">Quick&nbsp;Play</Link>
+        <Link href="/connect">Connect&nbsp;Engine</Link>
         <ProfileLink />
       </nav>
       <div className="header-actions">

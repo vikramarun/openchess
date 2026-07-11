@@ -7,6 +7,7 @@ import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
+import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
@@ -30,6 +31,8 @@ const TC_NAME: Record<string, string> = {
 type Offer = {
   offer_id: string;
   poster_addr: string | null;
+  poster_name: string | null;
+  poster_engine: string | null;
   stake: string | null;
   initial_secs: number;
   increment_secs: number;
@@ -39,12 +42,29 @@ type LiveGame = {
   mode: string;
   white: string | null;
   black: string | null;
+  white_name: string | null;
+  black_name: string | null;
+  white_engine: string | null;
+  black_engine: string | null;
   stake: string | null;
   initial_secs: number;
   increment_secs: number;
 };
 type Active = { gameId: string; token: string; color: "white" | "black"; stake?: string | null };
-type Pending = { offerId: string; label: string; stakeBase: string | null };
+type Pending = {
+  offerId: string;
+  cancelKey: string | null;
+  label: string;
+  stakeBase: string | null;
+  bot: boolean;
+};
+
+/** What the in-browser seat driver runs — declared to opponents (unverified). */
+const BROWSER_ENGINE = "Stockfish (browser)";
+
+/** One seat's display: name if declared, else shortened wallet, else fallback. */
+const seatLabel = (name: string | null, addr: string | null, fallback: string) =>
+  name ?? (addr ? short(addr) : fallback);
 
 /** The casual-first play lobby: pick a time control to play instantly or open a
  *  challenge (your engine vs theirs), watch games in progress, or stake USDC. */
@@ -62,6 +82,8 @@ export function Lobby() {
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   const [active, setActive] = useState<Active | null>(null);
+  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
+  const [useBot, setUseBot] = useState(true); // prefer the bot when it's online
 
   useEffect(() => {
     fetchConfig().then(setConfig);
@@ -69,6 +91,20 @@ export function Lobby() {
   useEffect(() => {
     setToken(authToken());
   }, [address, isConnected]);
+
+  // Poll the connected bot's status while signed in.
+  useEffect(() => {
+    if (!token) return setBot(BOT_OFFLINE);
+    let alive = true;
+    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [token]);
+  const botPlays = bot.online && useBot;
 
   // Poll open challenges + live games while in the lobby.
   useEffect(() => {
@@ -107,7 +143,20 @@ export function Lobby() {
         });
         if (!r.ok || !alive) return;
         const j = await r.json();
-        if (j.status === "matched" && j.game_id && j.token) {
+        if (j.status === "matched" && j.game_id) {
+          if (j.seat === "bot") {
+            // The bot got the seat — the browser just watches.
+            setPending(null);
+            router.push(`/game/${j.game_id}`);
+            return;
+          }
+          if (!j.token) {
+            // Browser seat but no token: our session is no longer authorized
+            // (expired sign-in). Never silently spectate a seat we own.
+            setPending(null);
+            setErr("Your sign-in expired while waiting — sign in again; this game can't start.");
+            return;
+          }
           setActive({
             gameId: j.game_id,
             token: j.token,
@@ -149,6 +198,7 @@ export function Lobby() {
       if (amt == null || amt <= 0n) return setErr("Enter a valid USDC stake.");
       stakeBase = amt.toString();
     }
+    if (botPlays && !token) return setErr("Sign in to play with your bot.");
     setCreating(true);
     try {
       const r = await fetch(`${SERVER_HTTP}/park/offers`, {
@@ -157,14 +207,28 @@ export function Lobby() {
           "content-type": "application/json",
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ stake: stakeBase, initial_secs: tc.initial, increment_secs: tc.inc }),
+        body: JSON.stringify({
+          stake: stakeBase,
+          initial_secs: tc.initial,
+          increment_secs: tc.inc,
+          ...(botPlays
+            ? { seat: "bot", uci_options: loadBotOptions() }
+            : { engine: BROWSER_ENGINE }),
+        }),
       });
-      if (!r.ok) return setErr(`Couldn't post the game (${r.status}).`);
+      if (!r.ok)
+        return setErr(
+          r.status === 424
+            ? "Your bot is offline — check the chess-client window."
+            : `Couldn't post the game (${r.status}).`,
+        );
       const j = await r.json();
       setPending({
         offerId: j.offer_id,
+        cancelKey: j.cancel_key ?? null,
         label: `${tc.label} · ${wantStake ? `${stakeStr} USDC` : "free"}`,
         stakeBase: stakeBase ?? null,
+        bot: botPlays,
       });
       setPickTc(null);
     } catch {
@@ -178,18 +242,36 @@ export function Lobby() {
     setErr(null);
     const wagered = !!o.stake;
     if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
+    if (botPlays && !token) return setErr("Sign in to play with your bot.");
     try {
       const r = await fetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
         method: "POST",
-        headers: wagered ? { authorization: `Bearer ${token}` } : {},
+        headers: {
+          "content-type": "application/json",
+          ...(token && (wagered || botPlays) ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(
+          botPlays
+            ? { seat: "bot", uci_options: loadBotOptions() }
+            : { engine: BROWSER_ENGINE },
+        ),
       });
       if (!r.ok)
         return setErr(
           r.status === 502
             ? "Couldn't lock stakes on-chain — check both players have deposited enough."
-            : `Couldn't join (${r.status}).`,
+            : r.status === 424
+              ? "Your bot is offline — check the chess-client window."
+              : r.status === 410
+                ? "That challenger's bot went offline — the offer is gone."
+                : `Couldn't join (${r.status}).`,
         );
       const j = await r.json();
+      if (j.seat === "bot" || !j.token) {
+        // The bot plays this seat; watch the game live.
+        router.push(`/game/${j.game_id}`);
+        return;
+      }
       setActive({
         gameId: j.game_id,
         token: j.token,
@@ -223,10 +305,26 @@ export function Lobby() {
               <span className="mc-title">Waiting for an opponent…</span>
             </div>
             <div className="qp-desc muted">
-              Your <b>{pending.label}</b> game is posted. Your engine starts automatically when
-              someone joins.
+              Your <b>{pending.label}</b> game is posted.{" "}
+              {pending.bot
+                ? "When someone joins, your bot plays it and you'll be taken to the live board."
+                : "Your engine starts automatically when someone joins."}
             </div>
-            <button className="ghost" onClick={() => setPending(null)}>
+            <button
+              className="ghost"
+              onClick={() => {
+                // Withdraw the offer server-side so the lobby doesn't keep
+                // showing a challenge nobody is waiting on.
+                const { offerId, cancelKey } = pending;
+                if (cancelKey) {
+                  fetch(
+                    `${SERVER_HTTP}/park/offers/${offerId}?key=${encodeURIComponent(cancelKey)}`,
+                    { method: "DELETE" },
+                  ).catch(() => {});
+                }
+                setPending(null);
+              }}
+            >
               Cancel
             </button>
           </div>
@@ -235,12 +333,46 @@ export function Lobby() {
             <div className="qp-head">
               <span className="mc-icon">♟</span>
               <span className="mc-title">Play</span>
-              <span className="mc-tag">free · in your browser</span>
+              {bot.online ? (
+                <span className="mc-tag" title={bot.engine ?? undefined}>
+                  🤖 {bot.name ?? bot.engine} · {bot.busy ? "playing" : "online"}
+                </span>
+              ) : (
+                <span className="mc-tag">free · in your browser</span>
+              )}
             </div>
             <div className="qp-desc muted">
               Pick a time control — play instantly against the house, or open a challenge for
               another player{wagerOn ? " (free or for a USDC stake)" : ""}.
+              {!bot.online && (
+                <>
+                  {" "}
+                  Want your own engine to play instead?{" "}
+                  <Link href="/connect">Connect it</Link>.
+                </>
+              )}
             </div>
+            {bot.online && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  Games are played by:
+                </span>
+                <button
+                  className={useBot ? "primary" : "ghost"}
+                  style={{ fontSize: 13, padding: "4px 10px" }}
+                  onClick={() => setUseBot(true)}
+                >
+                  🤖 Your bot{bot.engine ? ` (${bot.engine})` : ""}
+                </button>
+                <button
+                  className={!useBot ? "primary" : "ghost"}
+                  style={{ fontSize: 13, padding: "4px 10px" }}
+                  onClick={() => setUseBot(false)}
+                >
+                  🌐 Browser engine
+                </button>
+              </div>
+            )}
             <div className="tc-grid">
               {TIME_CONTROLS.map((t) => (
                 <button
@@ -286,7 +418,15 @@ export function Lobby() {
                 const mine = !!address && o.poster_addr?.toLowerCase() === address.toLowerCase();
                 return (
                   <tr key={o.offer_id}>
-                    <td>{o.poster_addr ? short(o.poster_addr) : "casual"}</td>
+                    <td>
+                      {seatLabel(o.poster_name, o.poster_addr, "casual")}
+                      {o.poster_engine && (
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          {" "}
+                          🤖 {o.poster_engine}
+                        </span>
+                      )}
+                    </td>
                     <td>{o.stake ? `${fmtUsdc(o.stake)} USDC` : "Free"}</td>
                     <td>
                       {o.initial_secs / 60}+{o.increment_secs}
@@ -333,7 +473,22 @@ export function Lobby() {
               {live.map((g) => (
                 <tr key={g.game_id}>
                   <td>
-                    {g.white && g.black ? `${short(g.white)} vs ${short(g.black)}` : "engine vs engine"}
+                    {(() => {
+                      const w = seatLabel(g.white_name, g.white, "");
+                      const b = seatLabel(g.black_name, g.black, "");
+                      const label = w && b ? `${w} vs ${b}` : "engine vs engine";
+                      const engines = [g.white_engine, g.black_engine].filter(Boolean).join(" vs ");
+                      return (
+                        <>
+                          {label}
+                          {engines && (
+                            <div className="muted" style={{ fontSize: 12 }}>
+                              🤖 {engines}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </td>
                   <td>{g.stake ? `${fmtUsdc(g.stake)} USDC` : "Free"}</td>
                   <td>

@@ -49,9 +49,7 @@ pub enum RoomCmd {
     Resign { color: Color },
     /// A spectator joined: reply with the current game state so it can rebuild
     /// the board from the full move history (it otherwise only sees new moves).
-    Snapshot {
-        resp: oneshot::Sender<Snapshot>,
-    },
+    Snapshot { resp: oneshot::Sender<Snapshot> },
 }
 
 /// Current game state for a mid-join spectator.
@@ -76,6 +74,7 @@ pub fn spawn_room(
     tc: TimeControl,
     settlement: Arc<dyn SettlementSink>,
     stake: Option<StakeInfo>,
+    players: [protocol::OpponentInfo; 2], // [white, black] display identity
     db: Option<Arc<Db>>,
     cleanup_tx: mpsc::Sender<protocol::GameId>,
     results_tx: mpsc::Sender<crate::GameOutcome>,
@@ -101,6 +100,7 @@ pub fn spawn_room(
         base: Instant::now(),
         settlement,
         stake,
+        players,
         db,
         cleanup_tx,
         results_tx,
@@ -129,6 +129,8 @@ struct Room {
     base: Instant,
     settlement: Arc<dyn SettlementSink>,
     stake: Option<StakeInfo>,
+    /// [white, black] display identity, shown to each player's opponent.
+    players: [protocol::OpponentInfo; 2],
     db: Option<Arc<Db>>,
     cleanup_tx: mpsc::Sender<protocol::GameId>,
     results_tx: mpsc::Sender<crate::GameOutcome>,
@@ -316,7 +318,7 @@ impl Room {
             let _ = db.set_game_active(self.game_id).await;
         }
 
-        // Tell each player which color they are.
+        // Tell each player which color they are (and who they're facing).
         self.send_to(
             Color::White,
             ServerMessage::GameStart {
@@ -324,6 +326,7 @@ impl Room {
                 start_fen: start_fen.clone(),
                 your_color: Color::White,
                 clock,
+                opponent: Some(self.players[1].clone()),
             },
         )
         .await;
@@ -334,6 +337,7 @@ impl Room {
                 start_fen: start_fen.clone(),
                 your_color: Color::Black,
                 clock,
+                opponent: Some(self.players[0].clone()),
             },
         )
         .await;
@@ -342,6 +346,7 @@ impl Room {
             start_fen,
             your_color: Color::White,
             clock,
+            opponent: None,
         });
 
         self.prompt_turn().await;
@@ -354,6 +359,10 @@ impl Room {
             return;
         };
         let clock = game.clock(now);
+        let opp_idx = match color {
+            Color::White => 1,
+            Color::Black => 0,
+        };
         self.send_to(
             color,
             ServerMessage::GameStart {
@@ -361,6 +370,7 @@ impl Room {
                 start_fen: game.start_fen().to_string(),
                 your_color: color,
                 clock,
+                opponent: Some(self.players[opp_idx].clone()),
             },
         )
         .await;
@@ -620,4 +630,3 @@ fn hex_encode(bytes: &[u8]) -> String {
     }
     out
 }
-
