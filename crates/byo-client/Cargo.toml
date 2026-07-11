@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 protocol.workspace = true
 game-engine.workspace = true
+ledger = { path = "../ledger" }
+chrono = "0.4"
 shakmaty.workspace = true
 tokio.workspace = true
 serde.workspace = true

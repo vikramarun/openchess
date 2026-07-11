@@ -91,55 +91,69 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socke
                 break;
             }
         }
+        // The room dropped our channel (finished or reaped-never-started):
+        // close the socket so a waiting client unblocks instead of hanging on
+        // a game that will never start.
+        let _ = sink.send(Message::Close(None)).await;
     });
 
-    // Reader: client -> room.
-    while let Some(Ok(m)) = stream.next().await {
-        match m {
-            Message::Text(t) => {
-                let Ok(env) = serde_json::from_str::<ClientEnvelope>(t.as_str()) else {
-                    continue;
-                };
-                match env.msg {
-                    ClientMessage::Hello { .. } => {
-                        let _ = out_tx
-                            .send(ServerMessage::Welcome {
-                                session_id: Uuid::new_v4(),
-                                server_time_ms: 0,
-                            })
-                            .await;
-                    }
-                    ClientMessage::Ready { .. } => {
-                        let _ = cmd_tx.send(RoomCmd::Ready { color }).await;
-                    }
-                    ClientMessage::Move {
-                        ply, uci_move, ..
-                    } => {
-                        // A UCI move is at most 5 chars (e.g. e7e8q); drop
-                        // anything longer before it reaches the engine.
-                        if uci_move.len() <= 6 {
-                            let _ = cmd_tx
-                                .send(RoomCmd::Move {
-                                    color,
-                                    ply,
-                                    uci_move,
-                                })
-                                .await;
+    // Reader: client -> room. Also watches for the ROOM dying (finished or
+    // reaped-never-started): a waiting client must be disconnected, not left
+    // hanging on a game that will never progress.
+    loop {
+        tokio::select! {
+            m = stream.next() => {
+                let Some(Ok(m)) = m else { break };
+                match m {
+                    Message::Text(t) => {
+                        let Ok(env) = serde_json::from_str::<ClientEnvelope>(t.as_str()) else {
+                            continue;
+                        };
+                        match env.msg {
+                            ClientMessage::Hello { .. } => {
+                                let _ = out_tx
+                                    .send(ServerMessage::Welcome {
+                                        session_id: Uuid::new_v4(),
+                                        server_time_ms: 0,
+                                    })
+                                    .await;
+                            }
+                            ClientMessage::Ready { .. } => {
+                                let _ = cmd_tx.send(RoomCmd::Ready { color }).await;
+                            }
+                            ClientMessage::Move { ply, uci_move, .. } => {
+                                // A UCI move is at most 5 chars (e.g. e7e8q); drop
+                                // anything longer before it reaches the engine.
+                                if uci_move.len() <= 6 {
+                                    let _ = cmd_tx
+                                        .send(RoomCmd::Move {
+                                            color,
+                                            ply,
+                                            uci_move,
+                                        })
+                                        .await;
+                                }
+                            }
+                            ClientMessage::Resign { .. } => {
+                                let _ = cmd_tx.send(RoomCmd::Resign { color }).await;
+                            }
+                            ClientMessage::Heartbeat { .. } | ClientMessage::Resume { .. } => {}
                         }
                     }
-                    ClientMessage::Resign { .. } => {
-                        let _ = cmd_tx.send(RoomCmd::Resign { color }).await;
-                    }
-                    ClientMessage::Heartbeat { .. } | ClientMessage::Resume { .. } => {}
+                    Message::Close(_) => break,
+                    _ => {}
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
+            // Room task dropped its command receiver — the game is gone.
+            _ = cmd_tx.closed() => break,
         }
     }
-    // Connection dropped: free the seat so a reconnect can re-attach.
+    // Connection dropped or room died: free the seat (no-op if the room is
+    // gone), then drop our sender so the writer drains and sends Close —
+    // unblocking a client still waiting on this socket.
     let _ = cmd_tx.send(RoomCmd::Detach { color }).await;
-    writer.abort();
+    drop(out_tx);
+    let _ = writer.await;
 }
 
 async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
@@ -149,7 +163,11 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
     };
     let snapshot = {
         let (tx, rx) = oneshot::channel();
-        if cmd_tx.send(crate::room::RoomCmd::Snapshot { resp: tx }).await.is_ok() {
+        if cmd_tx
+            .send(crate::room::RoomCmd::Snapshot { resp: tx })
+            .await
+            .is_ok()
+        {
             rx.await.ok()
         } else {
             None
@@ -170,6 +188,7 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
                     start_fen: snap.start_fen,
                     your_color: Color::White,
                     clock: snap.clock,
+                    opponent: None,
                 }];
                 for (i, uci) in snap.moves_uci.into_iter().enumerate() {
                     replay.push(ServerMessage::OpponentMoved {
@@ -206,6 +225,8 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
+        // Room gone — close so spectators don't hang on a dead stream.
+        let _ = sink.send(Message::Close(None)).await;
     });
 
     // Drain (and ignore) inbound until the socket closes.

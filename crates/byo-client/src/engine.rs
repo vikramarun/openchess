@@ -11,18 +11,9 @@
 use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
+use protocol::UciOptionInfo;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-
-/// A discovered UCI option (as advertised by the engine's `uci` handshake).
-#[derive(Debug, Clone)]
-pub struct UciOption {
-    pub name: String,
-    pub kind: String,
-    pub default: Option<String>,
-    pub min: Option<String>,
-    pub max: Option<String>,
-}
 
 /// A running UCI engine.
 pub struct UciEngine {
@@ -31,8 +22,9 @@ pub struct UciEngine {
     stdout: Lines<BufReader<ChildStdout>>,
     /// Engine `id name` reported during the handshake.
     pub name: String,
-    /// All options the engine advertised, so the UI can render them.
-    pub options: Vec<UciOption>,
+    /// All options the engine advertised (shared wire type, so the agent can
+    /// register them for the web settings panel without conversion).
+    pub options: Vec<UciOptionInfo>,
 }
 
 impl UciEngine {
@@ -179,7 +171,7 @@ impl UciEngine {
     }
 }
 
-fn parse_option(line: &str) -> Option<UciOption> {
+fn parse_option(line: &str) -> Option<UciOptionInfo> {
     // `option name <Name with spaces> type <t> [default <d>] [min <m>] [max <M>] [var ...]`
     let rest = line.strip_prefix("option name ")?;
     let type_idx = rest.find(" type ")?;
@@ -196,7 +188,7 @@ fn parse_option(line: &str) -> Option<UciOption> {
             .map(|s| s.to_string())
     };
 
-    Some(UciOption {
+    Some(UciOptionInfo {
         name,
         kind,
         default: field("default"),

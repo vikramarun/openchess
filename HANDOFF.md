@@ -26,6 +26,32 @@ docs.
   Stockfish + opening book), Park/Patzer in-browser wagering (deposit → play →
   on-chain settle), Gauntlet (native + browser), Tournament round-robin, player
   profiles, verifiable results, durable settlement outboxes.
+- **True BYO multiplayer (bot agents):** `chess-client connect` pairs a
+  user-run UCI engine (+ optional Polyglot book) with the user's wallet ONCE —
+  it registers over a persistent `/ws/agent` socket (`crates/server/src/agents.rs`,
+  auth in the `Hello` frame, never the URL) and the **website is the remote
+  control**: starting/joining a lobby game with "🤖 Your bot" makes the server
+  push the seat to the agent, which plays it while the browser spectates. Bots
+  are always wallet-bound (no anonymous bots). Heavy customizability: the agent
+  reports the engine's UCI options; the web `/connect` page renders a settings
+  panel whose values are relayed per game (plus CLI `--uci-option`/`--book`).
+  Supporting pieces: pairing via single-use **link codes** (`POST /auth/link`
+  → `/auth/link/claim`, auto-embedded in the generated command), local SIWE
+  signing with `OPENCHESS_WALLET_KEY` (+ `chess-client login` for scripting),
+  offer cancellation (`DELETE /park/offers/{id}` + `cancel_key`), sanitized
+  name/engine identity on offers/live games and in `GameStart.opponent`, and
+  `--auto` for unattended accept-or-post matchmaking (headless bots).
+  Reliability invariants (post-review hardening — keep these): seat delivery
+  lives in `AppState::start_game` via `SeatDelivery::{Browser, Agent}` (one
+  claim/dispatch/rollback path for every mode; a failed dispatch ABORTS the
+  game and refunds escrow as a draw); the agent **busy flag is server-owned**
+  (`Agents::bind_game`/`game_ended` off `cleanup_task`; client Status frames
+  can only mark busy, never idle; `set_busy` is conn-id-guarded); the ws layer
+  disconnects players/spectators when a room dies so clients never hang on a
+  never-started game. Bot seats are wired to the park lobby only so far —
+  gauntlet/tournament web pages still drive the browser engine, but the
+  `SeatDelivery` plumbing means adding them is a per-endpoint claim, not a
+  re-implementation.
 - **Guardrails for the unaudited launch:** server `MAX_STAKE` capped at **25
   USDC** (`crates/server/src/main.rs`), 1% rake, 24h settle timeout.
 - **Tests:** 21 Rust + 25 Foundry (incl. a 128k-call solvency invariant). CI in

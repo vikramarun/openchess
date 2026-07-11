@@ -10,8 +10,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use shakmaty::zobrist::{Zobrist64, ZobristHash};
 use shakmaty::uci::UciMove;
+use shakmaty::zobrist::{Zobrist64, ZobristHash};
 use shakmaty::{CastlingMode, Chess, EnPassantMode, Move, Position, Role};
 
 #[derive(Clone, Copy)]

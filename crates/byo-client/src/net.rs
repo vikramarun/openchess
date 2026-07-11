@@ -4,9 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
-use protocol::{
-    ClientCapabilities, ClientMessage, Color, Envelope, ServerEnvelope, ServerMessage,
-};
+use protocol::{ClientCapabilities, ClientMessage, Color, Envelope, ServerEnvelope, ServerMessage};
 use shakmaty::uci::UciMove;
 use shakmaty::{Chess, Position};
 use tokio_tungstenite::connect_async;
@@ -21,7 +19,11 @@ pub struct PlayOpts {
     pub token: String,
     pub engine_path: String,
     pub engine_args: Vec<String>,
-    pub book: Option<OpeningBook>,
+    /// Shared read-only book — real books are large, so open once and share
+    /// across games instead of re-reading/re-sorting per game.
+    pub book: Option<std::sync::Arc<OpeningBook>>,
+    /// UCI options applied after launch (e.g. Threads, Hash, Skill Level).
+    pub uci_options: Vec<(String, String)>,
 }
 
 /// Rebuild a position from the UCI move history (for book probing).
@@ -47,6 +49,9 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
 
     let mut engine = UciEngine::launch(&opts.engine_path, &opts.engine_args).await?;
     engine.set_option("MultiPV", "1").await?;
+    for (k, v) in &opts.uci_options {
+        engine.set_option(k, v).await?;
+    }
     println!("Engine: {}", engine.name);
 
     let mut seq = 0u64;
@@ -79,15 +84,33 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
         match env.msg {
             ServerMessage::Welcome { .. } => {
                 engine.new_game().await?;
-                send(&mut write, &mut seq, ClientMessage::Ready {
-                    game_id: parse_id(&opts.game_id)?,
-                })
+                send(
+                    &mut write,
+                    &mut seq,
+                    ClientMessage::Ready {
+                        game_id: parse_id(&opts.game_id)?,
+                    },
+                )
                 .await?;
                 println!("Ready, waiting for game start...");
             }
-            ServerMessage::GameStart { your_color, .. } => {
+            ServerMessage::GameStart {
+                your_color,
+                opponent,
+                ..
+            } => {
                 my_color = Some(your_color);
-                println!("Game started. I am {your_color:?}.");
+                match &opponent {
+                    Some(o) => println!(
+                        "Game started. I am {your_color:?}, facing {}{}.",
+                        o.name,
+                        o.declared_engine
+                            .as_deref()
+                            .map(|e| format!(" ({e})"))
+                            .unwrap_or_default()
+                    ),
+                    None => println!("Game started. I am {your_color:?}."),
+                }
             }
             ServerMessage::YourTurn {
                 game_id,

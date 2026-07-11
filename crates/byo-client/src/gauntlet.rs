@@ -24,7 +24,7 @@ pub struct GauntletOpts {
     pub auth_token: Option<String>,
 }
 
-fn ws_base(http: &str) -> String {
+pub(crate) fn ws_base(http: &str) -> String {
     // http://host -> ws://host, https://host -> wss://host
     if let Some(rest) = http.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -39,6 +39,15 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
     let http = opts.http_server.trim_end_matches('/').to_string();
     let ws = ws_base(&http);
     let client = reqwest::Client::new();
+
+    // Open the (potentially large) book once and share it across games.
+    let book = match &opts.book_path {
+        Some(p) => Some(std::sync::Arc::new(OpeningBook::open(
+            Path::new(p),
+            opts.book_max_ply,
+        )?)),
+        None => None,
+    };
 
     let auth = |rb: reqwest::RequestBuilder| match &opts.auth_token {
         Some(t) => rb.bearer_auth(t),
@@ -108,18 +117,14 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(500)).await;
         };
 
-        // Open the book fresh for this game (cheap).
-        let book = match &opts.book_path {
-            Some(p) => Some(OpeningBook::open(Path::new(p), opts.book_max_ply)?),
-            None => None,
-        };
         play(PlayOpts {
             server: ws.clone(),
             game_id,
             token,
             engine_path: opts.engine_path.clone(),
             engine_args: opts.engine_args.clone(),
-            book,
+            book: book.clone(),
+            uci_options: Vec::new(),
         })
         .await?;
 

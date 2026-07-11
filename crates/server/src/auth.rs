@@ -7,8 +7,8 @@
 //! equals the address stated in the message. Then we mint a TTL'd session token
 //! bound to that wallet.
 
-use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -22,8 +22,12 @@ use crate::AppState;
 
 const NONCE_TTL: Duration = Duration::from_secs(300); // 5 min
 const SESSION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Link codes pair a native BYO-engine client with a browser session; they are
+/// short-lived and single-use because claiming one mints a session for the
+/// issuing wallet.
+const LINK_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 
-fn expected_domain() -> String {
+pub(crate) fn expected_domain() -> String {
     std::env::var("SIWE_DOMAIN").unwrap_or_else(|_| "localhost:3000".into())
 }
 fn expected_chain_id() -> String {
@@ -35,6 +39,8 @@ pub struct Auth {
     nonces: Mutex<HashMap<String, Instant>>,
     /// session token -> (wallet address lowercased, issued_at)
     sessions: Mutex<HashMap<String, (String, Instant)>>,
+    /// link code -> (wallet address lowercased, issued_at). Single-use.
+    link_codes: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl Auth {
@@ -47,14 +53,44 @@ impl Auth {
         Some(wallet.clone())
     }
 
-    /// Drop expired nonces and sessions (bounds memory; called periodically).
-    pub fn sweep_expired(&self) {
-        self.nonces
+    /// Mint a fresh session token bound to a wallet (lowercased).
+    pub fn mint_session(&self, wallet: &str) -> String {
+        let token = Uuid::new_v4().simple().to_string();
+        self.sessions
             .lock()
-            .retain(|_, t| t.elapsed() < NONCE_TTL);
+            .insert(token.clone(), (wallet.to_lowercase(), Instant::now()));
+        token
+    }
+
+    /// Mint a single-use link code an already-authenticated user can hand to a
+    /// native client, which claims it for its own session token.
+    pub fn mint_link_code(&self, wallet: &str) -> String {
+        let code = Uuid::new_v4().simple().to_string();
+        self.link_codes
+            .lock()
+            .insert(code.clone(), (wallet.to_lowercase(), Instant::now()));
+        code
+    }
+
+    /// Claim (and consume) a link code, returning the bound wallet if the code
+    /// exists and is still fresh.
+    pub fn claim_link_code(&self, code: &str) -> Option<String> {
+        let (wallet, issued) = self.link_codes.lock().remove(code)?;
+        if issued.elapsed() > LINK_CODE_TTL {
+            return None;
+        }
+        Some(wallet)
+    }
+
+    /// Drop expired nonces, sessions and link codes (bounds memory).
+    pub fn sweep_expired(&self) {
+        self.nonces.lock().retain(|_, t| t.elapsed() < NONCE_TTL);
         self.sessions
             .lock()
             .retain(|_, (_, t)| t.elapsed() < SESSION_TTL);
+        self.link_codes
+            .lock()
+            .retain(|_, (_, t)| t.elapsed() < LINK_CODE_TTL);
     }
 }
 
@@ -63,6 +99,8 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/nonce", get(nonce))
         .route("/auth/verify", post(verify))
         .route("/auth/me", get(me))
+        .route("/auth/link", post(link))
+        .route("/auth/link/claim", post(link_claim))
 }
 
 #[derive(Serialize)]
@@ -121,17 +159,54 @@ async fn verify(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let token = Uuid::new_v4().simple().to_string();
-    state
-        .0
-        .auth
-        .sessions
-        .lock()
-        .insert(token.clone(), (recovered.clone(), Instant::now()));
-
+    let token = state.0.auth.mint_session(&recovered);
     Ok(Json(VerifyResp {
         token,
         address: recovered,
+    }))
+}
+
+#[derive(Serialize)]
+struct LinkResp {
+    code: String,
+    expires_secs: u64,
+}
+
+/// Mint a single-use link code for the authenticated wallet. A native BYO
+/// client claims it (below) to get its own session token — so wagered play
+/// from the CLI never needs a private key or a copy-pasted session token.
+async fn link(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LinkResp>, StatusCode> {
+    let wallet = state
+        .authed_wallet(&headers)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(Json(LinkResp {
+        code: state.0.auth.mint_link_code(&wallet),
+        expires_secs: LINK_CODE_TTL.as_secs(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct LinkClaimReq {
+    code: String,
+}
+
+/// Exchange a fresh link code for a session token (consumes the code).
+async fn link_claim(
+    State(state): State<AppState>,
+    Json(req): Json<LinkClaimReq>,
+) -> Result<Json<VerifyResp>, StatusCode> {
+    let wallet = state
+        .0
+        .auth
+        .claim_link_code(&req.code)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = state.0.auth.mint_session(&wallet);
+    Ok(Json(VerifyResp {
+        token,
+        address: wallet,
     }))
 }
 
@@ -140,10 +215,7 @@ struct MeResp {
     address: String,
 }
 
-async fn me(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<MeResp>, StatusCode> {
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeResp>, StatusCode> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -217,5 +289,30 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(SiweFields::parse("not a siwe message").is_none());
+    }
+
+    #[test]
+    fn link_code_is_single_use_and_bound_to_wallet() {
+        let auth = Auth::default();
+        let code = auth.mint_link_code("0xABCDEF0000000000000000000000000000000001");
+        // Claims once, lowercased…
+        assert_eq!(
+            auth.claim_link_code(&code).as_deref(),
+            Some("0xabcdef0000000000000000000000000000000001")
+        );
+        // …and never again.
+        assert!(auth.claim_link_code(&code).is_none());
+        // Unknown codes fail.
+        assert!(auth.claim_link_code("nope").is_none());
+    }
+
+    #[test]
+    fn minted_session_resolves_wallet() {
+        let auth = Auth::default();
+        let token = auth.mint_session("0xAA00000000000000000000000000000000000002");
+        assert_eq!(
+            auth.wallet_for_token(&token).as_deref(),
+            Some("0xaa00000000000000000000000000000000000002")
+        );
     }
 }
