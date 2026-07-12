@@ -149,6 +149,9 @@ pub struct WagerSeats {
 pub struct GameOutcome {
     pub game_id: GameId,
     pub winner: Option<Color>,
+    /// Total half-moves played. Lets a mode tell a contested loss from a
+    /// no-move forfeit (e.g. gauntlet auto-stop on a dead engine).
+    pub plies: u32,
 }
 
 #[tokio::main]

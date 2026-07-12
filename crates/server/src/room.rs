@@ -178,21 +178,23 @@ impl Room {
                 // then exit. For the slice we simply break.
                 break;
             }
-            // Reap a room that never begins (engines never both connected) so it
+            // Reap a room that never begins (engines never both readied) so it
             // doesn't linger forever as a ghost in the lobby's "live" list.
+            // Resolve it as a forfeit: the side that showed up and readied wins;
+            // if neither did, it's a draw. Routing through `finish()` settles a
+            // wagered escrow on-chain NOW — the stake goes to the player who
+            // showed up (or both are refunded if nobody did) instead of sitting
+            // locked behind the contract's 24h `claimTimeout` — tells that
+            // player they won, and keeps mode standings progressing.
             if !self.started && self.base.elapsed() > Duration::from_secs(60) {
-                tracing::info!(game_id = %self.game_id, "room reaped: never started");
-                // Report a draw so mode standings (esp. tournament rounds) keep
-                // progressing instead of stalling on a game that never began.
-                // Unlinked games (casual/park) ignore it; wagered escrow is
-                // untouched (only finish() settles on-chain).
-                let _ = self
-                    .results_tx
-                    .send(crate::GameOutcome {
-                        game_id: self.game_id,
-                        winner: None,
-                    })
-                    .await;
+                let winner = reap_forfeit_winner(self.wready, self.bready);
+                let reason = if winner.is_some() {
+                    GameEndReason::Forfeit
+                } else {
+                    GameEndReason::Aborted
+                };
+                tracing::info!(game_id = %self.game_id, ?winner, "room reaped: never started");
+                self.finish(GameResult { winner, reason }).await;
                 break;
             }
         }
@@ -532,9 +534,11 @@ impl Room {
     }
 
     async fn finish(&mut self, result: GameResult) {
-        let (pgn, clock, ply) = match self.game.as_ref() {
-            Some(game) => (game.pgn(), game.clock(self.now_ms()), game.ply()),
-            None => return,
+        // A never-started game (a no-show forfeit / abort reaped in `run`) has
+        // no board: settle with an empty move log and ply 0 (never rated).
+        let (pgn, ply) = match self.game.as_ref() {
+            Some(game) => (game.pgn(), game.ply()),
+            None => (String::new(), 0),
         };
         // A game is only rated if it was actually contested — both sides must
         // have made at least one move (ply >= 2). A player who never moves (a
@@ -599,13 +603,13 @@ impl Room {
             .send(crate::GameOutcome {
                 game_id: self.game_id,
                 winner: result.winner,
+                plies: ply,
             })
             .await;
 
         // Oracle-sign the result commitment so clients can verify it.
         let server_sig = self.settlement.sign_result(&result_hash).await;
 
-        let _ = clock;
         self.send_all(ServerMessage::GameOver {
             game_id: self.game_id,
             result,
@@ -614,6 +618,18 @@ impl Room {
             server_sig,
         })
         .await;
+    }
+}
+
+/// Resolve a never-started game reaped from the lobby: the side that showed up
+/// and readied within the start window wins by forfeit; if neither readied it
+/// is a draw / refund. Both-ready is impossible here — the game would already
+/// have started (the `Ready` handler starts it the instant both sides ready).
+fn reap_forfeit_winner(wready: bool, bready: bool) -> Option<Color> {
+    match (wready, bready) {
+        (true, false) => Some(Color::White),
+        (false, true) => Some(Color::Black),
+        _ => None,
     }
 }
 
@@ -632,6 +648,7 @@ fn result_strings(r: &GameResult) -> (&'static str, &'static str) {
         GameEndReason::FiftyMoveRule => "fifty_move",
         GameEndReason::Threefold => "threefold",
         GameEndReason::Aborted => "aborted",
+        GameEndReason::Forfeit => "forfeit",
     };
     (winner, reason)
 }
@@ -648,4 +665,26 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_show_forfeits_to_the_side_that_readied() {
+        // White readied, Black never showed → White wins the forfeit (takes the
+        // wagered stake). Symmetric for Black.
+        assert_eq!(reap_forfeit_winner(true, false), Some(Color::White));
+        assert_eq!(reap_forfeit_winner(false, true), Some(Color::Black));
+    }
+
+    #[test]
+    fn neither_side_shows_is_a_draw_refund() {
+        // Nobody readied within the window → draw / refund both, never a forfeit.
+        assert_eq!(reap_forfeit_winner(false, false), None);
+        // Both-ready can't reach the reap (the game would have started), but if
+        // it somehow did we refund rather than invent a winner.
+        assert_eq!(reap_forfeit_winner(true, true), None);
+    }
 }

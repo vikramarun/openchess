@@ -84,7 +84,7 @@ impl Lobby {
 
     /// Update mode standings when a game finishes. Returns a follow-up action
     /// (e.g. a completed tournament that needs settling).
-    pub fn record_outcome(&self, game_id: GameId, winner: Option<Color>) -> OutcomeAction {
+    pub fn record_outcome(&self, game_id: GameId, winner: Option<Color>, plies: u32) -> OutcomeAction {
         // Gauntlet: bump each participating session's W/L/D + game count.
         if let Some(entries) = self.game_to_gauntlet.lock().remove(&game_id) {
             let mut g = self.gauntlets.lock();
@@ -94,7 +94,22 @@ impl Lobby {
                     match winner {
                         None => s.draws += 1,
                         Some(w) if w == color => s.wins += 1,
-                        Some(_) => s.losses += 1,
+                        Some(_) => {
+                            s.losses += 1;
+                            // Protect a staked gauntlet from a dead/offline/hung
+                            // engine: if this seat LOST without ever making a move
+                            // (a no-show forfeit), auto-stop the session so it
+                            // doesn't bleed the stake game after game. White's
+                            // first move is ply 1, Black's is ply 2, so the seat
+                            // actually played iff:
+                            let played = match color {
+                                Color::White => plies >= 1,
+                                Color::Black => plies >= 2,
+                            };
+                            if !played {
+                                s.status = "stopped".into();
+                            }
+                        }
                     }
                 }
             }
@@ -143,7 +158,7 @@ pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) 
         // spuriously forfeit. game_ended is idempotent, so cleanup_task's later
         // call is a harmless no-op. (Also fixes a gauntlet rapid-re-queue 409.)
         state.0.agents.game_ended(o.game_id);
-        match state.0.lobby.record_outcome(o.game_id, o.winner) {
+        match state.0.lobby.record_outcome(o.game_id, o.winner, o.plies) {
             OutcomeAction::None => {}
             OutcomeAction::AdvanceTournament { tid } => {
                 dispatch_from_current(&state, tid).await;
@@ -785,6 +800,13 @@ async fn queue_join(
                     Some(a) if a.eq_ignore_ascii_case(owner) => {}
                     _ => return Err(StatusCode::UNAUTHORIZED),
                 }
+            }
+            // A stopped session (owner-stopped, or auto-stopped after the engine
+            // forfeited a game without moving) takes no more games. This is the
+            // server-side backstop that actually protects a staked user from a
+            // dead engine — even if the client keeps trying to re-queue.
+            if s.status != "running" {
+                return Err(StatusCode::CONFLICT);
             }
         }
     }
@@ -2189,6 +2211,65 @@ mod tests {
         assert!(state.0.agents.claim(wb).is_err(), "B busy");
     }
 
+    /// Insert a fresh running gauntlet session and return its id.
+    fn running_session(lobby: &Lobby, stake: Option<&str>) -> Uuid {
+        let sid = Uuid::new_v4();
+        lobby.gauntlets.lock().insert(
+            sid,
+            GauntletSession {
+                addr: None,
+                stake: stake.map(str::to_string),
+                initial_secs: 60,
+                increment_secs: 1,
+                status: "running".into(),
+                games: 0,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+                created_at: Instant::now(),
+            },
+        );
+        sid
+    }
+
+    #[test]
+    fn gauntlet_auto_stops_when_a_seat_forfeits_without_moving() {
+        let lobby = Lobby::default();
+
+        // Black seat lost having never moved (White moved once → ply 1): dead
+        // engine, so the session auto-stops instead of bleeding the stake.
+        let black_sid = running_session(&lobby, Some("1000000"));
+        let g1 = Uuid::new_v4();
+        lobby.game_to_gauntlet.lock().insert(g1, vec![(black_sid, Color::Black)]);
+        lobby.record_outcome(g1, Some(Color::White), 1);
+
+        // White seat lost having never moved (a no-show forfeit → ply 0).
+        let white_sid = running_session(&lobby, Some("1000000"));
+        let g2 = Uuid::new_v4();
+        lobby.game_to_gauntlet.lock().insert(g2, vec![(white_sid, Color::White)]);
+        lobby.record_outcome(g2, Some(Color::Black), 0);
+
+        let g = lobby.gauntlets.lock();
+        assert_eq!(g.get(&black_sid).unwrap().losses, 1);
+        assert_eq!(g.get(&black_sid).unwrap().status, "stopped");
+        assert_eq!(g.get(&white_sid).unwrap().status, "stopped");
+    }
+
+    #[test]
+    fn gauntlet_keeps_running_after_a_contested_loss() {
+        let lobby = Lobby::default();
+        let sid = running_session(&lobby, Some("1000000"));
+        // Black seat lost a real game (both sides moved → ply >= 2): keep going.
+        let gid = Uuid::new_v4();
+        lobby.game_to_gauntlet.lock().insert(gid, vec![(sid, Color::Black)]);
+        lobby.record_outcome(gid, Some(Color::White), 42);
+
+        let g = lobby.gauntlets.lock();
+        let s = g.get(&sid).unwrap();
+        assert_eq!(s.losses, 1);
+        assert_eq!(s.status, "running", "a genuine loss must not stop the gauntlet");
+    }
+
     #[tokio::test]
     async fn gauntlet_bot_seat_requires_auth() {
         let (state, _c, _r) = test_state();
@@ -2359,6 +2440,7 @@ mod tests {
                 tx.send(GameOutcome {
                     game_id: gid,
                     winner: Some(Color::White),
+                    plies: 40,
                 })
                 .await
                 .unwrap();
