@@ -609,8 +609,14 @@ impl Room {
                 game_id: self.game_id,
                 winner: result.winner,
                 plies: ply,
-                white_showed_up: self.white_occupied && self.wready,
-                black_showed_up: self.black_occupied && self.bready,
+                // Readiness is latched (set once on Ready, never cleared), so it
+                // records that a seat's engine came alive — a seat that readied
+                // then briefly dropped its socket still counts as having shown
+                // up. Only a seat that NEVER readies (dead/hung at init) is a
+                // no-show. Do not AND in `occupied`: a transient disconnect must
+                // not be mistaken for a no-show.
+                white_showed_up: self.wready,
+                black_showed_up: self.bready,
             })
             .await;
 

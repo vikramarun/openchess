@@ -100,11 +100,10 @@ impl Lobby {
                         None => {
                             s.draws += 1;
                             // A never-started reap that drew (plies == 0): stop
-                            // this session only if ITS OWN seat failed to show up
-                            // (connected but never readied = a dead/hung-at-init
-                            // engine). If we showed up and the OPPONENT was the
-                            // no-show, we're fine — keep running. A real drawn
-                            // game has plies > 0 and never stops.
+                            // this session only if ITS OWN seat never readied (a
+                            // dead/hung-at-init engine). If we readied and the
+                            // OPPONENT was the no-show, we're fine — keep running.
+                            // A real drawn game has plies > 0 and never stops.
                             if plies == 0 && !showed_up {
                                 s.status = "stopped".into();
                             }

@@ -267,11 +267,18 @@ impl Db {
         wagered: bool,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        // Idempotent on already-terminal games. A game aborted at dispatch
+        // (status='aborted') can be resurrected by a late-connecting agent whose
+        // WebSocket keeps the room alive long enough to reap; without this guard
+        // that reap would overwrite the aborted row and enqueue a second,
+        // conflicting settlement — a phantom result, or a stake confiscation if
+        // the abort's refund had failed. Skip both if the game is already
+        // 'finished' or 'aborted'.
+        let res = sqlx::query(
             r#"UPDATE games
                SET status='finished', result=$2, result_reason=$3,
                    result_hash=$4, pgn=$5, finished_at=now()
-               WHERE id=$1"#,
+               WHERE id=$1 AND status NOT IN ('finished','aborted')"#,
         )
         .bind(game_id)
         .bind(result)
@@ -280,6 +287,11 @@ impl Db {
         .bind(pgn)
         .execute(&mut *tx)
         .await?;
+
+        if res.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(());
+        }
 
         if wagered {
             sqlx::query(

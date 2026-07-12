@@ -152,9 +152,9 @@ pub struct GameOutcome {
     /// Total half-moves played. Lets a mode tell a contested loss from a
     /// no-move forfeit (e.g. gauntlet auto-stop on a dead engine).
     pub plies: u32,
-    /// Whether each seat showed up (connected AND readied). Only meaningful for
-    /// a never-started reap (`plies == 0`): lets a mode stop a session whose OWN
-    /// seat no-showed without punishing an opponent that did show up.
+    /// Whether each seat ever readied (its engine came alive). Only meaningful
+    /// for a never-started reap (`plies == 0`): lets a mode stop a session whose
+    /// OWN seat no-showed without punishing an opponent that did show up.
     pub white_showed_up: bool,
     pub black_showed_up: bool,
 }
