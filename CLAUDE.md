@@ -30,7 +30,8 @@ crates/game-engine   authoritative board/clock/result (shakmaty) — the referee
 crates/byo-client    native client: UCI driver, selfplay/play/gauntlet, `connect` bot agent
                      (web-driven seats or --auto), Polyglot book, SIWE/link-code auth, login
 crates/server        chess-server: axum HTTP + WS hub, per-game room actors, 3 modes, SIWE,
-                     bot-agent registry, leaderboard, per-IP rate limiting (ratelimit.rs)
+                     bot-agent registry, leaderboard, per-IP rate limiting (ratelimit.rs),
+                     owner-gated maintenance/drain switch (admin.rs)
 crates/ledger        on-chain settlement (alloy), EIP-712, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox
 contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
@@ -62,6 +63,14 @@ wallet.
 - **Money paths fail closed.** No wager is accepted unless on-chain settlement is
   configured; seats are bound to the SIWE-authenticated wallet, never a request
   body. Keep it that way.
+- **Maintenance/drain is owner-gated + fail-closed.** `POST /admin/maintenance`
+  only accepts a SIWE session whose wallet equals the on-chain escrow `owner()`
+  (set `ADMIN_WALLET` to override, e.g. local dev — else nobody is admin). When
+  on, `AppState::start_game` and every create endpoint (incl. tournament pool
+  create/join) `503`; the flag is DB-persisted (`server_settings`) so it
+  survives the restart it was set to protect. Any **new** game-creating or
+  money-committing route must call `state.reject_if_draining()?` — the drain is
+  per-entry-point, not global middleware.
 - **`pnpm build` clobbers the `next dev` cache** (→ `/_next/static` 404s). If the
   dev preview breaks after a build: `rm -rf apps/web/.next` and restart it.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the

@@ -161,6 +161,13 @@ auto-stop the machine (it holds live games in memory), set `WEB_ORIGIN` +
 `SIWE_DOMAIN` to the exact Vercel host, and set `REQUIRE_ONCHAIN=1` once the
 on-chain vars are in so a misconfigured node refuses to boot.
 
+**Drain before deploying** so a redeploy doesn't kill live games: as the escrow
+owner, sign in on the web app and flip **maintenance mode** on (the banner's
+"Pause new games" toggle, or `POST /admin/maintenance {"on":true}` with the
+owner's bearer token). New games stop starting; let in-flight games finish, then
+`deploy-server.sh`. The flag is DB-persisted, so the node comes back up still
+paused — flip it off once the new build is healthy.
+
 ## Deploying the web app to Vercel
 
 Vercel hosts the **Next.js frontend only** (`apps/web`). The Rust game server is
@@ -249,6 +256,7 @@ but do the contract audit + oracle-key hardening + legal review first.)
 | `REQUIRE_ONCHAIN` | recommended | `1` ⇒ fail boot unless fully configured |
 | `ALERT_WEBHOOK_URL` | recommended | Slack/Discord/generic webhook; best-effort alert on money-critical failures (unset ⇒ no-op) |
 | `RL_*` | no | rate-limit tuning (per-bucket burst/rate, WS conn caps, open-offer cap); sane defaults in `ratelimit.rs` |
+| `ADMIN_WALLET` | no | who may toggle maintenance/drain mode; defaults to the on-chain escrow `owner()`, so only set to override (e.g. local dev without a chain) |
 
 **Web** (`apps/web`): `NEXT_PUBLIC_SERVER_HTTP`, `NEXT_PUBLIC_SERVER_WS`,
 `NEXT_PUBLIC_WC_PROJECT_ID`.

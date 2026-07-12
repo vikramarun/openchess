@@ -7,6 +7,7 @@
 //! in production). On-chain settlement is wired when `RPC_URL`/`ESCROW_ADDR`/
 //! `ORACLE_KEY` are set, else it logs.
 
+mod admin;
 mod agents;
 mod alert;
 mod auth;
@@ -17,6 +18,7 @@ mod room;
 mod ws;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -58,6 +60,16 @@ pub struct Inner {
     pub tokens: Mutex<HashMap<String, (GameId, Color)>>,
     pub settlement: Arc<dyn SettlementSink>,
     pub db: Option<Arc<Db>>,
+    /// Owner-toggled maintenance/drain switch. When `true`, no new game starts
+    /// (existing games play out). Authoritative check lives in `start_game`;
+    /// persisted to `server_settings` so it survives restarts.
+    pub maintenance: AtomicBool,
+    /// The escrow owner wallet (lowercased) allowed to toggle maintenance.
+    /// Seeded on boot from `ADMIN_WALLET` or the contract `owner()`; if that
+    /// boot lookup failed (`None`) it is resolved lazily on first admin use, so
+    /// a transient boot-time RPC error can't lock the owner out for the whole
+    /// process. `None` after a lazy attempt ⇒ admin disabled (fail-closed).
+    pub admin_wallet: Mutex<Option<String>>,
     pub lobby: Lobby,
     pub auth: auth::Auth,
     /// Connected user-run engines (bots), keyed by owner wallet.
@@ -161,6 +173,27 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let settlement = ledger::from_env();
+    // Who may toggle maintenance: ADMIN_WALLET override, else the on-chain
+    // escrow owner (read live so it tracks ownership transfers).
+    let admin_wallet = resolve_admin_wallet(&*settlement).await;
+    // Restore the durable maintenance flag. A read failure defaults OFF but is
+    // logged loudly — silently dropping a persisted pause would resume wagered
+    // games during the exact drain window it was set to protect.
+    let maintenance = match &db {
+        Some(db) => match db.get_setting(admin::MAINTENANCE_KEY).await {
+            Ok(v) => v.as_deref() == Some("true"),
+            Err(e) => {
+                tracing::error!("failed to restore maintenance flag (defaulting OFF): {e:#}");
+                false
+            }
+        },
+        None => false,
+    };
+    if maintenance {
+        tracing::warn!("restored maintenance mode = ON from server_settings");
+    }
+
     let (cleanup_tx, cleanup_rx) = mpsc::channel::<GameId>(256);
     let (results_tx, results_rx) = mpsc::channel::<GameOutcome>(256);
 
@@ -168,8 +201,10 @@ async fn main() -> anyhow::Result<()> {
         rooms: Mutex::new(HashMap::new()),
         live_games: Mutex::new(HashMap::new()),
         tokens: Mutex::new(HashMap::new()),
-        settlement: ledger::from_env(),
+        settlement,
         db,
+        maintenance: AtomicBool::new(maintenance),
+        admin_wallet: Mutex::new(admin_wallet),
         lobby: Lobby::default(),
         auth: auth::Auth::default(),
         agents: agents::Agents::default(),
@@ -272,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             rate_limit_auth,
         )))
+        .merge(admin::routes())
         .merge(matchmaking::routes())
         // Throttle the public read routes per-IP: cheap per hit, but the
         // leaderboard query is heavy, so cap how fast one IP can trigger it.
@@ -292,6 +328,37 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Resolve the wallet allowed to administer the server (toggle maintenance):
+/// `ADMIN_WALLET` if set and valid, else the escrow contract owner read live
+/// from chain. Returns a lowercased `0x…` address, or `None` (admin disabled,
+/// fail-closed) when neither is available.
+async fn resolve_admin_wallet(settlement: &dyn SettlementSink) -> Option<String> {
+    if let Ok(raw) = std::env::var("ADMIN_WALLET") {
+        match raw.trim().parse::<Address>() {
+            Ok(a) => {
+                let a = format!("{a:?}").to_lowercase();
+                tracing::info!(admin = %a, "admin wallet from ADMIN_WALLET");
+                return Some(a);
+            }
+            Err(_) => tracing::warn!("ADMIN_WALLET is not a valid address; ignoring"),
+        }
+    }
+    match settlement.owner().await {
+        Some(owner) => {
+            let a = format!("{owner:?}").to_lowercase();
+            tracing::info!(admin = %a, "admin wallet from escrow owner()");
+            Some(a)
+        }
+        None => {
+            tracing::warn!(
+                "no admin wallet resolved (ADMIN_WALLET unset, escrow owner() unavailable); \
+                 maintenance toggle disabled"
+            );
+            None
+        }
+    }
 }
 
 fn env_flag(key: &str) -> bool {
@@ -404,6 +471,13 @@ struct ConfigInfo {
     /// Domain SIWE messages must be bound to — native clients need it to build
     /// a message this server will accept.
     siwe_domain: String,
+    /// Whether the server is in maintenance/drain mode: no new games start,
+    /// existing ones play out. Clients show a banner + disable "create".
+    maintenance: bool,
+    /// The wallet allowed to toggle maintenance (the on-chain escrow owner).
+    /// Public — it's readable on-chain — so the UI can show the admin control
+    /// only to that wallet. `None` ⇒ admin actions disabled on this server.
+    admin_wallet: Option<String>,
 }
 
 /// Public snapshot of an in-progress game, for the spectate lobby.
@@ -462,6 +536,8 @@ async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
         chain_id,
         wager_enabled: state.0.settlement.is_onchain(),
         siwe_domain: auth::expected_domain(),
+        maintenance: state.maintenance_on(),
+        admin_wallet: state.0.admin_wallet.lock().clone(),
     })
 }
 
@@ -805,6 +881,10 @@ impl AppState {
         meta: [SeatMeta; 2],         // [white, black] self-declared identity
         delivery: [SeatDelivery; 2], // [white, black] seat delivery
     ) -> Result<CreateGameResp, StatusCode> {
+        // Maintenance/drain: the single chokepoint every mode funnels through,
+        // so one guard blocks all new games while existing ones play out.
+        self.reject_if_draining()?;
+
         let game_id = Uuid::new_v4();
         let stake_info = wager.map(|w| StakeInfo {
             white: w.white,
@@ -1016,6 +1096,71 @@ impl AppState {
         self.0.auth.wallet_for_token(token)
     }
 
+    /// Whether the server is in maintenance/drain mode (no new games).
+    pub fn maintenance_on(&self) -> bool {
+        self.0.maintenance.load(Ordering::Relaxed)
+    }
+
+    /// Reject a request while the server is draining. Call at the top of every
+    /// game-creating or money-committing handler so the drain is enforced at
+    /// each entry point (the authoritative check is also in `start_game`).
+    pub fn reject_if_draining(&self) -> Result<(), StatusCode> {
+        if self.maintenance_on() {
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The wallet allowed to administer the server, resolving it lazily if the
+    /// boot lookup failed — a transient boot-time RPC error must not lock the
+    /// owner out for the whole process. Caches the result once resolved.
+    async fn admin_wallet(&self) -> Option<String> {
+        if let Some(w) = self.0.admin_wallet.lock().clone() {
+            return Some(w);
+        }
+        // Boot lookup returned None (ADMIN_WALLET was unset too) — try once more
+        // live against the contract.
+        let owner = self.0.settlement.owner().await?;
+        let w = format!("{owner:?}").to_lowercase();
+        *self.0.admin_wallet.lock() = Some(w.clone());
+        tracing::info!(admin = %w, "admin wallet resolved lazily from escrow owner()");
+        Some(w)
+    }
+
+    /// Whether a request is from the escrow owner (the only admin). Requires a
+    /// SIWE session whose wallet matches the admin wallet; if none can be
+    /// resolved, nobody is admin (fail-closed). The (possibly RPC-backed) admin
+    /// lookup only runs for an already-authenticated request.
+    pub async fn is_admin(&self, headers: &HeaderMap) -> bool {
+        let Some(w) = self.authed_wallet(headers) else {
+            return false;
+        };
+        match self.admin_wallet().await {
+            Some(owner) => w.eq_ignore_ascii_case(&owner),
+            None => false,
+        }
+    }
+
+    /// Flip maintenance mode. Persists FIRST so we never report success on a
+    /// pause that wouldn't survive the restart it exists to protect: if the
+    /// write fails, the in-memory flag is left unchanged and an error is
+    /// returned. Returns the new state on success.
+    pub async fn set_maintenance(&self, on: bool) -> Result<bool, StatusCode> {
+        if let Some(db) = &self.0.db {
+            if let Err(e) = db
+                .set_setting(admin::MAINTENANCE_KEY, if on { "true" } else { "false" })
+                .await
+            {
+                tracing::error!("failed to persist maintenance flag: {e:#}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+        self.0.maintenance.store(on, Ordering::Relaxed);
+        tracing::warn!(maintenance = on, "maintenance mode toggled");
+        Ok(on)
+    }
+
     /// Clone a room's command sender + subscribe to its spectator stream.
     pub fn room_channels(
         &self,
@@ -1058,5 +1203,98 @@ mod tests {
         assert!(sanitize_label(" \t").is_none());
         let long = "é".repeat(100);
         assert_eq!(sanitize_label(&long).unwrap().chars().count(), 48);
+    }
+
+    /// Minimal in-memory state (no DB, log-only settlement) for guard tests.
+    fn test_state(maintenance: bool, admin_wallet: Option<&str>) -> AppState {
+        let (cleanup_tx, _cleanup_rx) = mpsc::channel::<GameId>(8);
+        let (results_tx, _results_rx) = mpsc::channel::<GameOutcome>(8);
+        AppState(Arc::new(Inner {
+            rooms: Mutex::new(HashMap::new()),
+            live_games: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            settlement: Arc::new(ledger::LogSettlement),
+            db: None,
+            maintenance: AtomicBool::new(maintenance),
+            admin_wallet: Mutex::new(admin_wallet.map(|w| w.to_lowercase())),
+            lobby: Lobby::default(),
+            auth: auth::Auth::default(),
+            agents: agents::Agents::default(),
+            limits: ratelimit::RateLimits::from_env(),
+            cleanup_tx,
+            results_tx,
+        }))
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    const TC: TimeControl = TimeControl {
+        initial_ms: 60_000,
+        increment_ms: 0,
+    };
+
+    #[tokio::test]
+    async fn maintenance_blocks_new_games() {
+        let state = test_state(true, None);
+        let result = state
+            .start_game(
+                TC,
+                "casual",
+                None,
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await;
+        assert_eq!(result.err(), Some(StatusCode::SERVICE_UNAVAILABLE));
+    }
+
+    #[tokio::test]
+    async fn casual_game_starts_when_not_in_maintenance() {
+        // Positive control: the guard is what blocks, not some other precondition.
+        let state = test_state(false, None);
+        let resp = state
+            .start_game(
+                TC,
+                "casual",
+                None,
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("casual game should start when not paused");
+        assert!(!resp.white_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn is_admin_requires_the_owner_session() {
+        let owner = "0xAbC0000000000000000000000000000000000001";
+        let state = test_state(false, Some(owner));
+        // A session bound to the owner wallet → admin.
+        let owner_token = state.0.auth.mint_session(owner);
+        assert!(state.is_admin(&bearer(&owner_token)).await);
+        // A session for any other wallet → not admin.
+        let other_token = state
+            .0
+            .auth
+            .mint_session("0x00000000000000000000000000000000000000ff");
+        assert!(!state.is_admin(&bearer(&other_token)).await);
+        // No session at all → not admin.
+        assert!(!state.is_admin(&HeaderMap::new()).await);
+    }
+
+    #[tokio::test]
+    async fn no_admin_wallet_is_fail_closed() {
+        // No owner resolved (LogSettlement.owner() → None), even a valid
+        // session is not admin.
+        let state = test_state(false, None);
+        let token = state
+            .0
+            .auth
+            .mint_session("0xAbC0000000000000000000000000000000000001");
+        assert!(!state.is_admin(&bearer(&token)).await);
     }
 }

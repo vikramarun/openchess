@@ -255,6 +255,8 @@ async fn park_create(
     headers: HeaderMap,
     Json(req): Json<ParkCreateReq>,
 ) -> Result<Json<ParkCreateResp>, StatusCode> {
+    // Drain: no point posting an offer nobody can accept while paused.
+    state.reject_if_draining()?;
     validate_tc(req.initial_secs, req.increment_secs)?;
     // Throttle offer creation per-IP (cheap to spam, seeds the public lobby).
     let ip = client_ip(&headers);
@@ -424,6 +426,8 @@ async fn park_accept(
     headers: HeaderMap,
     body: Option<Json<ParkAcceptReq>>,
 ) -> Result<Json<ParkAcceptResp>, StatusCode> {
+    // Drain: reject before claiming the offer so it isn't consumed on a 503.
+    state.reject_if_draining()?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
     // Throttle accept attempts per-IP (same budget as offer creation).
     if state.0.limits.offers.check(&client_ip(&headers)).is_some() {
@@ -718,6 +722,8 @@ async fn queue_join(
     headers: HeaderMap,
     Json(req): Json<QueueReq>,
 ) -> Result<Json<QueueResp>, StatusCode> {
+    // Drain: reject before enqueueing (a match would spawn a game).
+    state.reject_if_draining()?;
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     // Wagered tiers require auth; the seat is the authed wallet.
     let addr = if req.stake.is_some() {
@@ -915,6 +921,8 @@ async fn gauntlet_start(
     headers: HeaderMap,
     Json(req): Json<GauntletStartReq>,
 ) -> Result<Json<GauntletStartResp>, StatusCode> {
+    // Drain: reject new gauntlets during maintenance.
+    state.reject_if_draining()?;
     validate_tc(req.initial_secs, req.increment_secs)?;
     let addr = if req.stake.is_some() {
         Some(
@@ -1059,6 +1067,9 @@ async fn tourney_create(
     headers: HeaderMap,
     Json(req): Json<TourneyCreateReq>,
 ) -> Result<Json<IdResp>, StatusCode> {
+    // Drain: reject before opening an on-chain pool (burns oracle gas) for a
+    // tournament that couldn't be started (tourney_start is also drained).
+    state.reject_if_draining()?;
     validate_tc(req.initial_secs, req.increment_secs)?;
     let id = Uuid::new_v4();
     // The creating wallet (if authenticated) — only they may start it later.
@@ -1157,6 +1168,11 @@ async fn tourney_join(
     headers: HeaderMap,
     Json(req): Json<JoinReq>,
 ) -> StatusCode {
+    // Drain: reject before locking a buy-in on-chain for a tournament that
+    // couldn't be started (this handler returns a bare StatusCode).
+    if state.maintenance_on() {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     // Read the tournament's terms + whether this entrant is already in.
     let (buy_in, status, full) = {
         let t = state.0.lobby.tournaments.lock();
@@ -1324,6 +1340,8 @@ async fn tourney_start(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
+    // Drain: reject before generating the round-robin (spawns many games).
+    state.reject_if_draining()?;
     let caller = state.authed_wallet(&headers);
     let (players, tc) = {
         let mut t = state.0.lobby.tournaments.lock();
@@ -1363,7 +1381,7 @@ async fn tourney_start(
     let mut games = Vec::new();
     for i in 0..players.len() {
         for j in (i + 1)..players.len() {
-            let resp = state
+            let resp = match state
                 .start_game(
                     tc,
                     "tournament",
@@ -1371,7 +1389,21 @@ async fn tourney_start(
                     [seat_meta(&players[i]), seat_meta(&players[j])],
                     [SeatDelivery::Browser, SeatDelivery::Browser],
                 )
-                .await?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // A mid-loop failure (e.g. a drain toggled on between the
+                    // top guard and here) would otherwise leave the tournament
+                    // stuck "running" forever. Reset it to "open" so it can be
+                    // retried once the drain lifts; already-spawned, never-
+                    // started rooms reap themselves.
+                    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
+                        t.status = "open".into();
+                    }
+                    return Err(e);
+                }
+            };
             games.push(TourneyGame {
                 game_id: resp.game_id,
                 white: players[i].clone(),

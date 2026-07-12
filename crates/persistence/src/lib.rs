@@ -121,6 +121,31 @@ impl Db {
         Ok(())
     }
 
+    /// Read a durable server-wide setting (see `server_settings`). `None` if the
+    /// key was never set.
+    pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM server_settings WHERE key=$1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(value)
+    }
+
+    /// Upsert a durable server-wide setting.
+    pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO server_settings (key, value, updated_at)
+               VALUES ($1, $2, now())
+               ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()"#,
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Create or fetch a user keyed by wallet address, returning its id.
     pub async fn upsert_user(&self, wallet: &str) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(

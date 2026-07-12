@@ -85,9 +85,10 @@ docs.
 
 ## ⚠️ Not yet done — the gap between "merged" and "shareable"
 
-The BYO-multiplayer feature set (PRs #2–#4), rate limiting, and the bot
-leaderboard (PRs #6–#7) are **complete and on `main`, but not all of it is
-deployed**, and one hardening task still gates a public launch:
+The BYO-multiplayer feature set (PRs #2–#4), rate limiting, the bot
+leaderboard (PRs #6–#7), and owner-triggered maintenance/drain mode (PR #8) are
+**complete and on `main`, but not all of it is deployed**. The hardening tasks
+are done; the remaining gap is mostly ops:
 
 1. **Deploy the release to web + start a house bot.** `v0.1.0` is **cut** — the
    Release workflow builds the prebuilt `chess-client` binaries the `/connect`
@@ -114,13 +115,25 @@ deployed**, and one hardening task still gates a public launch:
    wallet columns, `LIMIT` applied after counting) — fine at launch scale, but
    rewrite it as a `GROUP BY` join + an index on the wallet columns before the
    user base grows.
-3. **Deploy survivability — handled by maintenance/drain mode; full rehydration
-   descoped.** Every `deploy-server.sh` kills live in-memory games, so the
-   accepted mitigation is the owner-triggered **maintenance/drain mode** (PR #8):
-   flip it on, let live games finish, then deploy. Full **room rehydration**
-   (rebuilding in-flight games from the `moves` table after an *unplanned*
-   restart) is **deliberately not planned** — the drain path is good enough at
-   this scale. (Revisit only if crash-loss of live wagered games becomes real.)
+3. **Deploy survivability — maintenance/drain mode DONE (PR #8); full
+   rehydration descoped.** Every `deploy-server.sh` kills live in-memory games,
+   so the mitigation is the owner-triggered **maintenance/drain mode**: the
+   escrow owner flips it from the web app (a global banner + toggle rendered
+   below the header), which stops all new games from starting — enforced at the
+   single `AppState::start_game` chokepoint plus every create endpoint, incl.
+   tournament pool create/join so **no USDC is locked on-chain mid-drain** —
+   while in-flight games play out; then deploy. The flag is DB-persisted
+   (`server_settings`, migration `0006`), so a pause set before a deploy
+   survives the restart it was set to protect. Admin auth: the SIWE session
+   wallet must equal the on-chain escrow `owner()` (resolved live at boot,
+   lazily if that RPC failed; set **`ADMIN_WALLET`** to override / for local
+   dev). Wiring: `crates/server/src/admin.rs` (`POST /admin/maintenance {on}`),
+   `ledger` `SettlementSink::owner()`, persistence `get/set_setting`; `/config`
+   surfaces `maintenance` + `admin_wallet`; web `components/MaintenanceBanner.tsx`.
+   Full **room rehydration** (rebuilding in-flight games from the `moves` table
+   after an *unplanned* restart) is **deliberately not planned** — the drain
+   path is good enough at this scale. (Revisit only if crash-loss of live
+   wagered games becomes real.)
 
 ## The big infra task: make it multi-node (true HA)
 
