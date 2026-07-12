@@ -1,0 +1,11 @@
+# pnpm 10.16+/11 treat un-allowlisted dependency build scripts as a hard install
+# error (ERR_PNPM_IGNORED_BUILDS), which fails CI during `pnpm install` before the
+# build even runs. Allow the handful of native/build-script deps this app pulls in.
+# pnpm 11 reads `allowBuilds` here (not the package.json "pnpm" field, which it
+# ignores); see https://pnpm.io/settings.
+allowBuilds:
+  bufferutil: true
+  esbuild: true
+  keccak: true
+  secp256k1: true
+  utf-8-validate: true
