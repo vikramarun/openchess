@@ -234,31 +234,6 @@ impl Db {
         Ok(())
     }
 
-    /// Mark a game finished with its result + final PGN.
-    pub async fn finish_game(
-        &self,
-        game_id: Uuid,
-        result: &str,
-        reason: &str,
-        result_hash: &str,
-        pgn: &str,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"UPDATE games
-               SET status='finished', result=$2, result_reason=$3,
-                   result_hash=$4, pgn=$5, finished_at=now()
-               WHERE id=$1"#,
-        )
-        .bind(game_id)
-        .bind(result)
-        .bind(reason)
-        .bind(result_hash)
-        .bind(pgn)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     /// Finish a game and (if wagered) enqueue its settlement in **one
     /// transaction** — the canonical transactional-outbox pattern, so a crash
     /// can't leave a finished wagered game that never settles.
@@ -761,7 +736,8 @@ mod tests {
         db.set_game_active(id).await?;
         db.append_move(id, 1, "e2e4", "e4", 60000, 60000).await?;
         db.append_move(id, 2, "e7e5", "e5", 60000, 60000).await?;
-        db.finish_game(id, "white", "checkmate", "deadbeef", "1. e4 e5").await?;
+        db.finish_and_enqueue(id, "white", "checkmate", "deadbeef", "1. e4 e5", None, false)
+            .await?;
 
         let g = db.get_game(id).await?.expect("game exists");
         assert_eq!(g.status, "finished");
@@ -808,7 +784,8 @@ mod tests {
                 )
                 .await?;
                 db.set_game_active(id).await?;
-                db.finish_game(id, result, "checkmate", "hash", "1. e4 e5").await?;
+                db.finish_and_enqueue(id, result, "checkmate", "hash", "1. e4 e5", None, false)
+                    .await?;
                 db.update_ratings(id).await?;
                 Ok::<_, anyhow::Error>(())
             }
