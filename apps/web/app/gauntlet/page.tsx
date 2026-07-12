@@ -129,6 +129,11 @@ function GauntletClient() {
               : `Couldn't join the queue (${r.status}).`,
           );
           setSearching(false);
+          // Don't give up — retry shortly (the bot may reconnect, the server may
+          // recover). The `live` guard stops retries once the gauntlet is stopped.
+          setTimeout(() => {
+            if (live) setRound((n) => n + 1);
+          }, 5000);
           return;
         }
         const { ticket_id } = await r.json();
@@ -153,6 +158,9 @@ function GauntletClient() {
       } catch {
         setErr("Server unreachable.");
         setSearching(false);
+        setTimeout(() => {
+          if (live) setRound((n) => n + 1);
+        }, 5000);
       }
     })();
     return () => {

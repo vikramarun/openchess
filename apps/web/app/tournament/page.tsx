@@ -73,7 +73,6 @@ function TournamentClient() {
   // identity per tournament (casual name) + which I'm actively playing
   const [joinedAs, setJoinedAs] = useState<Record<string, string>>({});
   const [playingTid, setPlayingTid] = useState<string | null>(null);
-  const [playedIds, setPlayedIds] = useState<Set<string>>(new Set());
   // My own seat tokens for the tournament I'm playing (game_id -> {token,color}).
   const [myTokens, setMyTokens] = useState<Record<string, MyGame>>({});
 
@@ -97,12 +96,22 @@ function TournamentClient() {
     };
   }, [token]);
 
-  // Poll tournament list + details. Keep polling while playing so new rounds
-  // (dispatched one at a time) appear as they start.
+  // Poll tournaments. In the lobby, refresh the whole list; while playing or
+  // spectating, refresh ONLY the active tournament (so new rounds appear) rather
+  // than an ever-growing N+1 fan-out over every tournament ever created.
   useEffect(() => {
     let live = true;
     const tick = async () => {
       try {
+        if (playingTid) {
+          const d = await (await fetch(`${SERVER_HTTP}/tournaments/${playingTid}`)).json();
+          if (live)
+            setTourneys((prev) => [
+              ...prev.filter((t) => t.id !== playingTid),
+              { id: playingTid, ...d } as Tourney,
+            ]);
+          return;
+        }
         const ids: { tournament_id: string }[] = await (
           await fetch(`${SERVER_HTTP}/tournaments`)
         ).json();
@@ -123,7 +132,7 @@ function TournamentClient() {
       live = false;
       clearInterval(t);
     };
-  }, []);
+  }, [playingTid]);
 
   const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
@@ -248,7 +257,6 @@ function TournamentClient() {
       const map: Record<string, MyGame> = {};
       for (const g of games) map[g.game_id] = g;
       setMyTokens(map);
-      setPlayedIds(new Set());
       setPlayingTid(t.id);
     } catch {
       setErr("Server unreachable.");
@@ -260,7 +268,6 @@ function TournamentClient() {
     () => tourneys.find((t) => t.id === playingTid) ?? null,
     [tourneys, playingTid],
   );
-  const iAmBot = playingTid ? !!joinedAsBot[playingTid] : false;
   // My games so far (they arrive one per round). The current game is the one in
   // the round in progress; earlier rounds are done, later ones aren't dispatched.
   const mine = activeT ? myGames(activeT) : [];
@@ -269,9 +276,18 @@ function TournamentClient() {
       ? mine.find((g) => g.round === activeT.current_round)
       : undefined;
   const currentId = current?.game_id ?? null;
+  // Am I a bot entrant here? Prefer the authoritative server seat (survives a
+  // page reload); fall back to the client-side join flag until my-games loads.
+  const currentSeat = currentId ? myTokens[currentId]?.seat : undefined;
+  const iAmBot = playingTid
+    ? currentSeat
+      ? currentSeat === "bot"
+      : !!joinedAsBot[playingTid]
+    : false;
 
   // Keep my seat tokens in sync as new rounds start (browser entrants only — a
-  // bot entrant plays via its agent and simply spectates).
+  // bot entrant plays via its agent and just spectates). Retries until the
+  // token loads, so a transient blip can't strand the player on "Loading…".
   useEffect(() => {
     if (!playingTid || !currentId || iAmBot || myTokens[currentId]) return;
     const t = tourneys.find((x) => x.id === playingTid);
@@ -279,23 +295,32 @@ function TournamentClient() {
     const me = t.buy_in ? (address ? address.toLowerCase() : null) : joinedAs[t.id] ?? null;
     if (!me) return;
     let alive = true;
-    (async () => {
+    let iv: ReturnType<typeof setInterval> | undefined;
+    const fetchTokens = async () => {
       const url = t.buy_in
         ? `${SERVER_HTTP}/tournaments/${t.id}/my-games`
         : `${SERVER_HTTP}/tournaments/${t.id}/my-games?player=${encodeURIComponent(me)}`;
-      const r = await fetch(url, {
-        headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
-      });
-      if (!r.ok || !alive) return;
-      const games: MyGame[] = await r.json();
-      setMyTokens((prev) => {
-        const map = { ...prev };
-        for (const g of games) map[g.game_id] = g;
-        return map;
-      });
-    })();
+      try {
+        const r = await fetch(url, {
+          headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
+        });
+        if (!r.ok || !alive) return;
+        const games: MyGame[] = await r.json();
+        setMyTokens((prev) => {
+          const map = { ...prev };
+          for (const g of games) map[g.game_id] = g;
+          return map;
+        });
+        if (games.some((g) => g.game_id === currentId) && iv) clearInterval(iv);
+      } catch {
+        /* retry on the next tick */
+      }
+    };
+    fetchTokens();
+    iv = setInterval(fetchTokens, 2500);
     return () => {
       alive = false;
+      if (iv) clearInterval(iv);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playingTid, currentId, iAmBot]);
@@ -303,13 +328,7 @@ function TournamentClient() {
   if (playingTid && activeT) {
     const done = activeT.status === "settled" || activeT.status === "complete";
     const backBtn = (
-      <button
-        className="primary"
-        onClick={() => {
-          setPlayingTid(null);
-          setPlayedIds(new Set());
-        }}
-      >
+      <button className="primary" onClick={() => setPlayingTid(null)}>
         Back to tournaments
       </button>
     );
@@ -362,9 +381,9 @@ function TournamentClient() {
           token={seat.token}
           color={seat.color}
           subtitle={`${activeT.name} · round ${current.round + 1} of ${activeT.total_rounds}`}
-          onResult={() =>
-            setTimeout(() => setPlayedIds((s) => new Set(s).add(current.game_id)), 3500)
-          }
+          // The server advances the round once every game in it finishes; the
+          // poll then moves `current` to the next round's game. Nothing to do here.
+          onResult={() => {}}
         />
       );
     }

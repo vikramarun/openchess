@@ -136,6 +136,13 @@ pub enum OutcomeAction {
 /// and settles finished tournaments on-chain.
 pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) {
     while let Some(o) = rx.recv().await {
+        // Free any bots seated in the finished game NOW, deterministically, before
+        // a tournament round-advance re-claims them for the next round. The room
+        // sends this outcome BEFORE it sends cleanup_tx, so relying on
+        // cleanup_task's game_ended would race the re-claim and the bots would
+        // spuriously forfeit. game_ended is idempotent, so cleanup_task's later
+        // call is a harmless no-op. (Also fixes a gauntlet rapid-re-queue 409.)
+        state.0.agents.game_ended(o.game_id);
         match state.0.lobby.record_outcome(o.game_id, o.winner) {
             OutcomeAction::None => {}
             OutcomeAction::AdvanceTournament { tid } => {
@@ -1446,9 +1453,13 @@ async fn tourney_join(
         {
             let mut t = state.0.lobby.tournaments.lock();
             if let Some(t) = t.get_mut(&id) {
-                if !t.players.contains(&name) {
-                    t.players.push(name.clone());
+                // Names are the entrant identity in a casual tournament (and the
+                // entrant_bots key), so they must be unique — otherwise a later
+                // joiner reusing a name would hijack the existing entrant's seat.
+                if t.players.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+                    return StatusCode::CONFLICT; // 409: display name already taken
                 }
+                t.players.push(name.clone());
                 if let Some(wallet) = bot_wallet {
                     t.entrant_bots.insert(
                         name,
@@ -1767,6 +1778,17 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
     }
 
     // Apply forfeit scores + record the created games (under the lock).
+    // Ordering matters. Register routing (game_to_tournament) FIRST and record
+    // the games, THEN set round_remaining to the count still unresolved. A real
+    // game can't finish in this sub-ms window, but doing it the other way would
+    // let a game that finished during dispatch drop its outcome and stall the
+    // round forever; this keeps it correct regardless.
+    {
+        let mut map = state.0.lobby.game_to_tournament.lock();
+        for g in &created {
+            map.insert(g.game_id, tid);
+        }
+    }
     {
         let mut ts = state.0.lobby.tournaments.lock();
         if let Some(t) = ts.get_mut(&tid) {
@@ -1774,13 +1796,21 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
                 score_pair(&mut t.scores, w, b, *winner);
             }
             t.games.extend(created.iter().cloned());
-            t.round_remaining = created.len();
         }
     }
     {
-        let mut map = state.0.lobby.game_to_tournament.lock();
-        for g in &created {
-            map.insert(g.game_id, tid);
+        // Count only games still unresolved — a game that already finished
+        // removed itself from game_to_tournament. Snapshot that map first (its
+        // own lock, released) to preserve record_outcome's lock order.
+        let live = {
+            let map = state.0.lobby.game_to_tournament.lock();
+            created
+                .iter()
+                .filter(|g| map.contains_key(&g.game_id))
+                .count()
+        };
+        if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+            t.round_remaining = live;
         }
     }
     if let Some(db) = &state.0.db {
@@ -1841,59 +1871,22 @@ pub async fn recover_tournaments(state: &AppState) {
         }
     };
     for t in rows {
-        let games = db.tournament_game_results(t.id).await.unwrap_or_default();
-        if games.is_empty() {
-            continue;
-        }
-        let unfinished = games
-            .iter()
-            .filter(|g| g.game_status.as_deref() != Some("finished"))
-            .count();
-        let players: Vec<String> = serde_json::from_value(t.players.clone()).unwrap_or_default();
-
-        if unfinished == 0 {
-            // Re-derive standings from persisted game results, then settle.
-            let mut scores: HashMap<String, f64> = HashMap::new();
-            for g in &games {
-                match g.game_result.as_deref() {
-                    Some("white") => *scores.entry(g.white.clone()).or_insert(0.0) += 1.0,
-                    Some("black") => *scores.entry(g.black.clone()).or_insert(0.0) += 1.0,
-                    Some("draw") => {
-                        *scores.entry(g.white.clone()).or_insert(0.0) += 0.5;
-                        *scores.entry(g.black.clone()).or_insert(0.0) += 0.5;
-                    }
-                    _ => {}
-                }
-            }
-            state.0.lobby.tournaments.lock().insert(
-                t.id,
-                Tournament {
-                    name: "recovered".into(),
-                    buy_in: t.buy_in.clone(),
-                    organizer: None, // recovered tournaments are already past 'open'
-                    initial_secs: 0,
-                    increment_secs: 0,
-                    status: "complete".into(),
-                    players,
-                    games: Vec::new(),
-                    scores,
-                    rounds: Vec::new(),
-                    current_round: 0,
-                    round_remaining: 0,
-                    entrant_bots: HashMap::new(),
-                    payout_leaves: Vec::new(),
-                    created_at: Instant::now(),
-                },
-            );
-            tracing::info!(tournament = %t.id, "recovered completed tournament — settling by result");
-            settle_tournament(state, t.id).await;
-        } else {
-            tracing::warn!(
-                tournament = %t.id, unfinished,
-                "tournament interrupted by restart — marking abandoned; entrants refund via claimRefund"
-            );
-            let _ = db.set_tournament_status(t.id, "abandoned").await;
-        }
+        // A `running` tournament didn't reach settlement before the restart.
+        // Round-based dispatch persists only the rounds played SO FAR, so
+        // "all persisted games finished" does NOT mean the tournament is
+        // complete — settling here would risk paying the pool out on partial
+        // standings (and the contract's `AlreadySettled` makes that permanent).
+        // Also, forfeit results aren't persisted, so re-derived standings would
+        // be wrong regardless. So we abandon it: entrants recover their buy-in
+        // via the contract's `claimRefund`. A tournament that actually finished
+        // AND enqueued settlement is completed by the durable settlement outbox
+        // (drained separately on boot), which carries the correct standings —
+        // not by this path.
+        tracing::warn!(
+            tournament = %t.id,
+            "tournament interrupted by restart — marking abandoned; entrants refund via claimRefund"
+        );
+        let _ = db.set_tournament_status(t.id, "abandoned").await;
     }
 }
 
@@ -2269,7 +2262,7 @@ mod tests {
 
     #[tokio::test]
     async fn tournament_dispatches_bots_round_by_round_then_settles() {
-        let (state, _c, _r) = test_state();
+        let (state, _c, results_rx) = test_state();
         let wallets = [
             "0x1111111111111111111111111111111111111111",
             "0x2222222222222222222222222222222222222222",
@@ -2345,29 +2338,58 @@ mod tests {
             assert!(rx.try_recv().is_err(), "and only one this round");
         }
 
-        // Drive all three rounds to completion. Finishing a game frees its bots
-        // (as cleanup_task would) so the next round can re-claim them.
+        // Drive every round through the REAL results_task, which mirrors
+        // production: it frees a finished game's bots BEFORE advancing, so the
+        // next round can re-claim them. If that freeing regresses (the T1 race),
+        // round 1+ pairings forfeit, no real games get created, and the
+        // per-round wait below times out — this test is the regression guard.
+        tokio::spawn(results_task(state.clone(), results_rx));
+        let tx = state.0.results_tx.clone();
+        let _ = &mut rxs; // agents keep receiving AssignSeat; we don't assert on it here
+
         for round in 0..3 {
-            let games = round_games(round);
-            assert_eq!(games.len(), 2, "round {round} has 2 games");
-            for gid in games {
-                state.0.agents.game_ended(gid);
-                if let OutcomeAction::AdvanceTournament { tid: t } =
-                    state.0.lobby.record_outcome(gid, Some(Color::White))
-                {
-                    dispatch_from_current(&state, t).await;
+            // Wait for this round's two real games to be dispatched.
+            let mut games = Vec::new();
+            for _ in 0..500 {
+                games = round_games(round);
+                if games.len() == 2 {
+                    break;
                 }
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
-            for rx in &mut rxs {
-                while rx.try_recv().is_ok() {}
+            assert_eq!(games.len(), 2, "round {round}: two real games (no spurious forfeits)");
+            for gid in games {
+                tx.send(GameOutcome {
+                    game_id: gid,
+                    winner: Some(Color::White),
+                })
+                .await
+                .unwrap();
             }
         }
 
-        // 6 games total (C(4,2)), all decisive, and the pool is settled.
+        // The pool settles after the final round.
+        let mut settled = false;
+        for _ in 0..500 {
+            settled = state
+                .0
+                .lobby
+                .tournaments
+                .lock()
+                .get(&tid)
+                .map(|t| t.status == "settled")
+                .unwrap_or(false);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(settled, "tournament settled");
+
+        // 6 games total (C(4,2)), all real + decisive → 6 points distributed.
         let t = state.0.lobby.tournaments.lock();
         let t = t.get(&tid).unwrap();
-        assert_eq!(t.games.len(), 6, "full round-robin");
-        assert_eq!(t.status, "settled");
+        assert_eq!(t.games.len(), 6, "full round-robin, all real games");
         let total: f64 = t.scores.values().sum();
         assert_eq!(total, 6.0, "6 decisive games distribute 6 points");
     }
@@ -2440,5 +2462,41 @@ mod tests {
         assert_eq!(t.games.len(), 0, "no game created — the pairing forfeited");
         assert_eq!(t.status, "settled");
         assert_eq!(t.scores.get("Bravo").copied(), Some(1.0), "Bravo wins the forfeit");
+    }
+
+    #[tokio::test]
+    async fn tournament_rejects_duplicate_casual_name() {
+        let (state, _c, _r) = test_state();
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        let join = |name: &str| {
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(JoinReq {
+                    player: Some(name.to_string()),
+                    seat: None,
+                    uci_options: None,
+                }),
+            )
+        };
+        assert_eq!(join("Alpha").await, StatusCode::OK);
+        // Reusing a name must be rejected — otherwise a later joiner (esp. a bot)
+        // would hijack the existing entrant's seat/identity.
+        assert_eq!(join("Alpha").await, StatusCode::CONFLICT);
+        assert_eq!(join("alpha").await, StatusCode::CONFLICT, "case-insensitive");
     }
 }
