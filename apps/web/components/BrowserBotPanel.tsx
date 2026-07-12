@@ -115,7 +115,14 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
                 min={0}
                 max={60}
                 value={cfg.bookMaxPly}
-                onChange={(e) => update({ bookMaxPly: Number(e.target.value) })}
+                onChange={(e) =>
+                  // Empty field restores the default; an explicit 0 (typed)
+                  // still means "disable the book".
+                  update({
+                    bookMaxPly:
+                      e.target.value === "" ? DEFAULT_CONFIG.bookMaxPly : Number(e.target.value),
+                  })
+                }
                 style={{ width: 64 }}
               />
             </label>

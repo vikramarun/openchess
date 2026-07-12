@@ -21,6 +21,9 @@ export class BrowserEngine {
   public name = "Stockfish 18 (browser)";
 
   constructor() {
+    // Origin-absolute path: the worker and its sibling .wasm both live at the
+    // public root. If the app is ever served under a Next basePath, derive
+    // this from that prefix (both files would 404 together otherwise).
     this.worker = new Worker(ENGINE_URL);
     this.worker.onmessage = (e: MessageEvent) => {
       const line: string =
@@ -62,7 +65,12 @@ export class BrowserEngine {
 
   private async handshake() {
     this.send("uci");
-    await this.waitFor((l) => l.includes("uciok"));
+    // The first `uciok` waits on the one-time 7MB wasm download + compile, so
+    // it needs a generous timeout — on slow/cold connections 20s isn't enough,
+    // and a rejection here fails the whole game (a wagered seat would flag).
+    // A genuine load failure is caught separately by worker.onerror, so a long
+    // wait only affects the truly-slow case, where waiting beats failing.
+    await this.waitFor((l) => l.includes("uciok"), 120_000);
     this.send("setoption name MultiPV value 1");
     this.send(`setoption name Hash value ${HASH_MB}`);
     this.send("isready");
