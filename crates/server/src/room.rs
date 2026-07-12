@@ -187,7 +187,12 @@ impl Room {
             // locked behind the contract's 24h `claimTimeout` — tells that
             // player they won, and keeps mode standings progressing.
             if !self.started && self.base.elapsed() > Duration::from_secs(60) {
-                let winner = reap_forfeit_winner(self.wready, self.bready);
+                let winner = reap_forfeit_winner(
+                    self.white_occupied,
+                    self.wready,
+                    self.black_occupied,
+                    self.bready,
+                );
                 let reason = if winner.is_some() {
                     GameEndReason::Forfeit
                 } else {
@@ -621,15 +626,27 @@ impl Room {
     }
 }
 
-/// Resolve a never-started game reaped from the lobby: the side that showed up
-/// and readied within the start window wins by forfeit; if neither readied it
-/// is a draw / refund. Both-ready is impossible here — the game would already
-/// have started (the `Ready` handler starts it the instant both sides ready).
-fn reap_forfeit_winner(wready: bool, bready: bool) -> Option<Color> {
-    match (wready, bready) {
-        (true, false) => Some(Color::White),
-        (false, true) => Some(Color::Black),
-        _ => None,
+/// Resolve a never-started game reaped from the lobby. Forfeit the whole stake
+/// to a side ONLY when it actually showed up (still connected AND readied) while
+/// its opponent is a genuine no-show (not connected). Every ambiguous case —
+/// nobody ready, both still connected but one slow to ready, or a side that
+/// readied then dropped its connection — is a draw / refund, never a
+/// confiscation of a present player's stake. (Both sides connected + ready
+/// can't reach the reap: the `Ready` handler would have started the game.)
+fn reap_forfeit_winner(
+    white_occupied: bool,
+    white_ready: bool,
+    black_occupied: bool,
+    black_ready: bool,
+) -> Option<Color> {
+    let white_showed = white_occupied && white_ready;
+    let black_showed = black_occupied && black_ready;
+    if white_showed && !black_occupied {
+        Some(Color::White)
+    } else if black_showed && !white_occupied {
+        Some(Color::Black)
+    } else {
+        None
     }
 }
 
@@ -672,19 +689,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_show_forfeits_to_the_side_that_readied() {
-        // White readied, Black never showed → White wins the forfeit (takes the
-        // wagered stake). Symmetric for Black.
-        assert_eq!(reap_forfeit_winner(true, false), Some(Color::White));
-        assert_eq!(reap_forfeit_winner(false, true), Some(Color::Black));
+    fn no_show_forfeits_to_the_present_ready_side() {
+        // White connected + ready, Black never connected → White wins by
+        // forfeit and takes the stake. Symmetric for Black.
+        assert_eq!(reap_forfeit_winner(true, true, false, false), Some(Color::White));
+        assert_eq!(reap_forfeit_winner(false, false, true, true), Some(Color::Black));
     }
 
     #[test]
-    fn neither_side_shows_is_a_draw_refund() {
-        // Nobody readied within the window → draw / refund both, never a forfeit.
-        assert_eq!(reap_forfeit_winner(false, false), None);
-        // Both-ready can't reach the reap (the game would have started), but if
-        // it somehow did we refund rather than invent a winner.
-        assert_eq!(reap_forfeit_winner(true, true), None);
+    fn ambiguous_reap_refunds_instead_of_confiscating() {
+        // Nobody readied → draw / refund both.
+        assert_eq!(reap_forfeit_winner(true, false, true, false), None);
+        // A present but slow-to-ready opponent is NOT confiscated: White ready,
+        // Black still connected but not yet ready → refund, not a White forfeit.
+        assert_eq!(reap_forfeit_winner(true, true, true, false), None);
+        // A side that readied then DISCONNECTED can't win over a present
+        // opponent: White readied then dropped (not connected), Black present
+        // but not ready → refund, and the absent White is never paid.
+        assert_eq!(reap_forfeit_winner(false, true, true, false), None);
+        // Neither connected → refund.
+        assert_eq!(reap_forfeit_winner(false, false, false, false), None);
     }
 }

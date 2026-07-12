@@ -892,6 +892,36 @@ async fn queue_join(
         code
     };
 
+    // Guard a stopped gauntlet session from being dragged into a NEW wagered
+    // game right before we commit. The entry check (~"status != running" above)
+    // races the async auto-stop, and a session can be stopped while its ticket
+    // already sits waiting in the queue — the entry gate never sees that ticket.
+    // So re-check both sides here: a session is stopped if it exists and isn't
+    // "running". Non-gauntlet joins pass `None` and are unaffected.
+    let session_stopped = |sid: Option<Uuid>| -> bool {
+        sid.is_some_and(|sid| {
+            state
+                .0
+                .lobby
+                .gauntlets
+                .lock()
+                .get(&sid)
+                .is_some_and(|s| s.status != "running")
+        })
+    };
+    if session_stopped(opp_session) {
+        // The popped opponent's session stopped: its ticket is stale. Drop it
+        // and keep waiting for a live opponent.
+        state.0.lobby.tickets.lock().remove(&opp_id);
+        state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+        return Ok(Json(QueueResp { ticket_id: my_id }));
+    }
+    if session_stopped(req.session_id) {
+        // My own session stopped since I joined (raced the auto-stop): don't
+        // open a wagered game — put the opponent back for the next live joiner.
+        return Err(requeue_opp_then_fail(StatusCode::CONFLICT));
+    }
+
     let wager = if let Some(stake) = req.stake.clone() {
         let white = match opp_addr.clone() {
             Some(w) => w,

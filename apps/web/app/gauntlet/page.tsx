@@ -113,10 +113,13 @@ function GauntletClient() {
         if (!r.ok) {
           if (r.status === 409) {
             // The session is stopped (e.g. auto-stopped after a no-move
-            // forfeit): don't retry — let the stopped-state UI take over.
+            // forfeit): don't retry. Reflect it locally so the stopped-state UI
+            // takes over even if the stats refetch fails (otherwise the loop
+            // would strand on a spinner). Best-effort refresh for final W/L/D.
             setSearching(false);
             setErr(null);
-            await refreshStats();
+            setStats((s) => (s ? { ...s, status: "stopped" } : s));
+            void refreshStats();
             return;
           }
           setErr(
