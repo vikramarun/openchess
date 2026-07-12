@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
+import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
@@ -51,6 +52,12 @@ function GauntletClient() {
   const [round, setRound] = useState(0); // bump to re-queue after a game
   const [searching, setSearching] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
+  const [useBot, setUseBot] = useState(true); // prefer the connected bot when online
+  // Set while the connected bot (not this browser) is playing the current game.
+  const [spectate, setSpectate] = useState<{ gameId: string; atGames: number } | null>(null);
+  // Latest games-count, read without re-triggering the queue loop.
+  const gamesRef = useRef(0);
 
   useEffect(() => {
     fetchConfig().then(setConfig);
@@ -58,6 +65,23 @@ function GauntletClient() {
   useEffect(() => {
     setToken(authToken());
   }, [address, isConnected]);
+
+  // Poll the connected bot's status while signed in.
+  useEffect(() => {
+    if (!token) return setBot(BOT_OFFLINE);
+    let alive = true;
+    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [token]);
+  const botPlays = bot.online && useBot;
+  useEffect(() => {
+    gamesRef.current = stats?.games ?? 0;
+  }, [stats]);
 
   const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
@@ -77,7 +101,7 @@ function GauntletClient() {
   // Queue loop: while running with no active game, search for an opponent and
   // start the next game when matched.
   useEffect(() => {
-    if (!session || cur || stats?.status === "stopped") return;
+    if (!session || cur || spectate || stats?.status === "stopped") return;
     let live = true;
     let poll: ReturnType<typeof setInterval> | undefined;
     (async () => {
@@ -87,18 +111,29 @@ function GauntletClient() {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            ...(wantStake && token ? { authorization: `Bearer ${token}` } : {}),
+            // A bot seat is always wallet-bound, so it needs auth even casually.
+            ...((wantStake || botPlays) && token ? { authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify({
             stake: wantStake ? parseUsdc(stake).toString() : undefined,
             initial_secs: tc.initial,
             increment_secs: tc.inc,
             session_id: session,
+            ...(botPlays ? { seat: "bot", uci_options: loadBotOptions() } : {}),
           }),
         });
         if (!r.ok) {
-          setErr(`Couldn't join the queue (${r.status}).`);
+          setErr(
+            r.status === 424
+              ? "Your bot went offline — reconnect the chess-client window."
+              : `Couldn't join the queue (${r.status}).`,
+          );
           setSearching(false);
+          // Don't give up — retry shortly (the bot may reconnect, the server may
+          // recover). The `live` guard stops retries once the gauntlet is stopped.
+          setTimeout(() => {
+            if (live) setRound((n) => n + 1);
+          }, 5000);
           return;
         }
         const { ticket_id } = await r.json();
@@ -108,7 +143,13 @@ function GauntletClient() {
             if (t.status === "matched" && live) {
               clearInterval(poll);
               setSearching(false);
-              setCur({ gameId: t.game_id, token: t.token, color: t.color });
+              if (t.seat === "bot" || !t.token) {
+                // The connected bot plays this game; the browser watches and
+                // re-queues when the session's game count ticks up.
+                setSpectate({ gameId: t.game_id, atGames: gamesRef.current });
+              } else {
+                setCur({ gameId: t.game_id, token: t.token, color: t.color });
+              }
             }
           } catch {
             /* keep polling */
@@ -117,6 +158,9 @@ function GauntletClient() {
       } catch {
         setErr("Server unreachable.");
         setSearching(false);
+        setTimeout(() => {
+          if (live) setRound((n) => n + 1);
+        }, 5000);
       }
     })();
     return () => {
@@ -124,7 +168,31 @@ function GauntletClient() {
       clearInterval(poll);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, cur, round]);
+  }, [session, cur, spectate, round]);
+
+  // While the bot is playing, poll the session: when its game count ticks up
+  // (this game finished) — or the gauntlet is stopped — drop back to re-queue.
+  useEffect(() => {
+    if (!spectate || !session) return;
+    let alive = true;
+    const t = setInterval(async () => {
+      try {
+        const s = await (await fetch(`${SERVER_HTTP}/gauntlet/${session}`)).json();
+        if (!alive) return;
+        setStats(s);
+        if ((s.games ?? 0) > spectate.atGames || s.status === "stopped") {
+          setSpectate(null);
+          setRound((r) => r + 1);
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 3000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [spectate, session]);
 
   const refreshStats = async () => {
     if (!session) return;
@@ -183,6 +251,7 @@ function GauntletClient() {
     }
     setStats((s) => (s ? { ...s, status: "stopped" } : s));
     setCur(null);
+    setSpectate(null);
     setSession(null);
     setSearching(false);
   };
@@ -208,6 +277,34 @@ function GauntletClient() {
             }, 3500);
           }}
         />
+      </>
+    );
+  }
+
+  // Bot mode: the connected agent is playing this game; the browser watches and
+  // re-queues automatically when it finishes.
+  if (session && spectate) {
+    return (
+      <>
+        <GauntletScore stats={stats} onStop={stop} />
+        <div className="panel" style={{ textAlign: "center" }}>
+          <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>
+            🤖 {bot.name ?? "Your bot"} is playing game {(stats?.games ?? 0) + 1}
+          </div>
+          <div className="spinner" style={{ margin: "8px auto" }} />
+          <a
+            className="primary"
+            href={`/game/${spectate.gameId}`}
+            target="_blank"
+            rel="noreferrer"
+            style={{ display: "inline-block", marginTop: 8 }}
+          >
+            Watch live ↗
+          </a>
+          <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
+            Re-queues automatically when this game finishes — leave this tab open.
+          </div>
+        </div>
       </>
     );
   }
@@ -275,9 +372,36 @@ function GauntletClient() {
               ))}
             </div>
           </label>
+          {bot.online && (
+            <label className="of-field">
+              <span className="muted">Who plays</span>
+              <div className="tc-row">
+                <button
+                  type="button"
+                  className={`tc-pill${useBot ? " active" : ""}`}
+                  onClick={() => setUseBot(true)}
+                >
+                  🤖 My bot{bot.engine ? ` (${bot.engine})` : ""}
+                </button>
+                <button
+                  type="button"
+                  className={`tc-pill${!useBot ? " active" : ""}`}
+                  onClick={() => setUseBot(false)}
+                >
+                  In-browser engine
+                </button>
+              </div>
+            </label>
+          )}
           <button className="primary" onClick={start} disabled={startUnderfunded}>
             {wantStake ? "Start staked gauntlet" : "Start casual gauntlet"}
           </button>
+          {botPlays && (
+            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0" }}>
+              🤖 Your connected bot will play every game unattended — leave the tab open and it
+              climbs the tier on its own.
+            </p>
+          )}
         </div>
         {startUnderfunded && stakeBig != null && (
           <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>

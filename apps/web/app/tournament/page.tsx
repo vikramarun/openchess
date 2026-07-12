@@ -6,6 +6,7 @@ import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
+import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
@@ -15,9 +16,16 @@ type TGame = {
   game_id: string;
   white: string;
   black: string;
+  round: number;
   // seat tokens are NOT in the public view — fetched per-entrant via /my-games
 };
-type MyGame = { game_id: string; color: "white" | "black"; token: string };
+type MyGame = {
+  game_id: string;
+  color: "white" | "black";
+  token: string; // empty when the seat is played by the caller's bot
+  round: number;
+  seat: string; // "bot" | "browser"
+};
 type Tourney = {
   id: string;
   name: string;
@@ -25,6 +33,8 @@ type Tourney = {
   status: string;
   players: string[];
   games: TGame[];
+  current_round: number;
+  total_rounds: number;
 };
 
 export default function TournamentPage() {
@@ -50,6 +60,9 @@ function TournamentClient() {
   const [token, setToken] = useState<string | null>(null);
   const [tourneys, setTourneys] = useState<Tourney[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
+  // Tournaments this browser entered with its connected bot (→ spectate).
+  const [joinedAsBot, setJoinedAsBot] = useState<Record<string, boolean>>({});
 
   // create form
   const [name, setName] = useState("");
@@ -60,7 +73,6 @@ function TournamentClient() {
   // identity per tournament (casual name) + which I'm actively playing
   const [joinedAs, setJoinedAs] = useState<Record<string, string>>({});
   const [playingTid, setPlayingTid] = useState<string | null>(null);
-  const [playedIds, setPlayedIds] = useState<Set<string>>(new Set());
   // My own seat tokens for the tournament I'm playing (game_id -> {token,color}).
   const [myTokens, setMyTokens] = useState<Record<string, MyGame>>({});
 
@@ -71,12 +83,35 @@ function TournamentClient() {
     setToken(authToken());
   }, [address, isConnected]);
 
-  // Poll tournament list + details.
+  // Poll the connected bot's status while signed in.
   useEffect(() => {
-    if (playingTid) return;
+    if (!token) return setBot(BOT_OFFLINE);
+    let alive = true;
+    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [token]);
+
+  // Poll tournaments. In the lobby, refresh the whole list; while playing or
+  // spectating, refresh ONLY the active tournament (so new rounds appear) rather
+  // than an ever-growing N+1 fan-out over every tournament ever created.
+  useEffect(() => {
     let live = true;
     const tick = async () => {
       try {
+        if (playingTid) {
+          const d = await (await fetch(`${SERVER_HTTP}/tournaments/${playingTid}`)).json();
+          if (live)
+            setTourneys((prev) => [
+              ...prev.filter((t) => t.id !== playingTid),
+              { id: playingTid, ...d } as Tourney,
+            ]);
+          return;
+        }
         const ids: { tournament_id: string }[] = await (
           await fetch(`${SERVER_HTTP}/tournaments`)
         ).json();
@@ -148,28 +183,37 @@ function TournamentClient() {
     }
   };
 
-  const join = async (t: Tourney) => {
+  const join = async (t: Tourney, asBot = false) => {
     setErr(null);
-    if (t.buy_in && !token) return setErr("Sign in (top right) to join a buy-in tournament.");
+    if ((t.buy_in || asBot) && !token)
+      return setErr(
+        asBot ? "Sign in to enter with your bot." : "Sign in (top right) to join a buy-in tournament.",
+      );
     const player = t.buy_in ? undefined : casualName.trim() || `guest-${Math.floor(Date.now() % 100000)}`;
     try {
       const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/join`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(t.buy_in && token ? { authorization: `Bearer ${token}` } : {}),
+          ...((t.buy_in || asBot) && token ? { authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ player }),
+        body: JSON.stringify({
+          player,
+          ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : {}),
+        }),
       });
       if (!r.ok) {
         setErr(
           r.status === 502
             ? "Couldn't move your buy-in into the pool — check your deposited balance."
-            : `Couldn't join (${r.status}).`,
+            : r.status === 424
+              ? "Your bot is offline — check the chess-client window."
+              : `Couldn't join (${r.status}).`,
         );
         return;
       }
       if (!t.buy_in && player) setJoinedAs((m) => ({ ...m, [t.id]: player.toLowerCase() }));
+      if (asBot) setJoinedAsBot((m) => ({ ...m, [t.id]: true }));
     } catch {
       setErr("Server unreachable.");
     }
@@ -213,56 +257,159 @@ function TournamentClient() {
       const map: Record<string, MyGame> = {};
       for (const g of games) map[g.game_id] = g;
       setMyTokens(map);
-      setPlayedIds(new Set());
       setPlayingTid(t.id);
     } catch {
       setErr("Server unreachable.");
     }
   };
 
-  // ---- Playing my bracket ----
+  // ---- Playing / watching my tournament ----
   const activeT = useMemo(
     () => tourneys.find((t) => t.id === playingTid) ?? null,
     [tourneys, playingTid],
   );
+  // My games so far (they arrive one per round). The current game is the one in
+  // the round in progress; earlier rounds are done, later ones aren't dispatched.
+  const mine = activeT ? myGames(activeT) : [];
+  const current =
+    activeT && activeT.status !== "open"
+      ? mine.find((g) => g.round === activeT.current_round)
+      : undefined;
+  const currentId = current?.game_id ?? null;
+  // Am I a bot entrant here? Prefer the authoritative server seat (survives a
+  // page reload); fall back to the client-side join flag until my-games loads.
+  const currentSeat = currentId ? myTokens[currentId]?.seat : undefined;
+  const iAmBot = playingTid
+    ? currentSeat
+      ? currentSeat === "bot"
+      : !!joinedAsBot[playingTid]
+    : false;
+
+  // Keep my seat tokens in sync as new rounds start (browser entrants only — a
+  // bot entrant plays via its agent and just spectates). Retries until the
+  // token loads, so a transient blip can't strand the player on "Loading…".
+  useEffect(() => {
+    if (!playingTid || !currentId || iAmBot || myTokens[currentId]) return;
+    const t = tourneys.find((x) => x.id === playingTid);
+    if (!t) return;
+    const me = t.buy_in ? (address ? address.toLowerCase() : null) : joinedAs[t.id] ?? null;
+    if (!me) return;
+    let alive = true;
+    let iv: ReturnType<typeof setInterval> | undefined;
+    const fetchTokens = async () => {
+      const url = t.buy_in
+        ? `${SERVER_HTTP}/tournaments/${t.id}/my-games`
+        : `${SERVER_HTTP}/tournaments/${t.id}/my-games?player=${encodeURIComponent(me)}`;
+      try {
+        const r = await fetch(url, {
+          headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
+        });
+        if (!r.ok || !alive) return;
+        const games: MyGame[] = await r.json();
+        setMyTokens((prev) => {
+          const map = { ...prev };
+          for (const g of games) map[g.game_id] = g;
+          return map;
+        });
+        if (games.some((g) => g.game_id === currentId) && iv) clearInterval(iv);
+      } catch {
+        /* retry on the next tick */
+      }
+    };
+    fetchTokens();
+    iv = setInterval(fetchTokens, 2500);
+    return () => {
+      alive = false;
+      if (iv) clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playingTid, currentId, iAmBot]);
+
   if (playingTid && activeT) {
-    const mine = myGames(activeT);
-    const next = mine.find((g) => !playedIds.has(g.game_id));
-    const seat = next ? myTokens[next.game_id] : undefined;
-    if (next && seat) {
-      const idx = mine.findIndex((g) => g.game_id === next.game_id);
+    const done = activeT.status === "settled" || activeT.status === "complete";
+    const backBtn = (
+      <button className="primary" onClick={() => setPlayingTid(null)}>
+        Back to tournaments
+      </button>
+    );
+
+    // Bot entrant: the agent plays; the browser watches the current round's game.
+    if (iAmBot) {
+      return (
+        <div className="panel" style={{ textAlign: "center" }}>
+          {current ? (
+            <>
+              <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>
+                🤖 Your bot is playing round {activeT.current_round + 1} of {activeT.total_rounds}
+              </div>
+              <div className="spinner" style={{ margin: "8px auto" }} />
+              <a
+                className="primary"
+                href={`/game/${current.game_id}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ display: "inline-block", marginTop: 8 }}
+              >
+                Watch live ↗
+              </a>
+              <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
+                Your bot plays every round automatically — leave this tab open.
+              </div>
+            </>
+          ) : done ? (
+            <>
+              <b style={{ color: "var(--text-strong)" }}>Tournament finished 🎉</b>
+              <p className="muted">
+                Standings decide the pool; a winning share is credited to your bankroll.
+              </p>
+              {backBtn}
+            </>
+          ) : (
+            <span className="muted">Waiting for your bot’s next round…</span>
+          )}
+        </div>
+      );
+    }
+
+    // Browser entrant: play the current round's game.
+    const seat = current ? myTokens[current.game_id] : undefined;
+    if (current && seat && seat.token) {
       return (
         <SeatGame
-          key={next.game_id}
-          gameId={next.game_id}
+          key={current.game_id}
+          gameId={current.game_id}
           token={seat.token}
           color={seat.color}
-          subtitle={`${activeT.name} · game ${idx + 1} of ${mine.length}`}
-          onResult={() =>
-            setTimeout(() => setPlayedIds((s) => new Set(s).add(next.game_id)), 3500)
-          }
+          subtitle={`${activeT.name} · round ${current.round + 1} of ${activeT.total_rounds}`}
+          // The server advances the round once every game in it finishes; the
+          // poll then moves `current` to the next round's game. Nothing to do here.
+          onResult={() => {}}
         />
       );
     }
-    if (next && !seat) {
+    if (current) {
       return (
         <div className="panel">
           <span className="muted">Loading your game…</span>
         </div>
       );
     }
-    // all my games done
+    // No current game: between rounds, a bye, or finished.
     return (
       <div className="panel" style={{ textAlign: "center" }}>
-        <b style={{ color: "var(--text-strong)" }}>You’ve finished your games 🎉</b>
-        <p className="muted">
-          Standings are tallied as every pairing completes. If you finish in the money, your
-          share of the pool is credited to your bankroll (large fields settle a Merkle root —
-          claim from your profile). Withdraw any time from the bankroll panel.
-        </p>
-        <button className="primary" onClick={() => { setPlayingTid(null); setPlayedIds(new Set()); }}>
-          Back to tournaments
-        </button>
+        {done ? (
+          <>
+            <b style={{ color: "var(--text-strong)" }}>You’ve finished your games 🎉</b>
+            <p className="muted">
+              Standings are tallied as every pairing completes. A winning share of the pool is
+              credited to your bankroll (large fields settle a Merkle root — claim from your
+              profile).
+            </p>
+          </>
+        ) : (
+          <p className="muted">Waiting for your next round to start…</p>
+        )}
+        {backBtn}
       </div>
     );
   }
@@ -368,9 +515,16 @@ function TournamentClient() {
                           need {fmtUsdc(t.buy_in)}
                         </span>
                       ) : (
-                        <button className="ghost" onClick={() => join(t)}>
-                          Join
-                        </button>
+                        <>
+                          <button className="ghost" onClick={() => join(t)}>
+                            Join
+                          </button>
+                          {bot.online && (
+                            <button className="ghost" onClick={() => join(t, true)}>
+                              🤖 Join with bot
+                            </button>
+                          )}
+                        </>
                       ))}
                     {t.status === "open" && joined && (
                       <button className="ghost" onClick={() => startT(t)}>
@@ -379,7 +533,9 @@ function TournamentClient() {
                     )}
                     {t.status !== "open" && mine.length > 0 && (
                       <button className="primary" onClick={() => enterPlay(t)}>
-                        Play my {mine.length} game{mine.length === 1 ? "" : "s"}
+                        {joinedAsBot[t.id]
+                          ? "Watch my bot"
+                          : `Play my ${mine.length} game${mine.length === 1 ? "" : "s"}`}
                       </button>
                     )}
                     {t.status !== "open" && joined && mine.length === 0 && (

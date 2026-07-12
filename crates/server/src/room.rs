@@ -182,6 +182,17 @@ impl Room {
             // doesn't linger forever as a ghost in the lobby's "live" list.
             if !self.started && self.base.elapsed() > Duration::from_secs(60) {
                 tracing::info!(game_id = %self.game_id, "room reaped: never started");
+                // Report a draw so mode standings (esp. tournament rounds) keep
+                // progressing instead of stalling on a game that never began.
+                // Unlinked games (casual/park) ignore it; wagered escrow is
+                // untouched (only finish() settles on-chain).
+                let _ = self
+                    .results_tx
+                    .send(crate::GameOutcome {
+                        game_id: self.game_id,
+                        winner: None,
+                    })
+                    .await;
                 break;
             }
         }
@@ -521,10 +532,15 @@ impl Room {
     }
 
     async fn finish(&mut self, result: GameResult) {
-        let (pgn, clock) = match self.game.as_ref() {
-            Some(game) => (game.pgn(), game.clock(self.now_ms())),
+        let (pgn, clock, ply) = match self.game.as_ref() {
+            Some(game) => (game.pgn(), game.clock(self.now_ms()), game.ply()),
             None => return,
         };
+        // A game is only rated if it was actually contested — both sides must
+        // have made at least one move (ply >= 2). A player who never moves (a
+        // no-show, or an engine that connects then hangs and flags) still LOSES
+        // the game/stake, but their Elo is untouched. Applies to every mode.
+        let rated = ply >= 2;
         // Cryptographic commitment to the full game (move log via PGN).
         let result_hash = sha256_hex(&pgn);
         let (result_str, reason_str) = result_strings(&result);
@@ -553,8 +569,11 @@ impl Room {
                 {
                     tracing::error!(game_id = %self.game_id, "finish_and_enqueue failed: {e:#}");
                 }
-                // Update Elo for games with two known wallets (no-op otherwise).
-                let _ = db.update_ratings(self.game_id).await;
+                // Update Elo for contested games with two known wallets (no-op
+                // otherwise). Skipped when a player never moved (see `rated`).
+                if rated {
+                    let _ = db.update_ratings(self.game_id).await;
+                }
             }
             // No database: best-effort inline settle for a wagered game.
             None => {

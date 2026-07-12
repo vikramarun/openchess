@@ -30,9 +30,11 @@ settles on-chain, in a contract, never a platform wallet.
     pot minus rake. Deposit + play **in the browser**.
   - **Gauntlet** — your engine plays back-to-back games at a fixed tier until you
     stop; each an independent on-chain settlement against a locked bankroll.
-  - **Tournament** — buy in to a prize pool; a round-robin runs; the pool is
-    distributed on-chain by final standings (direct, or a Merkle-root claim for
-    large fields).
+  - **Tournament** — buy in to a prize pool; a round-robin runs **one round at a
+    time** (circle method); the pool is distributed on-chain by final standings
+    (direct, or a Merkle-root claim for large fields).
+  - **Bring your own bot** — in every mode, a seat can be played by the in-browser
+    engine or by a connected `chess-client` agent, driven from the web.
 - **Player profiles** — per-address stats (games, W/L/D, win rate, net USDC,
   Elo) and game history, chess.com-style, at `/player/<address>`.
 - **Verifiable results** — the oracle signs each result; the web app recovers the
@@ -70,7 +72,7 @@ Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
 
 ## Status
 
-**64 automated tests pass** (39 Rust + 25 Foundry). Three audit rounds
+**76 automated tests pass** (51 Rust + 25 Foundry). Three audit rounds
 ([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated. CI
 (`.github/workflows/ci.yml`) runs Postgres + `forge test` + `cargo test` + the
 web build on every push.

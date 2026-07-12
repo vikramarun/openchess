@@ -24,8 +24,9 @@ docs.
   Vercel at `openchess.ai`. `GET /config` → `wager_enabled:true`.
 - **Working end-to-end:** the casual lobby (create/join/watch, in-browser
   Stockfish + opening book), Park/Patzer in-browser wagering (deposit → play →
-  on-chain settle), Gauntlet (native + browser), Tournament round-robin, player
-  profiles, verifiable results, durable settlement outboxes.
+  on-chain settle), Gauntlet, round-based Tournament, player profiles, verifiable
+  results, durable settlement outboxes. **Bot seats work in all three modes**
+  (browser engine or a connected `chess-client` agent).
 - **True BYO multiplayer (bot agents):** `chess-client connect` pairs a
   user-run UCI engine (+ optional Polyglot book) with the user's wallet ONCE —
   it registers over a persistent `/ws/agent` socket (`crates/server/src/agents.rs`,
@@ -79,7 +80,12 @@ docs.
   note below for the full shape.
 - **Guardrails for the unaudited launch:** server `MAX_STAKE` capped at **25
   USDC** (`crates/server/src/main.rs`), 1% rake, 24h settle timeout.
-- **Tests:** 39 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
+- **Locked money/rating rules (all modes):** a no-show / forfeit **loses the
+  stake or buy-in** (the pool settles without them). But a game is **rated only
+  if it was contested — both sides made ≥1 move** (`ply >= 2`); a no-show, or an
+  engine that connects then hangs and flags without moving, loses the game/stake
+  but its **Elo is untouched**. Single guard in `room.rs finish()`.
+- **Tests:** 51 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
   `pnpm -C apps/web test:book` (polyglot spec vectors). CI in
   `.github/workflows/ci.yml`; releases in `release.yml`.
 
@@ -176,13 +182,15 @@ all in `crates/server` + a Redis dependency.
 
 ## Feature opportunities (the multiplayer loop is complete; these make it sticky)
 
-- **Bot seats for Gauntlet + Tournament — NEXT UP.** Bot seats are park-only
-  today, but `SeatDelivery::{Browser,Agent}` in `start_game` already generalizes
-  the claim/dispatch/rollback, so wiring gauntlet `queue_join` and `tourney_start`
-  is a per-endpoint change + a web toggle, not a re-implementation. Gauntlet is
-  what bot-grinders actually want (leave a bot climbing a tier overnight). It
-  touches wagered seat dispatch, so lean on the existing `SeatDelivery` abort/
-  refund path and review the money flow carefully.
+- **Bot seats for Gauntlet + Tournament — DONE (PR #11):** a connected
+  `chess-client` bot can now play both modes (`queue_join` / tournament dispatch
+  claim the agent per game via `SeatDelivery::Agent`; web toggles + spectate).
+  Gauntlet = "leave a bot climbing a tier overnight." The **Tournament was
+  rebuilt round-by-round** (circle method) in the same PR — it used to fire the
+  whole round-robin at once, which both a single-agent bot can't play and let the
+  games a player wasn't in yet die at the 60s never-started reap. Now one round
+  is dispatched at a time. See "Locked rules" below for the forfeit/rating
+  semantics.
 - **Bot leaderboard — DONE (PR #7):** top players by Elo surfaced in the lobby
   (`GET /leaderboard` + `Leaderboard.tsx`). One overall Elo; the query
   optimization noted in item #2 is the main follow-up. (Per-time-control Elo is

@@ -100,51 +100,53 @@ impl Lobby {
             }
         }
 
-        // Tournament: award points and, when the last game completes, signal
-        // for settlement (handled in `results_task`).
-        let mut complete = None;
+        // Tournament: award points for the finished game; when the current
+        // round's games are all done, signal to advance (dispatch the next round
+        // or settle) — handled in `results_task` since dispatch is async.
+        let mut action = OutcomeAction::None;
         if let Some(tid) = self.game_to_tournament.lock().remove(&game_id) {
             let mut tourneys = self.tournaments.lock();
             if let Some(t) = tourneys.get_mut(&tid) {
                 if let Some(g) = t.games.iter().find(|g| g.game_id == game_id) {
                     let (w, b) = (g.white.clone(), g.black.clone());
-                    match winner {
-                        Some(Color::White) => *t.scores.entry(w).or_insert(0.0) += 1.0,
-                        Some(Color::Black) => *t.scores.entry(b).or_insert(0.0) += 1.0,
-                        None => {
-                            *t.scores.entry(w).or_insert(0.0) += 0.5;
-                            *t.scores.entry(b).or_insert(0.0) += 0.5;
-                        }
-                    }
+                    score_pair(&mut t.scores, &w, &b, winner);
                 }
-                t.remaining = t.remaining.saturating_sub(1);
-                if t.remaining == 0 && t.status == "running" {
-                    t.status = "complete".into();
-                    complete = Some(tid);
+                if t.status == "running" {
+                    t.round_remaining = t.round_remaining.saturating_sub(1);
+                    if t.round_remaining == 0 {
+                        t.current_round += 1; // move to the next round to dispatch
+                        action = OutcomeAction::AdvanceTournament { tid };
+                    }
                 }
             }
         }
-        match complete {
-            Some(tid) => OutcomeAction::SettleTournament { tid },
-            None => OutcomeAction::None,
-        }
+        action
     }
 }
 
 /// Follow-up work the results dispatcher performs after a game outcome.
 pub enum OutcomeAction {
     None,
-    SettleTournament { tid: Uuid },
+    /// The current tournament round finished; dispatch the next one (or settle
+    /// if the schedule is exhausted).
+    AdvanceTournament { tid: Uuid },
 }
 
-/// Consumes game outcomes and updates mode standings; settles finished
-/// tournaments on-chain.
+/// Consumes game outcomes and updates mode standings; drives tournament rounds
+/// and settles finished tournaments on-chain.
 pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) {
     while let Some(o) = rx.recv().await {
+        // Free any bots seated in the finished game NOW, deterministically, before
+        // a tournament round-advance re-claims them for the next round. The room
+        // sends this outcome BEFORE it sends cleanup_tx, so relying on
+        // cleanup_task's game_ended would race the re-claim and the bots would
+        // spuriously forfeit. game_ended is idempotent, so cleanup_task's later
+        // call is a harmless no-op. (Also fixes a gauntlet rapid-re-queue 409.)
+        state.0.agents.game_ended(o.game_id);
         match state.0.lobby.record_outcome(o.game_id, o.winner) {
             OutcomeAction::None => {}
-            OutcomeAction::SettleTournament { tid } => {
-                settle_tournament(&state, tid).await;
+            OutcomeAction::AdvanceTournament { tid } => {
+                dispatch_from_current(&state, tid).await;
             }
         }
     }
@@ -695,6 +697,10 @@ struct Ticket {
     color: Option<String>,
     /// Gauntlet session this ticket belongs to (for standings), if any.
     session_id: Option<Uuid>,
+    /// The seat is played by the owner's connected agent (browser spectates).
+    seat_bot: bool,
+    /// UCI option overrides for a bot seat, relayed to the agent on dispatch.
+    uci_options: Vec<(String, String)>,
     created_at: Instant,
 }
 
@@ -710,6 +716,10 @@ struct QueueReq {
     /// Optional self-declared display name / engine (shown to the opponent).
     name: Option<String>,
     engine: Option<String>,
+    /// "bot" seats the joiner's connected agent; anything else = browser.
+    seat: Option<String>,
+    /// UCI option overrides for a bot seat (applied by the agent per game).
+    uci_options: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -725,8 +735,10 @@ async fn queue_join(
     // Drain: reject before enqueueing (a match would spawn a game).
     state.reject_if_draining()?;
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
-    // Wagered tiers require auth; the seat is the authed wallet.
-    let addr = if req.stake.is_some() {
+    let bot = is_bot_seat(&req.seat);
+    // Wagered tiers AND bot seats require auth; the seat (and the agent it
+    // dispatches to) is always the authed wallet's. Casual browser seats need none.
+    let addr = if req.stake.is_some() || bot {
         Some(
             state
                 .authed_wallet(&headers)
@@ -735,6 +747,23 @@ async fn queue_join(
     } else {
         None
     };
+
+    let mut my_meta = SeatMeta {
+        name: req.name.as_deref().and_then(sanitize_label),
+        engine: req.engine.as_deref().and_then(sanitize_label),
+    };
+    if bot {
+        // The bot must be online to queue as it; default its identity from the
+        // registration so the opponent/lobby see what it actually runs.
+        let wallet = addr.as_deref().unwrap_or_default();
+        let (meta, _busy) = state
+            .0
+            .agents
+            .view(wallet)
+            .ok_or(StatusCode::FAILED_DEPENDENCY)?; // 424: bot offline
+        my_meta.name = my_meta.name.or(Some(meta.name));
+        my_meta.engine = my_meta.engine.or(Some(meta.engine));
+    }
 
     // Only a gauntlet session's owner may attribute games to it (prevents
     // stat-poisoning a staked session via a crafted session_id).
@@ -756,10 +785,7 @@ async fn queue_join(
         req.initial_secs,
         req.increment_secs
     );
-    let my_meta = SeatMeta {
-        name: req.name.as_deref().and_then(sanitize_label),
-        engine: req.engine.as_deref().and_then(sanitize_label),
-    };
+    let my_uci = clean_uci_options(req.uci_options);
     let my_id = Uuid::new_v4();
     state.0.lobby.tickets.lock().insert(
         my_id,
@@ -771,6 +797,8 @@ async fn queue_join(
             token: None,
             color: None,
             session_id: req.session_id,
+            seat_bot: bot,
+            uci_options: my_uci.clone(),
             created_at: Instant::now(),
         },
     );
@@ -780,69 +808,8 @@ async fn queue_join(
         queue.entry(key.clone()).or_default().pop_front()
     };
 
-    if let Some(opp_id) = opponent {
-        let (opp_addr, opp_meta, opp_session) = state
-            .0
-            .lobby
-            .tickets
-            .lock()
-            .get(&opp_id)
-            .map(|t| (t.addr.clone(), t.meta.clone(), t.session_id))
-            .unwrap_or((None, SeatMeta::default(), None));
-
-        // opponent = white, me = black
-        let wager = if let Some(stake) = req.stake.clone() {
-            let white = opp_addr.clone().ok_or(StatusCode::CONFLICT)?;
-            let black = addr.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-            if white.eq_ignore_ascii_case(&black) {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            Some(build_wager(&white, &black, &stake)?)
-        } else {
-            None
-        };
-
-        let resp = state
-            .start_game(
-                tc,
-                "gauntlet",
-                wager,
-                [opp_meta, my_meta],
-                [SeatDelivery::Browser, SeatDelivery::Browser],
-            )
-            .await?;
-
-        // Attribute the game's result to any gauntlet sessions involved.
-        let mut links = Vec::new();
-        if let Some(sid) = opp_session {
-            links.push((sid, Color::White));
-        }
-        if let Some(sid) = req.session_id {
-            links.push((sid, Color::Black));
-        }
-        if !links.is_empty() {
-            state
-                .0
-                .lobby
-                .game_to_gauntlet
-                .lock()
-                .insert(resp.game_id, links);
-        }
-
-        let mut tickets = state.0.lobby.tickets.lock();
-        if let Some(t) = tickets.get_mut(&opp_id) {
-            t.status = "matched".into();
-            t.game_id = Some(resp.game_id);
-            t.token = Some(resp.white_token);
-            t.color = Some("white".into());
-        }
-        if let Some(t) = tickets.get_mut(&my_id) {
-            t.status = "matched".into();
-            t.game_id = Some(resp.game_id);
-            t.token = Some(resp.black_token);
-            t.color = Some("black".into());
-        }
-    } else {
+    // No waiting opponent — sit in the queue.
+    let Some(opp_id) = opponent else {
         state
             .0
             .lobby
@@ -851,7 +818,157 @@ async fn queue_join(
             .entry(key)
             .or_default()
             .push_back(my_id);
+        return Ok(Json(QueueResp { ticket_id: my_id }));
+    };
+
+    // Paired: opponent = white, me = black.
+    let (opp_addr, opp_meta, opp_session, opp_bot, opp_uci) = state
+        .0
+        .lobby
+        .tickets
+        .lock()
+        .get(&opp_id)
+        .map(|t| {
+            (
+                t.addr.clone(),
+                t.meta.clone(),
+                t.session_id,
+                t.seat_bot,
+                t.uci_options.clone(),
+            )
+        })
+        .unwrap_or((None, SeatMeta::default(), None, false, Vec::new()));
+
+    // Rollback used on any failure between popping the opponent and the game
+    // existing. `release` frees claimed agents; the inline requeues make sure no
+    // player is orphaned (a still-viable opponent goes back to the front).
+    let release = |claimed: &[String]| {
+        for w in claimed {
+            state.0.agents.release(w);
+        }
+    };
+    let requeue_opp_then_fail = |code: StatusCode| -> StatusCode {
+        state
+            .0
+            .lobby
+            .queue
+            .lock()
+            .entry(key.clone())
+            .or_default()
+            .push_front(opp_id);
+        state.0.lobby.tickets.lock().remove(&my_id);
+        code
+    };
+
+    let wager = if let Some(stake) = req.stake.clone() {
+        let white = match opp_addr.clone() {
+            Some(w) => w,
+            // Wagered pairing but the opponent has no wallet (shouldn't happen —
+            // staked tickets are authed): keep me waiting, drop the bad opponent.
+            None => {
+                state.0.lobby.tickets.lock().remove(&opp_id);
+                state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+                return Ok(Json(QueueResp { ticket_id: my_id }));
+            }
+        };
+        let black = match addr.clone() {
+            Some(b) => b,
+            None => return Err(requeue_opp_then_fail(StatusCode::UNAUTHORIZED)),
+        };
+        if white.eq_ignore_ascii_case(&black) {
+            return Err(requeue_opp_then_fail(StatusCode::BAD_REQUEST));
+        }
+        match build_wager(&white, &black, &stake) {
+            Ok(w) => Some(w),
+            Err(e) => return Err(requeue_opp_then_fail(e)),
+        }
+    } else {
+        None
+    };
+
+    // Claim both bots BEFORE creating the game, so we never open a game (or an
+    // escrow) whose engine can't show up.
+    let mut claimed: Vec<String> = Vec::new();
+    let white_delivery = if opp_bot {
+        let w = opp_addr.clone().unwrap_or_default();
+        match state.0.agents.claim(&w) {
+            Ok(tx) => {
+                claimed.push(w.clone());
+                SeatDelivery::Agent { wallet: w, tx, uci_options: opp_uci }
+            }
+            // The opponent's bot went offline/busy since it queued: its ticket
+            // is stale — drop it and put me back to wait for a fresh opponent.
+            Err(_) => {
+                state.0.lobby.tickets.lock().remove(&opp_id);
+                state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+                return Ok(Json(QueueResp { ticket_id: my_id }));
+            }
+        }
+    } else {
+        SeatDelivery::Browser
+    };
+    let black_delivery = if bot {
+        let w = addr.clone().unwrap_or_default();
+        match state.0.agents.claim(&w) {
+            Ok(tx) => {
+                claimed.push(w.clone());
+                SeatDelivery::Agent { wallet: w, tx, uci_options: my_uci }
+            }
+            // My own bot can't play — fail my join, keep the opponent waiting.
+            Err(e) => {
+                release(&claimed);
+                return Err(requeue_opp_then_fail(match e {
+                    AgentUnavailable::Offline => StatusCode::FAILED_DEPENDENCY,
+                    AgentUnavailable::Busy => StatusCode::CONFLICT,
+                }));
+            }
+        }
+    } else {
+        SeatDelivery::Browser
+    };
+
+    // start_game creates the room, locks escrow, and DISPATCHES bot seats — and
+    // aborts (escrow refunded) if an agent vanished, returning Err. On any Err
+    // the claims are released and both players are put back.
+    let resp = match state
+        .start_game(tc, "gauntlet", wager, [opp_meta, my_meta], [white_delivery, black_delivery])
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            release(&claimed);
+            return Err(requeue_opp_then_fail(e));
+        }
+    };
+
+    // Attribute the game's result to any gauntlet sessions involved.
+    let mut links = Vec::new();
+    if let Some(sid) = opp_session {
+        links.push((sid, Color::White));
     }
+    if let Some(sid) = req.session_id {
+        links.push((sid, Color::Black));
+    }
+    if !links.is_empty() {
+        state.0.lobby.game_to_gauntlet.lock().insert(resp.game_id, links);
+    }
+
+    // Mark both tickets matched. A bot-held seat's token stays server-side (the
+    // agent has it); the browser spectates.
+    let mut tickets = state.0.lobby.tickets.lock();
+    if let Some(t) = tickets.get_mut(&opp_id) {
+        t.status = "matched".into();
+        t.game_id = Some(resp.game_id);
+        t.token = (!opp_bot).then(|| resp.white_token.clone());
+        t.color = Some("white".into());
+    }
+    if let Some(t) = tickets.get_mut(&my_id) {
+        t.status = "matched".into();
+        t.game_id = Some(resp.game_id);
+        t.token = (!bot).then_some(resp.black_token);
+        t.color = Some("black".into());
+    }
+    drop(tickets);
 
     Ok(Json(QueueResp { ticket_id: my_id }))
 }
@@ -862,6 +979,9 @@ struct TicketResp {
     game_id: Option<GameId>,
     token: Option<String>,
     color: Option<String>,
+    /// "bot" when this seat was dispatched to the caller's agent (the browser
+    /// should spectate instead of driving the seat); "browser" otherwise.
+    seat: Option<String>,
 }
 
 async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<TicketResp> {
@@ -872,12 +992,14 @@ async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<
             game_id: t.game_id,
             token: t.token.clone(),
             color: t.color.clone(),
+            seat: Some(if t.seat_bot { "bot" } else { "browser" }.into()),
         }),
         None => Json(TicketResp {
             status: "not_found".into(),
             game_id: None,
             token: None,
             color: None,
+            seat: None,
         }),
     }
 }
@@ -1025,11 +1147,29 @@ struct Tournament {
     players: Vec<String>,
     games: Vec<TourneyGame>,
     scores: HashMap<String, f64>,
-    remaining: usize,
+    /// Round-robin schedule (circle method): each inner vec is one round's
+    /// pairings by player id. Games are dispatched one round at a time so that
+    /// no entrant is ever in two games at once (a bot agent plays one game).
+    rounds: Vec<Vec<(String, String)>>,
+    /// Index of the round currently in progress.
+    current_round: usize,
+    /// Real (non-forfeit) games still unfinished in the current round; when it
+    /// hits 0 the next round is dispatched (or the pool settles).
+    round_remaining: usize,
+    /// Entrants whose seat is played by their connected agent (player id ->
+    /// dispatch info). In-memory only — a restart abandons in-flight tournaments.
+    entrant_bots: HashMap<String, BotEntry>,
     /// For a root-settled (large) tournament: the payout leaves, so the server
     /// can serve Merkle proofs to claimers. (addr, amount in base units)
     payout_leaves: Vec<(String, u128)>,
     created_at: Instant,
+}
+
+/// Dispatch info for a bot entrant (its seat is played by its connected agent).
+#[derive(Clone)]
+struct BotEntry {
+    wallet: String,
+    uci_options: Vec<(String, String)>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1037,6 +1177,8 @@ struct TourneyGame {
     game_id: GameId,
     white: String,
     black: String,
+    /// 0-based round this game belongs to.
+    round: usize,
     // Launch tokens are seat capabilities — never serialize them into the public
     // tournament view. Each entrant fetches only its own via GET
     // /tournaments/{id}/my-games (authenticated). Leaking them lets anyone play
@@ -1045,6 +1187,46 @@ struct TourneyGame {
     white_token: String,
     #[serde(skip)]
     black_token: String,
+}
+
+/// Round-robin schedule by the circle method: for `n` entrants, produce `n-1`
+/// rounds (n even) or `n` rounds (n odd — one bye per round), each pairing every
+/// entrant at most once and every distinct pair exactly once overall. Pairings
+/// are index pairs into a `0..n` entrant list.
+fn round_robin_rounds(n: usize) -> Vec<Vec<(usize, usize)>> {
+    if n < 2 {
+        return Vec::new();
+    }
+    let bye = n % 2 == 1;
+    let m = if bye { n + 1 } else { n }; // even count; index `n` is the bye seat
+    let mut arr: Vec<usize> = (0..m).collect();
+    let mut schedule = Vec::with_capacity(m - 1);
+    for _ in 0..m - 1 {
+        let mut round = Vec::with_capacity(m / 2);
+        for i in 0..m / 2 {
+            let (a, b) = (arr[i], arr[m - 1 - i]);
+            // Skip any pairing that involves the bye seat (index == n).
+            if a < n && b < n {
+                round.push((a, b));
+            }
+        }
+        schedule.push(round);
+        // Fix arr[0], rotate the rest right by one (the circle method).
+        arr[1..].rotate_right(1);
+    }
+    schedule
+}
+
+/// Apply a game (or forfeit) result to tournament standings.
+fn score_pair(scores: &mut HashMap<String, f64>, white: &str, black: &str, winner: Option<Color>) {
+    match winner {
+        Some(Color::White) => *scores.entry(white.to_string()).or_insert(0.0) += 1.0,
+        Some(Color::Black) => *scores.entry(black.to_string()).or_insert(0.0) += 1.0,
+        None => {
+            *scores.entry(white.to_string()).or_insert(0.0) += 0.5;
+            *scores.entry(black.to_string()).or_insert(0.0) += 0.5;
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1112,7 +1294,10 @@ async fn tourney_create(
             players: Vec::new(),
             games: Vec::new(),
             scores: HashMap::new(),
-            remaining: 0,
+            rounds: Vec::new(),
+            current_round: 0,
+            round_remaining: 0,
+            entrant_bots: HashMap::new(),
             payout_leaves: Vec::new(),
             created_at: Instant::now(),
         },
@@ -1160,6 +1345,10 @@ struct JoinReq {
     /// Display name for a casual tournament (ignored for buy-in tournaments,
     /// where the entrant is the authenticated wallet).
     player: Option<String>,
+    /// "bot" seats the entrant's connected agent for all of its games.
+    seat: Option<String>,
+    /// UCI option overrides for a bot entrant (applied per game).
+    uci_options: Option<HashMap<String, String>>,
 }
 
 async fn tourney_join(
@@ -1192,12 +1381,18 @@ async fn tourney_join(
         return StatusCode::CONFLICT; // entrant cap reached
     }
 
+    let bot = is_bot_seat(&req.seat);
     // Buy-in tournament: entrant is the authenticated wallet; lock on-chain.
     if let Some(buy_in_str) = buy_in {
         let wallet = match state.authed_wallet(&headers) {
             Some(w) => w,
             None => return StatusCode::UNAUTHORIZED,
         };
+        // A bot entrant must be online BEFORE we lock the buy-in on-chain — never
+        // stake USDC for an engine that can't show up.
+        if bot && state.0.agents.view(&wallet).is_none() {
+            return StatusCode::FAILED_DEPENDENCY; // 424: bot offline
+        }
         // Already entered? (avoid a duplicate on-chain entry).
         {
             let t = state.0.lobby.tournaments.lock();
@@ -1219,7 +1414,16 @@ async fn tourney_join(
             let mut t = state.0.lobby.tournaments.lock();
             if let Some(t) = t.get_mut(&id) {
                 if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
-                    t.players.push(wallet);
+                    t.players.push(wallet.clone());
+                }
+                if bot {
+                    t.entrant_bots.insert(
+                        wallet.clone(),
+                        BotEntry {
+                            wallet,
+                            uci_options: clean_uci_options(req.uci_options),
+                        },
+                    );
                 }
             }
         }
@@ -1232,11 +1436,38 @@ async fn tourney_join(
             Some(n) => n,
             None => return StatusCode::BAD_REQUEST,
         };
+        // A casual bot entrant is still wallet-bound (the agent is), so it needs
+        // auth + an online bot, even though the tournament itself is free.
+        let bot_wallet = if bot {
+            let wallet = match state.authed_wallet(&headers) {
+                Some(w) => w,
+                None => return StatusCode::UNAUTHORIZED,
+            };
+            if state.0.agents.view(&wallet).is_none() {
+                return StatusCode::FAILED_DEPENDENCY; // 424: bot offline
+            }
+            Some(wallet)
+        } else {
+            None
+        };
         {
             let mut t = state.0.lobby.tournaments.lock();
             if let Some(t) = t.get_mut(&id) {
-                if !t.players.contains(&name) {
-                    t.players.push(name);
+                // Names are the entrant identity in a casual tournament (and the
+                // entrant_bots key), so they must be unique — otherwise a later
+                // joiner reusing a name would hijack the existing entrant's seat.
+                if t.players.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+                    return StatusCode::CONFLICT; // 409: display name already taken
+                }
+                t.players.push(name.clone());
+                if let Some(wallet) = bot_wallet {
+                    t.entrant_bots.insert(
+                        name,
+                        BotEntry {
+                            wallet,
+                            uci_options: clean_uci_options(req.uci_options),
+                        },
+                    );
                 }
             }
         }
@@ -1252,6 +1483,11 @@ struct TourneyView {
     status: String,
     players: Vec<String>,
     games: Vec<TourneyGame>,
+    /// Round currently in progress (games carry their own `round`), so a client
+    /// can pick out the active game to play/spectate.
+    current_round: usize,
+    /// Total rounds in the schedule (0 until started).
+    total_rounds: usize,
 }
 
 async fn tourney_get(
@@ -1266,6 +1502,8 @@ async fn tourney_get(
         status: t.status.clone(),
         players: t.players.clone(),
         games: t.games.clone(),
+        current_round: t.current_round,
+        total_rounds: t.rounds.len(),
     }))
 }
 
@@ -1278,8 +1516,14 @@ async fn tourney_list(State(state): State<AppState>) -> Json<Vec<IdResp>> {
 struct MyGame {
     game_id: GameId,
     color: String, // "white" | "black"
+    /// Empty when this seat is played by the caller's bot — the browser should
+    /// spectate `game_id` rather than connect with a token.
     token: String,
     opponent: String,
+    /// 0-based round this game belongs to.
+    round: usize,
+    /// "bot" | "browser".
+    seat: String,
 }
 
 #[derive(Deserialize)]
@@ -1310,42 +1554,53 @@ async fn tourney_my_games(
     } else {
         q.player.ok_or(StatusCode::BAD_REQUEST)?
     };
+    // A bot entrant's seats are played by its agent — hand the browser no token
+    // (it spectates); a browser entrant gets its real launch token.
+    let is_bot = t.entrant_bots.contains_key(&me);
+    let seat = if is_bot { "bot" } else { "browser" };
+    let tok = |real: &str| if is_bot { String::new() } else { real.to_string() };
     let mut mine = Vec::new();
     for g in &t.games {
         if g.white.eq_ignore_ascii_case(&me) {
             mine.push(MyGame {
                 game_id: g.game_id,
                 color: "white".into(),
-                token: g.white_token.clone(),
+                token: tok(&g.white_token),
                 opponent: g.black.clone(),
+                round: g.round,
+                seat: seat.into(),
             });
         } else if g.black.eq_ignore_ascii_case(&me) {
             mine.push(MyGame {
                 game_id: g.game_id,
                 color: "black".into(),
-                token: g.black_token.clone(),
+                token: tok(&g.black_token),
                 opponent: g.white.clone(),
+                round: g.round,
+                seat: seat.into(),
             });
         }
     }
     Ok(Json(mine))
 }
 
-/// Start a round-robin: every player pairs with every other once. The games
-/// themselves are unwagered — the buy-in *pool* is the money, and game results
-/// only decide standings for the on-chain payout. Organizer-authenticated: an
-/// anonymous caller must not be able to lock the field before it fills.
+/// Start a round-robin tournament. Games are dispatched **one round at a time**
+/// (circle-method schedule), so no entrant is ever in two games at once — that's
+/// what lets a bot entrant (a single agent) play, and it also stops the games a
+/// player isn't in yet from being reaped before they're played. Games are
+/// unwagered; the buy-in *pool* is the money, decided by final standings.
+/// Organizer-authenticated for buy-in tournaments.
 async fn tourney_start(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
-    // Drain: reject before generating the round-robin (spawns many games).
+    // Drain: reject before spawning any games.
     state.reject_if_draining()?;
     let caller = state.authed_wallet(&headers);
-    let (players, tc) = {
-        let mut t = state.0.lobby.tournaments.lock();
-        let t = t.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+    {
+        let mut ts = state.0.lobby.tournaments.lock();
+        let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
         // Buy-in tournaments (money at stake) may only be started by the
         // organizer — an anonymous caller must not lock the field before it
         // fills. Casual tournaments have no pool, so anyone may start.
@@ -1361,15 +1616,89 @@ async fn tourney_start(
         if t.status != "open" || t.players.len() < 2 {
             return Err(StatusCode::CONFLICT);
         }
+        validate_tc(t.initial_secs, t.increment_secs)?;
+        // Build the round schedule by player id, then start at round 0.
+        let players = t.players.clone();
+        t.rounds = round_robin_rounds(players.len())
+            .iter()
+            .map(|round| {
+                round
+                    .iter()
+                    .map(|&(i, j)| (players[i].clone(), players[j].clone()))
+                    .collect()
+            })
+            .collect();
+        t.current_round = 0;
         t.status = "running".into();
-        (
-            t.players.clone(),
-            validate_tc(t.initial_secs, t.increment_secs)?,
-        )
+    }
+    if let Some(db) = &state.0.db {
+        let _ = db.set_tournament_status(id, "running").await;
+    }
+
+    // Dispatch the first round (skipping any all-forfeit rounds; settling if the
+    // schedule is empty). Subsequent rounds are dispatched by results_task as
+    // each round finishes.
+    dispatch_from_current(&state, id).await;
+
+    let games = state
+        .0
+        .lobby
+        .tournaments
+        .lock()
+        .get(&id)
+        .map(|t| t.games.clone())
+        .unwrap_or_default();
+    Ok(Json(games))
+}
+
+/// Dispatch the tournament's current round; if it produced no real games (all
+/// forfeits, or nothing left), advance and try the next — settling the pool once
+/// the schedule is exhausted. Called on start and after each round finishes.
+async fn dispatch_from_current(state: &AppState, tid: Uuid) {
+    loop {
+        let round_idx = {
+            let ts = state.0.lobby.tournaments.lock();
+            match ts.get(&tid) {
+                Some(t) if t.status == "running" => {
+                    (t.current_round < t.rounds.len()).then_some(t.current_round)
+                }
+                _ => return, // gone, abandoned, or already settled
+            }
+        };
+        let Some(round_idx) = round_idx else {
+            // Schedule exhausted → complete + settle the pool.
+            if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+                t.status = "complete".into();
+            }
+            settle_tournament(state, tid).await;
+            return;
+        };
+        if dispatch_round(state, tid, round_idx).await > 0 {
+            return; // games in flight; results_task advances when they finish
+        }
+        // All-forfeit (or empty) round → advance and try the next.
+        if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+            t.current_round += 1;
+        }
+    }
+}
+
+/// Dispatch every pairing of round `round_idx`: create a game per pairing whose
+/// seats can be filled, and immediately FORFEIT any pairing where a bot seat is
+/// offline/busy (its opponent wins; both unavailable ⇒ draw). Sets
+/// `round_remaining` to (and returns) the number of real games created.
+async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize {
+    // Snapshot pairings + tc + bot entrants (never hold the lock across .await).
+    let (pairings, tc, bots) = {
+        let ts = state.0.lobby.tournaments.lock();
+        let Some(t) = ts.get(&tid) else { return 0 };
+        let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
+        let Ok(tc) = validate_tc(t.initial_secs, t.increment_secs) else {
+            return 0;
+        };
+        (pairings, tc, t.entrant_bots.clone())
     };
 
-    // Entrant identity for display: buy-in entrants are wallet addresses
-    // (shorten them); casual entrants chose a display name.
     let seat_meta = |p: &str| SeatMeta {
         name: Some(if p.starts_with("0x") && p.len() == 42 {
             short_addr(p)
@@ -1378,64 +1707,120 @@ async fn tourney_start(
         }),
         engine: None,
     };
-    let mut games = Vec::new();
-    for i in 0..players.len() {
-        for j in (i + 1)..players.len() {
-            let resp = match state
-                .start_game(
-                    tc,
-                    "tournament",
-                    None,
-                    [seat_meta(&players[i]), seat_meta(&players[j])],
-                    [SeatDelivery::Browser, SeatDelivery::Browser],
-                )
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    // A mid-loop failure (e.g. a drain toggled on between the
-                    // top guard and here) would otherwise leave the tournament
-                    // stuck "running" forever. Reset it to "open" so it can be
-                    // retried once the drain lifts; already-spawned, never-
-                    // started rooms reap themselves.
-                    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
-                        t.status = "open".into();
-                    }
-                    return Err(e);
+    // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
+    // A claimed wallet is pushed onto `claimed` for rollback.
+    let make_seat = |id: &str, claimed: &mut Vec<String>| -> Result<SeatDelivery, ()> {
+        match bots.get(id) {
+            None => Ok(SeatDelivery::Browser),
+            Some(be) => match state.0.agents.claim(&be.wallet) {
+                Ok(tx) => {
+                    claimed.push(be.wallet.clone());
+                    Ok(SeatDelivery::Agent {
+                        wallet: be.wallet.clone(),
+                        tx,
+                        uci_options: be.uci_options.clone(),
+                    })
                 }
-            };
-            games.push(TourneyGame {
-                game_id: resp.game_id,
-                white: players[i].clone(),
-                black: players[j].clone(),
-                white_token: resp.white_token,
-                black_token: resp.black_token,
-            });
+                Err(_) => Err(()),
+            },
+        }
+    };
+
+    let mut created: Vec<TourneyGame> = Vec::new();
+    let mut forfeits: Vec<(String, String, Option<Color>)> = Vec::new();
+    for (white, black) in pairings {
+        let mut claimed: Vec<String> = Vec::new();
+        let wd = make_seat(&white, &mut claimed);
+        let bd = make_seat(&black, &mut claimed);
+        let release = |claimed: &[String]| {
+            for w in claimed {
+                state.0.agents.release(w);
+            }
+        };
+        match (wd, bd) {
+            (Ok(wd), Ok(bd)) => {
+                match state
+                    .start_game(
+                        tc,
+                        "tournament",
+                        None,
+                        [seat_meta(&white), seat_meta(&black)],
+                        [wd, bd],
+                    )
+                    .await
+                {
+                    Ok(resp) => created.push(TourneyGame {
+                        game_id: resp.game_id,
+                        white: white.clone(),
+                        black: black.clone(),
+                        round: round_idx,
+                        white_token: resp.white_token,
+                        black_token: resp.black_token,
+                    }),
+                    // start_game aborted (an agent vanished after claim): neither
+                    // side got to play → score it a draw; release our claims.
+                    Err(_) => {
+                        release(&claimed);
+                        forfeits.push((white, black, None));
+                    }
+                }
+            }
+            (Err(()), Ok(_)) => {
+                release(&claimed); // black was claimed; white's bot is absent
+                forfeits.push((white, black, Some(Color::Black)));
+            }
+            (Ok(_), Err(())) => {
+                release(&claimed);
+                forfeits.push((white, black, Some(Color::White)));
+            }
+            (Err(()), Err(())) => forfeits.push((white, black, None)),
         }
     }
 
-    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
-        t.games = games.clone();
-        t.remaining = games.len();
-    }
-    // Register each game to the tournament so the results dispatcher can score it.
+    // Apply forfeit scores + record the created games (under the lock).
+    // Ordering matters. Register routing (game_to_tournament) FIRST and record
+    // the games, THEN set round_remaining to the count still unresolved. A real
+    // game can't finish in this sub-ms window, but doing it the other way would
+    // let a game that finished during dispatch drop its outcome and stall the
+    // round forever; this keeps it correct regardless.
     {
         let mut map = state.0.lobby.game_to_tournament.lock();
-        for g in &games {
-            map.insert(g.game_id, id);
+        for g in &created {
+            map.insert(g.game_id, tid);
         }
     }
-    // Persist the running tournament + its pairings so standings can be
-    // re-derived after a restart (see recover_tournaments).
+    {
+        let mut ts = state.0.lobby.tournaments.lock();
+        if let Some(t) = ts.get_mut(&tid) {
+            for (w, b, winner) in &forfeits {
+                score_pair(&mut t.scores, w, b, *winner);
+            }
+            t.games.extend(created.iter().cloned());
+        }
+    }
+    {
+        // Count only games still unresolved — a game that already finished
+        // removed itself from game_to_tournament. Snapshot that map first (its
+        // own lock, released) to preserve record_outcome's lock order.
+        let live = {
+            let map = state.0.lobby.game_to_tournament.lock();
+            created
+                .iter()
+                .filter(|g| map.contains_key(&g.game_id))
+                .count()
+        };
+        if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+            t.round_remaining = live;
+        }
+    }
     if let Some(db) = &state.0.db {
-        let _ = db.set_tournament_status(id, "running").await;
-        for g in &games {
+        for g in &created {
             let _ = db
-                .add_tournament_game(id, g.game_id, &g.white, &g.black)
+                .add_tournament_game(tid, g.game_id, &g.white, &g.black)
                 .await;
         }
     }
-    Ok(Json(games))
+    created.len()
 }
 
 /// Settle a finished tournament: rank all entrants, compute a top-heavy payout
@@ -1486,56 +1871,22 @@ pub async fn recover_tournaments(state: &AppState) {
         }
     };
     for t in rows {
-        let games = db.tournament_game_results(t.id).await.unwrap_or_default();
-        if games.is_empty() {
-            continue;
-        }
-        let unfinished = games
-            .iter()
-            .filter(|g| g.game_status.as_deref() != Some("finished"))
-            .count();
-        let players: Vec<String> = serde_json::from_value(t.players.clone()).unwrap_or_default();
-
-        if unfinished == 0 {
-            // Re-derive standings from persisted game results, then settle.
-            let mut scores: HashMap<String, f64> = HashMap::new();
-            for g in &games {
-                match g.game_result.as_deref() {
-                    Some("white") => *scores.entry(g.white.clone()).or_insert(0.0) += 1.0,
-                    Some("black") => *scores.entry(g.black.clone()).or_insert(0.0) += 1.0,
-                    Some("draw") => {
-                        *scores.entry(g.white.clone()).or_insert(0.0) += 0.5;
-                        *scores.entry(g.black.clone()).or_insert(0.0) += 0.5;
-                    }
-                    _ => {}
-                }
-            }
-            state.0.lobby.tournaments.lock().insert(
-                t.id,
-                Tournament {
-                    name: "recovered".into(),
-                    buy_in: t.buy_in.clone(),
-                    organizer: None, // recovered tournaments are already past 'open'
-                    initial_secs: 0,
-                    increment_secs: 0,
-                    status: "complete".into(),
-                    players,
-                    games: Vec::new(),
-                    scores,
-                    remaining: 0,
-                    payout_leaves: Vec::new(),
-                    created_at: Instant::now(),
-                },
-            );
-            tracing::info!(tournament = %t.id, "recovered completed tournament — settling by result");
-            settle_tournament(state, t.id).await;
-        } else {
-            tracing::warn!(
-                tournament = %t.id, unfinished,
-                "tournament interrupted by restart — marking abandoned; entrants refund via claimRefund"
-            );
-            let _ = db.set_tournament_status(t.id, "abandoned").await;
-        }
+        // A `running` tournament didn't reach settlement before the restart.
+        // Round-based dispatch persists only the rounds played SO FAR, so
+        // "all persisted games finished" does NOT mean the tournament is
+        // complete — settling here would risk paying the pool out on partial
+        // standings (and the contract's `AlreadySettled` makes that permanent).
+        // Also, forfeit results aren't persisted, so re-derived standings would
+        // be wrong regardless. So we abandon it: entrants recover their buy-in
+        // via the contract's `claimRefund`. A tournament that actually finished
+        // AND enqueued settlement is completed by the durable settlement outbox
+        // (drained separately on boot), which carries the correct standings —
+        // not by this path.
+        tracing::warn!(
+            tournament = %t.id,
+            "tournament interrupted by restart — marking abandoned; entrants refund via claimRefund"
+        );
+        let _ = db.set_tournament_status(t.id, "abandoned").await;
     }
 }
 
@@ -1728,4 +2079,424 @@ async fn tourney_claim_proof(
         amount: amount.to_string(),
         proof: proof.iter().map(|p| format!("{p:#x}")).collect(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::AgentMeta;
+    use crate::{AppState, Inner};
+    use protocol::ServerToAgent;
+    use std::sync::Arc;
+
+    // A minimal in-memory AppState (no DB, log-only settlement) for driving the
+    // matchmaking handlers directly. The returned receivers are kept alive so the
+    // room's cleanup/results senders stay valid for the test's lifetime.
+    fn test_state() -> (
+        AppState,
+        mpsc::Receiver<GameId>,
+        mpsc::Receiver<crate::GameOutcome>,
+    ) {
+        let (cleanup_tx, cleanup_rx) = mpsc::channel(16);
+        let (results_tx, results_rx) = mpsc::channel(16);
+        let state = AppState(Arc::new(Inner {
+            rooms: Mutex::new(HashMap::new()),
+            live_games: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            settlement: ledger::from_env(),
+            db: None,
+            lobby: Lobby::default(),
+            auth: crate::auth::Auth::default(),
+            agents: crate::agents::Agents::default(),
+            limits: crate::ratelimit::RateLimits::from_env(),
+            maintenance: std::sync::atomic::AtomicBool::new(false),
+            admin_wallet: Mutex::new(None),
+            cleanup_tx,
+            results_tx,
+        }));
+        (state, cleanup_rx, results_rx)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    fn bot_req() -> QueueReq {
+        QueueReq {
+            stake: None,
+            initial_secs: 60,
+            increment_secs: 1,
+            session_id: None,
+            name: None,
+            engine: None,
+            seat: Some("bot".into()),
+            uci_options: None,
+        }
+    }
+
+    fn register_bot(state: &AppState, wallet: &str) -> (String, mpsc::Receiver<ServerToAgent>) {
+        let (tx, rx) = mpsc::channel::<ServerToAgent>(8);
+        state.0.agents.register(
+            wallet,
+            AgentMeta {
+                name: "bot".into(),
+                engine: "e".into(),
+                options: vec![],
+            },
+            tx,
+        );
+        (state.0.auth.mint_session(wallet), rx)
+    }
+
+    #[tokio::test]
+    async fn gauntlet_pairs_two_bots_and_dispatches_seats() {
+        let (state, _c, _r) = test_state();
+        let wa = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let wb = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let (ta, mut rx_a) = register_bot(&state, wa);
+        let (tb, mut rx_b) = register_bot(&state, wb);
+
+        // Bot A queues first — no opponent yet, so it only waits (NOT claimed,
+        // NOT dispatched).
+        queue_join(State(state.clone()), bearer(&ta), Json(bot_req()))
+            .await
+            .expect("A join");
+        assert!(rx_a.try_recv().is_err(), "A must not be dispatched while waiting");
+        assert!(state.0.agents.claim(wa).is_ok(), "A not claimed while waiting");
+        state.0.agents.release(wa);
+
+        // Bot B queues — pairs with A; BOTH seats dispatch to their agents.
+        let r2 = queue_join(State(state.clone()), bearer(&tb), Json(bot_req()))
+            .await
+            .expect("B join");
+
+        assert!(
+            matches!(rx_a.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "A (white) got its seat"
+        );
+        assert!(
+            matches!(rx_b.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "B (black) got its seat"
+        );
+
+        // B's ticket is matched, holds NO launch token (its bot has it), seat=bot.
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id)).await.0;
+        assert_eq!(tr.status, "matched");
+        assert!(tr.token.is_none(), "a bot seat's token stays server-side");
+        assert_eq!(tr.seat.as_deref(), Some("bot"));
+
+        // Both agents are now busy (claimed + bound to the game).
+        assert!(state.0.agents.claim(wa).is_err(), "A busy");
+        assert!(state.0.agents.claim(wb).is_err(), "B busy");
+    }
+
+    #[tokio::test]
+    async fn gauntlet_bot_seat_requires_auth() {
+        let (state, _c, _r) = test_state();
+        let err = queue_join(State(state), HeaderMap::new(), Json(bot_req()))
+            .await
+            .err();
+        assert_eq!(err, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn gauntlet_offline_bot_join_is_rejected() {
+        let (state, _c, _r) = test_state();
+        // Authenticated, but no agent connected for this wallet.
+        let token = state
+            .0
+            .auth
+            .mint_session("0xcccccccccccccccccccccccccccccccccccccccc");
+        let err = queue_join(State(state), bearer(&token), Json(bot_req()))
+            .await
+            .err();
+        assert_eq!(err, Some(StatusCode::FAILED_DEPENDENCY)); // 424: bot offline
+    }
+
+    #[tokio::test]
+    async fn gauntlet_casual_browser_still_pairs() {
+        let (state, _c, _r) = test_state();
+        let browser = || QueueReq {
+            stake: None,
+            initial_secs: 60,
+            increment_secs: 1,
+            session_id: None,
+            name: None,
+            engine: None,
+            seat: None,
+            uci_options: None,
+        };
+        queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+            .await
+            .expect("p1");
+        let r2 = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+            .await
+            .expect("p2");
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id)).await.0;
+        assert_eq!(tr.status, "matched");
+        assert!(tr.token.is_some(), "a browser seat gets a launch token");
+        assert_eq!(tr.seat.as_deref(), Some("browser"));
+    }
+
+    #[test]
+    fn round_robin_covers_every_pair_exactly_once() {
+        for n in 2..=9 {
+            let rounds = round_robin_rounds(n);
+            let expected = if n % 2 == 0 { n - 1 } else { n };
+            assert_eq!(rounds.len(), expected, "n={n}: round count");
+            let mut all_pairs = std::collections::HashSet::new();
+            for round in &rounds {
+                let mut seen = std::collections::HashSet::new();
+                for &(a, b) in round {
+                    assert!(a < n && b < n, "n={n}: index in range");
+                    assert!(seen.insert(a) && seen.insert(b), "n={n}: player twice in a round");
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    assert!(all_pairs.insert(key), "n={n}: pair {key:?} repeated");
+                }
+            }
+            assert_eq!(all_pairs.len(), n * (n - 1) / 2, "n={n}: every pair once");
+        }
+    }
+
+    #[tokio::test]
+    async fn tournament_dispatches_bots_round_by_round_then_settles() {
+        let (state, _c, results_rx) = test_state();
+        let wallets = [
+            "0x1111111111111111111111111111111111111111",
+            "0x2222222222222222222222222222222222222222",
+            "0x3333333333333333333333333333333333333333",
+            "0x4444444444444444444444444444444444444444",
+        ];
+        let names = ["Alpha", "Bravo", "Charlie", "Delta"];
+        let mut tokens = Vec::new();
+        let mut rxs = Vec::new();
+        for w in wallets {
+            let (tok, rx) = register_bot(&state, w);
+            tokens.push(tok);
+            rxs.push(rx);
+        }
+
+        // Casual (no buy-in) tournament; join all four as bots.
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        for i in 0..4 {
+            let code = tourney_join(
+                State(state.clone()),
+                Path(tid),
+                bearer(&tokens[i]),
+                Json(JoinReq {
+                    player: Some(names[i].into()),
+                    seat: Some("bot".into()),
+                    uci_options: None,
+                }),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "join {i}");
+        }
+
+        // Start → dispatches round 0 only.
+        tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("start");
+
+        let round_games = |round: usize| -> Vec<GameId> {
+            state
+                .0
+                .lobby
+                .tournaments
+                .lock()
+                .get(&tid)
+                .unwrap()
+                .games
+                .iter()
+                .filter(|g| g.round == round)
+                .map(|g| g.game_id)
+                .collect()
+        };
+
+        // Round 0: 4 players → 2 concurrent games; each bot got exactly one seat.
+        assert_eq!(round_games(0).len(), 2, "round 0 has 2 games");
+        for rx in &mut rxs {
+            assert!(
+                matches!(rx.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+                "each bot is dispatched one seat in round 0"
+            );
+            assert!(rx.try_recv().is_err(), "and only one this round");
+        }
+
+        // Drive every round through the REAL results_task, which mirrors
+        // production: it frees a finished game's bots BEFORE advancing, so the
+        // next round can re-claim them. If that freeing regresses (the T1 race),
+        // round 1+ pairings forfeit, no real games get created, and the
+        // per-round wait below times out — this test is the regression guard.
+        tokio::spawn(results_task(state.clone(), results_rx));
+        let tx = state.0.results_tx.clone();
+        let _ = &mut rxs; // agents keep receiving AssignSeat; we don't assert on it here
+
+        for round in 0..3 {
+            // Wait for this round's two real games to be dispatched.
+            let mut games = Vec::new();
+            for _ in 0..500 {
+                games = round_games(round);
+                if games.len() == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert_eq!(games.len(), 2, "round {round}: two real games (no spurious forfeits)");
+            for gid in games {
+                tx.send(GameOutcome {
+                    game_id: gid,
+                    winner: Some(Color::White),
+                })
+                .await
+                .unwrap();
+            }
+        }
+
+        // The pool settles after the final round.
+        let mut settled = false;
+        for _ in 0..500 {
+            settled = state
+                .0
+                .lobby
+                .tournaments
+                .lock()
+                .get(&tid)
+                .map(|t| t.status == "settled")
+                .unwrap_or(false);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(settled, "tournament settled");
+
+        // 6 games total (C(4,2)), all real + decisive → 6 points distributed.
+        let t = state.0.lobby.tournaments.lock();
+        let t = t.get(&tid).unwrap();
+        assert_eq!(t.games.len(), 6, "full round-robin, all real games");
+        let total: f64 = t.scores.values().sum();
+        assert_eq!(total, 6.0, "6 decisive games distribute 6 points");
+    }
+
+    #[tokio::test]
+    async fn tournament_forfeits_a_pairing_when_a_bot_is_offline() {
+        let (state, _c, _r) = test_state();
+        // Two entrants; only one has an online bot. The offline one forfeits.
+        let (tok_a, _rx_a) = register_bot(&state, "0xaa11111111111111111111111111111111111111");
+        // Bravo authenticates but never connects an agent.
+        let tok_b = state
+            .0
+            .auth
+            .mint_session("0xbb22222222222222222222222222222222222222");
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        // Alpha joins as a bot (online); Bravo tries to join as a bot but is offline → 424.
+        assert_eq!(
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                bearer(&tok_a),
+                Json(JoinReq { player: Some("Alpha".into()), seat: Some("bot".into()), uci_options: None }),
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                bearer(&tok_b),
+                Json(JoinReq { player: Some("Bravo".into()), seat: Some("bot".into()), uci_options: None }),
+            )
+            .await,
+            StatusCode::FAILED_DEPENDENCY,
+            "offline bot can't join"
+        );
+        // Bravo joins as a browser entrant instead.
+        assert_eq!(
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(JoinReq { player: Some("Bravo".into()), seat: None, uci_options: None }),
+            )
+            .await,
+            StatusCode::OK
+        );
+        // Now make Alpha's bot busy so it can't be claimed at dispatch → its
+        // single pairing forfeits to Bravo, the round is empty, tournament settles.
+        assert!(state.0.agents.claim("0xaa11111111111111111111111111111111111111").is_ok());
+        tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("start");
+        let t = state.0.lobby.tournaments.lock();
+        let t = t.get(&tid).unwrap();
+        assert_eq!(t.games.len(), 0, "no game created — the pairing forfeited");
+        assert_eq!(t.status, "settled");
+        assert_eq!(t.scores.get("Bravo").copied(), Some(1.0), "Bravo wins the forfeit");
+    }
+
+    #[tokio::test]
+    async fn tournament_rejects_duplicate_casual_name() {
+        let (state, _c, _r) = test_state();
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        let join = |name: &str| {
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(JoinReq {
+                    player: Some(name.to_string()),
+                    seat: None,
+                    uci_options: None,
+                }),
+            )
+        };
+        assert_eq!(join("Alpha").await, StatusCode::OK);
+        // Reusing a name must be rejected — otherwise a later joiner (esp. a bot)
+        // would hijack the existing entrant's seat/identity.
+        assert_eq!(join("Alpha").await, StatusCode::CONFLICT);
+        assert_eq!(join("alpha").await, StatusCode::CONFLICT, "case-insensitive");
+    }
 }

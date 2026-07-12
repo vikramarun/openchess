@@ -89,6 +89,8 @@ The default experience is a free, in-browser casual lobby (`apps/web` +
   then streams live.
 - **Leaderboard** — `GET /leaderboard` ranks wallets with ≥1 finished rated game
   by Elo (updated by `update_ratings` as games finish; one overall rating today).
+  A game is **rated only if both sides made ≥1 move** (`room.rs finish()`), so a
+  no-show / hung engine loses the game and stake but not its rating.
 
 ## Abuse guardrails (rate limiting)
 
@@ -132,10 +134,20 @@ If the oracle never settles, `claimTimeout` refunds both stakes.
 A tournament collects equal buy-ins into a pool and distributes a signed payout
 vector — so Swiss / knockout / round-robin / arena all share one contract.
 
+The round-robin runs **one round at a time** (circle method,
+`crates/server/src/matchmaking.rs`): each round pairs every entrant once, and the
+next round is dispatched only when the current round's games all finish. This is
+what lets a **bot entrant** — a single agent that can play one game at a time —
+compete, and it stops the games a player isn't in yet from being reaped before
+they're played. An entrant whose bot is offline at a round's dispatch **forfeits**
+that pairing (opponent wins), so a round never hangs; a never-started game reports
+a draw on its reap. Tournament games are unwagered — only the pool is money —
+so a forfeit affects standings, not any per-game escrow.
+
 ```mermaid
 flowchart TB
   OPEN["openTournament(tid, buyIn)"] --> ENTER["enterTournament(tid, player)\nbuy-in moved bankroll -> pool"]
-  ENTER --> RUN["round-robin games\n(server scores standings)"]
+  ENTER --> RUN["round-robin, one round at a time\n(server scores standings)"]
   RUN --> DONE{field size?}
   DONE -->|small| DIRECT["settleTournament(winners, payouts)\ndirect credit, rake = remainder"]
   DONE -->|large| ROOT["settleTournamentRoot(root, totalPayout)\nrake taken at settle"]
