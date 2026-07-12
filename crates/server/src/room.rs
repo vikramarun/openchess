@@ -609,6 +609,8 @@ impl Room {
                 game_id: self.game_id,
                 winner: result.winner,
                 plies: ply,
+                white_showed_up: self.white_occupied && self.wready,
+                black_showed_up: self.black_occupied && self.bready,
             })
             .await;
 
