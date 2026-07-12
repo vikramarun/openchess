@@ -9,7 +9,7 @@ import { BankrollPanel } from "@/components/BankrollPanel";
 import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { shortAddress } from "@/lib/address";
-import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
+import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
@@ -91,7 +91,6 @@ export function Lobby() {
   const [creating, setCreating] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   const [active, setActive] = useState<Active | null>(null);
-  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
   const [useBot, setUseBot] = useState(true); // prefer the bot when it's online
 
   useEffect(() => {
@@ -101,18 +100,7 @@ export function Lobby() {
     setToken(authToken());
   }, [address, isConnected]);
 
-  // Poll the connected bot's status while signed in.
-  useEffect(() => {
-    if (!token) return setBot(BOT_OFFLINE);
-    let alive = true;
-    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
-    tick();
-    const t = setInterval(tick, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [token]);
+  const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
 
   // Poll open challenges + live games while in the lobby.

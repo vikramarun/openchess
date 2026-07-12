@@ -198,6 +198,28 @@ fn clean_uci_options(opts: Option<HashMap<String, String>>) -> Vec<(String, Stri
         .collect()
 }
 
+/// Claim the wallet's agent for a bot seat: on success returns the
+/// `SeatDelivery::Agent` and records the claimed wallet in `claimed` (so a later
+/// failure can release exactly the agents this game claimed); on failure returns
+/// the `AgentUnavailable` for the caller to map to its own recovery. Every mode
+/// (park / gauntlet / tournament) claims bot seats through this one path, so the
+/// claim/release accounting stays consistent. Non-bot seats use
+/// `SeatDelivery::Browser` directly and never call this.
+fn claim_agent_seat(
+    agents: &crate::agents::Agents,
+    wallet: String,
+    uci_options: Vec<(String, String)>,
+    claimed: &mut Vec<String>,
+) -> Result<SeatDelivery, AgentUnavailable> {
+    let tx = agents.claim(&wallet)?;
+    claimed.push(wallet.clone());
+    Ok(SeatDelivery::Agent {
+        wallet,
+        tx,
+        uci_options,
+    })
+}
+
 // Seat dispatch itself lives in `AppState::start_game` (a `SeatDelivery` per
 // seat), so every mode shares one claim/dispatch/rollback implementation.
 
@@ -527,15 +549,8 @@ async fn park_accept(
     // an escrow) whose engine can't show up.
     let poster_delivery = if poster_bot {
         let wallet = poster_addr.clone().unwrap_or_default();
-        match state.0.agents.claim(&wallet) {
-            Ok(tx) => {
-                claimed.push(wallet.clone());
-                SeatDelivery::Agent {
-                    wallet,
-                    tx,
-                    uci_options: poster_uci,
-                }
-            }
+        match claim_agent_seat(&state.0.agents, wallet, poster_uci, &mut claimed) {
+            Ok(d) => d,
             // Mid-game is not gone: keep the offer open, tell the acceptor to
             // retry (mirrors the acceptor arm below).
             Err(AgentUnavailable::Busy) => {
@@ -554,18 +569,13 @@ async fn park_accept(
     let (acceptor_delivery, acceptor_agent_meta) = if acceptor_bot {
         let wallet = acceptor_wallet.clone().unwrap_or_default();
         let meta = state.0.agents.view(&wallet).map(|(m, _)| m);
-        match state.0.agents.claim(&wallet) {
-            Ok(tx) => {
-                claimed.push(wallet.clone());
-                (
-                    SeatDelivery::Agent {
-                        wallet,
-                        tx,
-                        uci_options: clean_uci_options(req.uci_options),
-                    },
-                    meta,
-                )
-            }
+        match claim_agent_seat(
+            &state.0.agents,
+            wallet,
+            clean_uci_options(req.uci_options),
+            &mut claimed,
+        ) {
+            Ok(d) => (d, meta),
             Err(e) => {
                 release(&claimed);
                 unclaim();
@@ -891,11 +901,8 @@ async fn queue_join(
     let mut claimed: Vec<String> = Vec::new();
     let white_delivery = if opp_bot {
         let w = opp_addr.clone().unwrap_or_default();
-        match state.0.agents.claim(&w) {
-            Ok(tx) => {
-                claimed.push(w.clone());
-                SeatDelivery::Agent { wallet: w, tx, uci_options: opp_uci }
-            }
+        match claim_agent_seat(&state.0.agents, w, opp_uci, &mut claimed) {
+            Ok(d) => d,
             // The opponent's bot went offline/busy since it queued: its ticket
             // is stale — drop it and put me back to wait for a fresh opponent.
             Err(_) => {
@@ -909,11 +916,8 @@ async fn queue_join(
     };
     let black_delivery = if bot {
         let w = addr.clone().unwrap_or_default();
-        match state.0.agents.claim(&w) {
-            Ok(tx) => {
-                claimed.push(w.clone());
-                SeatDelivery::Agent { wallet: w, tx, uci_options: my_uci }
-            }
+        match claim_agent_seat(&state.0.agents, w, my_uci, &mut claimed) {
+            Ok(d) => d,
             // My own bot can't play — fail my join, keep the opponent waiting.
             Err(e) => {
                 release(&claimed);
@@ -1712,17 +1716,10 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
     let make_seat = |id: &str, claimed: &mut Vec<String>| -> Result<SeatDelivery, ()> {
         match bots.get(id) {
             None => Ok(SeatDelivery::Browser),
-            Some(be) => match state.0.agents.claim(&be.wallet) {
-                Ok(tx) => {
-                    claimed.push(be.wallet.clone());
-                    Ok(SeatDelivery::Agent {
-                        wallet: be.wallet.clone(),
-                        tx,
-                        uci_options: be.uci_options.clone(),
-                    })
-                }
-                Err(_) => Err(()),
-            },
+            Some(be) => {
+                claim_agent_seat(&state.0.agents, be.wallet.clone(), be.uci_options.clone(), claimed)
+                    .map_err(|_| ())
+            }
         }
     };
 
@@ -2498,5 +2495,59 @@ mod tests {
         // would hijack the existing entrant's seat/identity.
         assert_eq!(join("Alpha").await, StatusCode::CONFLICT);
         assert_eq!(join("alpha").await, StatusCode::CONFLICT, "case-insensitive");
+    }
+
+    #[tokio::test]
+    async fn park_bot_vs_bot_dispatches_both_seats() {
+        // Covers the third `claim_agent_seat` call site (park_accept) that the
+        // gauntlet/tournament tests don't touch.
+        let (state, _c, _r) = test_state();
+        let wa = "0xaa00000000000000000000000000000000000001";
+        let wb = "0xbb00000000000000000000000000000000000002";
+        let (tok_a, mut rx_a) = register_bot(&state, wa);
+        let (tok_b, mut rx_b) = register_bot(&state, wb);
+
+        // Bot A posts a park offer as a bot.
+        let offer_id = park_create(
+            State(state.clone()),
+            bearer(&tok_a),
+            Json(ParkCreateReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: Some("bot".into()),
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .offer_id;
+
+        // Bot B accepts it as a bot → both seats dispatch to their agents.
+        let resp = park_accept(
+            State(state.clone()),
+            Path(offer_id),
+            bearer(&tok_b),
+            Some(Json(ParkAcceptReq {
+                name: None,
+                engine: None,
+                seat: Some("bot".into()),
+                uci_options: None,
+            })),
+        )
+        .await
+        .expect("accept")
+        .0;
+
+        // A bot seat keeps its token server-side; the browser spectates.
+        assert!(resp.token.is_none(), "bot acceptor gets no launch token");
+        assert_eq!(resp.seat, "bot");
+        assert!(matches!(rx_a.try_recv(), Ok(ServerToAgent::AssignSeat { .. })), "poster bot seated");
+        assert!(matches!(rx_b.try_recv(), Ok(ServerToAgent::AssignSeat { .. })), "acceptor bot seated");
+        assert!(state.0.agents.claim(wa).is_err(), "poster busy");
+        assert!(state.0.agents.claim(wb).is_err(), "acceptor busy");
     }
 }

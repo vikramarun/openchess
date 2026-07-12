@@ -6,7 +6,7 @@ import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
-import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
+import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
@@ -52,7 +52,6 @@ function GauntletClient() {
   const [round, setRound] = useState(0); // bump to re-queue after a game
   const [searching, setSearching] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
   const [useBot, setUseBot] = useState(true); // prefer the connected bot when online
   // Set while the connected bot (not this browser) is playing the current game.
   const [spectate, setSpectate] = useState<{ gameId: string; atGames: number } | null>(null);
@@ -66,18 +65,7 @@ function GauntletClient() {
     setToken(authToken());
   }, [address, isConnected]);
 
-  // Poll the connected bot's status while signed in.
-  useEffect(() => {
-    if (!token) return setBot(BOT_OFFLINE);
-    let alive = true;
-    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
-    tick();
-    const t = setInterval(tick, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [token]);
+  const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
   useEffect(() => {
     gamesRef.current = stats?.games ?? 0;

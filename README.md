@@ -72,7 +72,7 @@ Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
 
 ## Status
 
-**76 automated tests pass** (51 Rust + 25 Foundry). Three audit rounds
+**77 automated tests pass** (52 Rust + 25 Foundry). Three audit rounds
 ([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated. CI
 (`.github/workflows/ci.yml`) runs Postgres + `forge test` + `cargo test` + the
 web build on every push.

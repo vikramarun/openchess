@@ -85,7 +85,7 @@ docs.
   if it was contested — both sides made ≥1 move** (`ply >= 2`); a no-show, or an
   engine that connects then hangs and flags without moving, loses the game/stake
   but its **Elo is untouched**. Single guard in `room.rs finish()`.
-- **Tests:** 51 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
+- **Tests:** 52 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
   `pnpm -C apps/web test:book` (polyglot spec vectors). CI in
   `.github/workflows/ci.yml`; releases in `release.yml`.
 

@@ -6,7 +6,7 @@ import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
-import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
+import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
@@ -60,7 +60,6 @@ function TournamentClient() {
   const [token, setToken] = useState<string | null>(null);
   const [tourneys, setTourneys] = useState<Tourney[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
   // Tournaments this browser entered with its connected bot (→ spectate).
   const [joinedAsBot, setJoinedAsBot] = useState<Record<string, boolean>>({});
 
@@ -83,18 +82,7 @@ function TournamentClient() {
     setToken(authToken());
   }, [address, isConnected]);
 
-  // Poll the connected bot's status while signed in.
-  useEffect(() => {
-    if (!token) return setBot(BOT_OFFLINE);
-    let alive = true;
-    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
-    tick();
-    const t = setInterval(tick, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [token]);
+  const bot = useBotStatus(token);
 
   // Poll tournaments. In the lobby, refresh the whole list; while playing or
   // spectating, refresh ONLY the active tournament (so new rounds appear) rather
