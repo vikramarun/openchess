@@ -33,5 +33,8 @@ export async function signInWithEthereum(
   if (!resp.ok) throw new Error(`sign-in failed (${resp.status})`);
   const { token } = await resp.json();
   localStorage.setItem("chess_token", token);
+  // Bind the session to the wallet it was issued for, so a disconnect or account
+  // switch can invalidate a stale token (see clearAuth / authAddress in escrow.ts).
+  localStorage.setItem("chess_addr", address.toLowerCase());
   return token;
 }

@@ -5,8 +5,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
-import { BankrollPanel } from "@/components/BankrollPanel";
-import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
@@ -345,7 +343,7 @@ export function Lobby() {
                 <>
                   {" "}
                   Want your own engine to play instead?{" "}
-                  <Link href="/connect">Connect it</Link>.
+                  <Link href="/profile">Connect it</Link>.
                 </>
               )}
             </div>
@@ -502,15 +500,6 @@ export function Lobby() {
           </table>
         )}
       </div>
-
-      {/* Personalize the in-browser bot (name / opening book). Hidden
-          only while the native connected bot is the chosen seat driver. */}
-      {!botPlays && <BrowserBotPanel />}
-
-      {/* Optional: deposit for staked play */}
-      {wagerOn && config?.escrow && (
-        <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
-      )}
 
       {/* Stake modal (opens after picking a time control) */}
       {pickTc && (

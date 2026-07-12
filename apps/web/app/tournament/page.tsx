@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useAccount } from "wagmi";
 
-import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
@@ -414,12 +413,6 @@ function TournamentClient() {
           <li>If it never settles, every entrant reclaims their buy-in after a timeout.</li>
         </ol>
       </div>
-
-      {wagerOn && config?.escrow && (
-        <div style={{ marginBottom: 16 }}>
-          <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
-        </div>
-      )}
 
       <div className="panel" style={{ marginBottom: 16 }}>
         <b style={{ color: "var(--text-strong)" }}>Create a tournament</b>

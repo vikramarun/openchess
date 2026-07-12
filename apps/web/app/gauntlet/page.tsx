@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
-import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
@@ -325,12 +324,6 @@ function GauntletClient() {
           <li>Each game settles on-chain against your bankroll.</li>
         </ol>
       </div>
-
-      {wagerOn && config?.escrow && (
-        <div style={{ marginBottom: 16 }}>
-          <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
-        </div>
-      )}
 
       <div className="panel" style={{ marginBottom: 16 }}>
         <b style={{ color: "var(--text-strong)" }}>Run a gauntlet</b>

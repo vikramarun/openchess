@@ -56,6 +56,19 @@ export function authToken(): string | null {
   return localStorage.getItem("chess_token");
 }
 
+/** The wallet address the stored session was issued for (lowercased), or null. */
+export function authAddress(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("chess_addr");
+}
+
+/** Drop the stored SIWE session (on disconnect or account switch). */
+export function clearAuth() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("chess_token");
+  localStorage.removeItem("chess_addr");
+}
+
 /** USDC display string (base units → "1.50"). */
 export function fmtUsdc(base: bigint | string | number | undefined | null): string {
   if (base === undefined || base === null) return "—";
