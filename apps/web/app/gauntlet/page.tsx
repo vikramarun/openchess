@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
-import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
@@ -39,9 +39,8 @@ export default function GauntletPage() {
 }
 
 function GauntletClient() {
-  const { address, isConnected } = useAccount();
+  const token = useAuthToken();
   const [config, setConfig] = useState<OnchainConfig | null>(null);
-  const [token, setToken] = useState<string | null>(null);
 
   const [stake, setStake] = useState("");
   const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
@@ -60,9 +59,6 @@ function GauntletClient() {
   useEffect(() => {
     fetchConfig().then(setConfig);
   }, []);
-  useEffect(() => {
-    setToken(authToken());
-  }, [address, isConnected]);
 
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
@@ -387,7 +383,7 @@ function GauntletClient() {
         {startUnderfunded && stakeBig != null && (
           <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>
             Available balance {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(stakeBig)} per game —
-            deposit more above.
+            deposit more from the wallet menu (top right).
           </div>
         )}
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}

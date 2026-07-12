@@ -209,6 +209,20 @@ a:hover {
   color: var(--danger);
   font-size: 13px;
 }
+.wrong-net {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.wrong-net:hover {
+  background: var(--danger);
+  color: #fff;
+}
 
 /* ---------- layout ---------- */
 .container {

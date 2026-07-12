@@ -10,7 +10,8 @@ import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
-import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
@@ -77,9 +78,9 @@ const seatLabel = (name: string | null, addr: string | null, fallback: string) =
  *  challenge (your engine vs theirs), watch games in progress, or stake USDC. */
 export function Lobby() {
   const router = useRouter();
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
+  const token = useAuthToken();
   const [config, setConfig] = useState<OnchainConfig | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [live, setLive] = useState<LiveGame[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -94,9 +95,6 @@ export function Lobby() {
   useEffect(() => {
     fetchConfig().then(setConfig);
   }, []);
-  useEffect(() => {
-    setToken(authToken());
-  }, [address, isConnected]);
 
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;

@@ -50,6 +50,15 @@ export async function fetchConfig(): Promise<OnchainConfig> {
   return configCache;
 }
 
+/** Fired (same-tab) whenever the stored session changes, so useAuthToken
+ *  subscribers re-read instead of snapshotting a stale token. Cross-tab changes
+ *  arrive via the native `storage` event. */
+export const AUTH_EVENT = "chess-auth-changed";
+
+function notifyAuthChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(AUTH_EVENT));
+}
+
 /** The stored SIWE session token (set by the sign-in flow). */
 export function authToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -62,11 +71,21 @@ export function authAddress(): string | null {
   return localStorage.getItem("chess_addr");
 }
 
+/** Persist a SIWE session bound to the wallet it was issued for, and notify
+ *  subscribers. */
+export function setAuth(token: string, address: string) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("chess_token", token);
+  localStorage.setItem("chess_addr", address.toLowerCase());
+  notifyAuthChanged();
+}
+
 /** Drop the stored SIWE session (on disconnect or account switch). */
 export function clearAuth() {
   if (typeof window === "undefined") return;
   localStorage.removeItem("chess_token");
   localStorage.removeItem("chess_addr");
+  notifyAuthChanged();
 }
 
 /** USDC display string (base units → "1.50"). */

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { loadBotOptions, saveBotOptions, useBotStatus } from "@/lib/bot";
 import { GITHUB_REPO, SERVER_HTTP } from "@/lib/config";
-import { authToken } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 
 /** Prebuilt client binaries published by .github/workflows/release.yml —
  *  artifact names there are load-bearing for these URLs (the workflow's
@@ -36,7 +36,9 @@ function guessPlatform(): (typeof DOWNLOADS)[number]["key"] | "mobile" {
  *  games in the lobby and your bot plays them. Rendered inside the profile's
  *  Engine section and on the standalone /connect page. */
 export function ConnectEngine() {
-  const [token, setToken] = useState<string | null>(null);
+  // Reactive: reflects a sign-in / sign-out that happens on the same page (e.g.
+  // the header AuthButton on /profile) without a reload.
+  const token = useAuthToken();
   const [code, setCode] = useState<string | null>(null);
   const [codeErr, setCodeErr] = useState<string | null>(null);
   const [enginePath, setEnginePath] = useState("stockfish");
@@ -48,10 +50,17 @@ export function ConnectEngine() {
     useState<(typeof DOWNLOADS)[number]["key"] | "mobile">("macos-arm64");
 
   useEffect(() => {
-    setToken(authToken());
     setOpts(loadBotOptions());
     setPlatform(guessPlatform());
   }, []);
+
+  // Session changed (signed out, or switched wallet) → drop the stale pairing
+  // code so a fresh one mints for the new session instead of pairing the engine
+  // to the previous wallet.
+  useEffect(() => {
+    setCode(null);
+    setCodeErr(null);
+  }, [token]);
 
   // Signed in → mint the pairing code automatically (single-use, 10 min).
   useEffect(() => {

@@ -37,6 +37,8 @@ function AuthButtonInner() {
   // loop. Reset when the connected account changes.
   const switchTried = useRef<string | null>(null);
   const signTried = useRef<string | null>(null);
+  // Latest connected address, readable from inside async callbacks.
+  const addressRef = useRef(address);
 
   useEffect(() => {
     fetchConfig().then((c) => {
@@ -45,11 +47,13 @@ function AuthButtonInner() {
     });
   }, []);
 
-  // Recompute sign-in state from storage on account change, dropping a token
-  // that belongs to a different wallet.
+  // Recompute sign-in state from storage on account change. Drop a token that
+  // belongs to a different wallet OR a legacy token with no bound address
+  // (pre-address-binding sessions) — both force a clean re-sign for this wallet.
   useEffect(() => {
+    addressRef.current = address;
     const key = address?.toLowerCase() ?? null;
-    if (key && authAddress() && authAddress() !== key) clearAuth();
+    if (key && authToken() && authAddress() !== key) clearAuth();
     setSignedIn(!!authToken() && !!key && authAddress() === key);
     switchTried.current = null;
     signTried.current = null;
@@ -65,11 +69,18 @@ function AuthButtonInner() {
 
   const runSignIn = useCallback(async () => {
     if (!address || expected == null) return;
+    const signingFor = address.toLowerCase();
     setError(null);
     setBusy(true);
     try {
       if (chainId !== expected) await switchChainAsync({ chainId: expected });
       await signInWithEthereum(address, expected, (a) => signMessageAsync(a));
+      // The account may have switched while the signature was pending — never
+      // claim signed-in for a wallet the token wasn't issued to.
+      if (addressRef.current?.toLowerCase() !== signingFor) {
+        clearAuth();
+        return;
+      }
       setSignedIn(true);
     } catch (e: any) {
       setError(e?.shortMessage ?? e?.message ?? "sign-in failed");
@@ -122,6 +133,19 @@ function AuthButtonInner() {
                 {busy ? "Signing…" : "Finish sign-in"}
               </button>
             </span>
+          );
+        }
+
+        // Signed-in user drifted to the wrong network — surface a switch control
+        // (the old default ConnectButton did this; the custom chip must too).
+        if (wagerOn && expected != null && chainId !== expected) {
+          return (
+            <button
+              className="wrong-net"
+              onClick={() => switchChainAsync({ chainId: expected }).catch(() => {})}
+            >
+              Wrong network — switch
+            </button>
           );
         }
 

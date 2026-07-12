@@ -7,7 +7,8 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
-import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
@@ -54,9 +55,9 @@ export default function TournamentPage() {
 }
 
 function TournamentClient() {
-  const { address, isConnected } = useAccount();
+  const { address } = useAccount();
+  const token = useAuthToken();
   const [config, setConfig] = useState<OnchainConfig | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [tourneys, setTourneys] = useState<Tourney[]>([]);
   const [err, setErr] = useState<string | null>(null);
   // Tournaments this browser entered with its connected bot (→ spectate).
@@ -77,9 +78,6 @@ function TournamentClient() {
   useEffect(() => {
     fetchConfig().then(setConfig);
   }, []);
-  useEffect(() => {
-    setToken(authToken());
-  }, [address, isConnected]);
 
   const bot = useBotStatus(token);
 

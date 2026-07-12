@@ -44,7 +44,9 @@ function WalletMenuInner() {
     };
   }, [open]);
 
-  const { available } = useAvailable(config?.escrow);
+  // The pill only needs a slow background refresh; an open BankrollPanel shares
+  // the same query key and drives faster polling while it's on screen.
+  const { available } = useAvailable(config?.escrow, { refetchInterval: 30000 });
 
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
   if (!isConnected || !wagerOn || !config?.escrow) return null;
