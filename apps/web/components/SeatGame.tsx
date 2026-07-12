@@ -71,6 +71,7 @@ export function SeatGame({
       } catch {
         return;
       }
+      specRetry = 0; // a real frame proves the room is alive — reset the give-up counter
       try {
         switch (m.type) {
           case "game_start":
@@ -116,15 +117,21 @@ export function SeatGame({
       if (cancelled || finished) return;
       spectator = new WebSocket(`${SERVER_WS}/ws/game/${gameId}`);
       spectator.onopen = () => {
-        specRetry = 0;
         if (!finished) setStatus("playing");
       };
       spectator.onmessage = onSpecMessage;
       spectator.onclose = () => {
         if (cancelled || finished) return;
+        // Give up after ~8 dead reconnects (e.g. the room was reaped before we
+        // saw game_over) so a stale tab doesn't churn forever; specRetry resets
+        // to 0 on any received frame.
+        specRetry += 1;
+        if (specRetry > 8) {
+          setStatus("disconnected");
+          return;
+        }
         setStatus("reconnecting…");
-        specRetry = Math.min(specRetry + 1, 6);
-        specTimer = setTimeout(connectSpectator, 500 * 2 ** (specRetry - 1)); // backoff to ~16s
+        specTimer = setTimeout(connectSpectator, 500 * 2 ** Math.min(specRetry - 1, 5)); // ~16s cap
       };
     };
 
@@ -222,8 +229,8 @@ export function SeatGame({
                 <b>{fmtUsdc(payoutForStake(stake))} USDC</b>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                Winner takes both stakes minus a 1% fee; a draw returns your stake. Non-custodial —
-                settled on-chain.
+                Winner takes both stakes, less a 1% fee on the winnings; a draw returns your stake.
+                Non-custodial — settled on-chain.
               </div>
             </div>
           )}

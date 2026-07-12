@@ -104,9 +104,11 @@ export function clearAuth() {
  *  settlement. Used only for display — the contract is authoritative. */
 export const FEE_BPS = 100n;
 
-/** What the winner of a matched wager nets, in base units: both stakes pooled
- *  (2× stake) minus the rake. A draw returns each side's own stake. All bigint
- *  math — never float — matching the on-chain arithmetic. */
+/** What the winner of a matched wager nets, in base units. Mirrors
+ *  ChessEscrow.settleGame exactly: the rake is charged on ONE stake
+ *  (`rake = stake * feeBps / 10000`), and the winner receives both stakes minus
+ *  that rake (`2*stake - rake`) — their own stake back plus `stake - rake` from
+ *  the loser. A draw returns each side's own stake. All bigint math, never float. */
 export function payoutForStake(stake: bigint | string | number): bigint {
   let s: bigint;
   try {
@@ -114,8 +116,8 @@ export function payoutForStake(stake: bigint | string | number): bigint {
   } catch {
     return 0n;
   }
-  const pot = s * 2n;
-  return pot - (pot * FEE_BPS) / 10_000n;
+  const rake = (s * FEE_BPS) / 10_000n; // on a single stake, per the contract
+  return s * 2n - rake;
 }
 
 /** USDC display string (base units → "1.50"). */

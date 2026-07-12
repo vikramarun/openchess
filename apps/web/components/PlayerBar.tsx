@@ -40,9 +40,9 @@ export function PlayerBar({
         <span className="player-name">{name}</span>
         {engine && <span className="player-sub">🤖 {engine}</span>}
         {rating != null && <span className="player-rating">{rating}</span>}
-        {captured && captured.length > 0 && (
+        {((captured && captured.length > 0) || (edge != null && edge > 0)) && (
           <span className="player-captured" aria-label="captured pieces">
-            {capturedGlyphs(captured)}
+            {captured && captured.length > 0 && capturedGlyphs(captured)}
             {edge != null && edge > 0 && <span className="player-edge">+{edge}</span>}
           </span>
         )}

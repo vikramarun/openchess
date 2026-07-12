@@ -1343,7 +1343,10 @@ async fn tourney_create(
         // Cap the number of not-yet-finished buy-in tournaments this wallet may
         // have open at once. Each one opens an oracle-gas-funded pool while the
         // organizer locks nothing until someone joins, so without this a single
-        // authed wallet could drain oracle ETH by looping creation.
+        // authed wallet could drain oracle ETH by looping creation. Best-effort:
+        // the count isn't atomic with the insert below (the pool open awaits in
+        // between), so a concurrent burst can overshoot — bounded by the per-IP
+        // create throttle, which is the primary rate control here.
         {
             let ts = state.0.lobby.tournaments.lock();
             let open = ts

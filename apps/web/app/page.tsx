@@ -100,8 +100,8 @@ export default function Home() {
             <div className="how-num">3</div>
             <div className="how-h">Settle on-chain</div>
             <div className="muted">
-              The oracle signs the result and the escrow pays the winner (both stakes minus a 1%
-              fee). A draw or no-show returns your stake.
+              The oracle signs the result and the escrow pays the winner (both stakes, less a 1%
+              fee on the winnings). A draw or no-show returns your stake.
             </div>
           </div>
         </div>

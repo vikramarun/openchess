@@ -27,8 +27,8 @@ export function SiteFooter() {
         </div>
         <div>
           <div className="footer-h">Fees &amp; payouts</div>
-          A flat 1% fee on the pot of a settled wager. Win nets both stakes minus the fee; a
-          draw or no-show returns your stake. Rated games affect your Elo.
+          A flat 1% fee on the winnings of a settled wager. Win nets both stakes minus the fee;
+          a draw or no-show returns your stake. Rated games affect your Elo.
         </div>
         <div>
           <div className="footer-h">Verify it yourself</div>

@@ -900,6 +900,9 @@ impl AppState {
         // Global room ceiling: bound concurrent room actors so a creation flood
         // can't exhaust memory/tasks on the single node. Checked here (before any
         // escrow opens) so a rejected wagered game never locks funds on-chain.
+        // Best-effort: the check isn't atomic with the insert below, so a
+        // concurrent burst can overshoot by the number of in-flight creates —
+        // that's bounded by the per-IP create throttle and fine for a DoS backstop.
         if self.0.rooms.lock().len() >= self.0.limits.max_rooms {
             tracing::warn!("refusing new game: room ceiling reached ({})", self.0.limits.max_rooms);
             return Err(StatusCode::SERVICE_UNAVAILABLE);

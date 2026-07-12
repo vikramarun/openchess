@@ -51,23 +51,42 @@ export default function GamePage() {
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [meta, setMeta] = useState<Meta | null>(null);
+  const [metaTried, setMetaTried] = useState(false);
 
   const pos = useRef(Chess.default());
 
-  // Fetch the live-game metadata once so the spectator sees who's playing, the
-  // stake, and the time control — not just a bare game id.
+  // Fetch the live-game metadata so the spectator sees who's playing, the stake,
+  // and the time control — not just a bare game id. A game only appears in
+  // /games/live once both engines are ready, so poll a few times to cover the
+  // just-started gap; give up (metaTried) so the UI can degrade gracefully for a
+  // finished/never-live game instead of showing "Loading…" forever.
   useEffect(() => {
     let off = false;
-    fetch(`${SERVER_HTTP}/games/live`)
-      .then((r) => (r.ok ? r.json() : []))
-      .then((games: (Meta & { game_id: string })[]) => {
-        if (off) return;
-        const g = games.find((x) => x.game_id === id);
-        if (g) setMeta(g);
-      })
-      .catch(() => {});
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () => {
+      fetch(`${SERVER_HTTP}/games/live`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((games: (Meta & { game_id: string })[]) => {
+          if (off) return;
+          const g = Array.isArray(games) ? games.find((x) => x.game_id === id) : undefined;
+          if (g) {
+            setMeta(g);
+          } else if (++tries < 4) {
+            timer = setTimeout(poll, 2500);
+          } else {
+            setMetaTried(true);
+          }
+        })
+        .catch(() => {
+          if (!off && ++tries < 4) timer = setTimeout(poll, 2500);
+          else if (!off) setMetaTried(true);
+        });
+    };
+    poll();
     return () => {
       off = true;
+      if (timer) clearTimeout(timer);
     };
   }, [id]);
 
@@ -75,6 +94,7 @@ export default function GamePage() {
     let cancelled = false;
     let ws: WebSocket | null = null;
     let retry = 0;
+    let finished = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const handle = (ev: MessageEvent) => {
@@ -84,6 +104,7 @@ export default function GamePage() {
       } catch {
         return;
       }
+      retry = 0; // a real frame proves the room is alive — reset the give-up counter
       try {
         switch (msg.type) {
           case "game_start":
@@ -113,6 +134,7 @@ export default function GamePage() {
             if (msg.clock) setClock(msg.clock);
             break;
           case "game_over":
+            finished = true; // game ended — stop reconnecting to a soon-reaped room
             setResult(msg.result);
             setStatus("finished");
             verifyResultSig(msg.result_hash, msg.server_sig).then(setVerified);
@@ -124,19 +146,24 @@ export default function GamePage() {
     };
 
     const connect = () => {
-      if (cancelled) return;
+      if (cancelled || finished) return;
       ws = new WebSocket(`${SERVER_WS}/ws/game/${id}`);
       ws.onopen = () => {
-        retry = 0;
-        setStatus("watching");
+        if (!finished) setStatus("watching");
       };
       ws.onmessage = handle;
       ws.onerror = () => setStatus("connection error");
       ws.onclose = () => {
-        if (cancelled) return;
+        if (cancelled || finished) return;
+        // Give up after ~8 dead reconnects (e.g. the room was reaped) so a stale
+        // tab doesn't churn forever; `retry` resets to 0 on any received frame.
+        retry += 1;
+        if (retry > 8) {
+          setStatus("disconnected");
+          return;
+        }
         setStatus("reconnecting…");
-        retry = Math.min(retry + 1, 6);
-        timer = setTimeout(connect, 500 * 2 ** (retry - 1)); // backoff to ~16s
+        timer = setTimeout(connect, 500 * 2 ** Math.min(retry - 1, 5)); // backoff to ~16s
       };
     };
     connect();
@@ -214,6 +241,8 @@ export default function GamePage() {
                     </>
                   )}
                 </>
+              ) : metaTried ? (
+                <>This game isn’t in the live list — it may have finished or not started yet.</>
               ) : (
                 <>Loading game details…</>
               )}
