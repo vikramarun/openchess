@@ -1,16 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
 
 import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
 import { useEngine } from "@/lib/engineContext";
+import { useMounted } from "@/lib/useMounted";
 
 export default function Home() {
   const { status } = useEngine();
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
 
   const banner =
     status === "ready" ? (

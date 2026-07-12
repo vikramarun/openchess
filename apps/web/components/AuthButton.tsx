@@ -6,13 +6,12 @@ import { useAccount, useAccountEffect, useChainId, useSignMessage, useSwitchChai
 
 import { authAddress, authToken, clearAuth, fetchConfig } from "@/lib/escrow";
 import { signInWithEthereum } from "@/lib/siwe";
+import { useMounted } from "@/lib/useMounted";
 
 /** Mount gate: the wagmi hooks live in AuthButtonInner, which only renders once
  *  the client-only WagmiProvider (app/providers.tsx) is in the tree. */
 export function AuthButton() {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return <div style={{ width: 1 }} />;
+  if (!useMounted()) return <div style={{ width: 1 }} />;
   return <AuthButtonInner />;
 }
 
@@ -33,9 +32,8 @@ function AuthButtonInner() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Only auto-switch / auto-sign once per address, so a rejected prompt doesn't
-  // loop. Reset when the connected account changes.
-  const switchTried = useRef<string | null>(null);
+  // Only auto-sign once per address, so a rejected prompt doesn't loop. Reset
+  // when the connected account changes.
   const signTried = useRef<string | null>(null);
   // Latest connected address, readable from inside async callbacks.
   const addressRef = useRef(address);
@@ -55,7 +53,6 @@ function AuthButtonInner() {
     const key = address?.toLowerCase() ?? null;
     if (key && authToken() && authAddress() !== key) clearAuth();
     setSignedIn(!!authToken() && !!key && authAddress() === key);
-    switchTried.current = null;
     signTried.current = null;
     setError(null);
   }, [address]);
@@ -91,25 +88,16 @@ function AuthButtonInner() {
 
   const ready = isConnected && !!address && expected != null;
 
-  // Auto-switch to the expected chain while completing sign-in.
-  useEffect(() => {
-    if (!ready || !wagerOn || signedIn) return;
-    if (chainId === expected) return;
-    const key = address!.toLowerCase();
-    if (switchTried.current === key) return;
-    switchTried.current = key;
-    switchChainAsync({ chainId: expected! }).catch(() => {});
-  }, [ready, wagerOn, signedIn, chainId, expected, address, switchChainAsync]);
-
-  // Auto-prompt the SIWE signature once the chain is right.
+  // Auto-complete sign-in once connected on a wagering server: runSignIn
+  // switches to the expected chain (if needed) and then prompts the SIWE
+  // signature, so this is the whole connect → switch → sign flow in one step.
   useEffect(() => {
     if (!ready || !wagerOn || signedIn || busy) return;
-    if (chainId !== expected) return;
     const key = address!.toLowerCase();
     if (signTried.current === key) return;
     signTried.current = key;
     runSignIn();
-  }, [ready, wagerOn, signedIn, busy, chainId, expected, address, runSignIn]);
+  }, [ready, wagerOn, signedIn, busy, address, runSignIn]);
 
   return (
     <ConnectButton.Custom>

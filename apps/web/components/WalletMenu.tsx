@@ -6,13 +6,12 @@ import { useAccount } from "wagmi";
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { fetchConfig, fmtUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
+import { useMounted } from "@/lib/useMounted";
 
 /** Mount gate: the wagmi hook lives in WalletMenuInner so it only runs once the
  *  client-only WagmiProvider (app/providers.tsx) is in the tree. */
 export function WalletMenu() {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return null;
+  if (!useMounted()) return null;
   return <WalletMenuInner />;
 }
 

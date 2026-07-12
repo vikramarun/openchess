@@ -9,6 +9,7 @@ import { SERVER_HTTP } from "@/lib/config";
 import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
+import { useMounted } from "@/lib/useMounted";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 type Stats = {
@@ -22,8 +23,7 @@ type Stats = {
 type Cur = { gameId: string; token: string; color: "white" | "black" };
 
 export default function GauntletPage() {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
   return (
     <div className="container">
       <div className="hero" style={{ paddingBottom: 8 }}>

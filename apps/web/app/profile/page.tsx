@@ -1,16 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useAccount } from "wagmi";
 
 import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { ConnectEngine } from "@/components/ConnectEngine";
 import { ProfileStats } from "@/components/ProfileStats";
+import { useMounted } from "@/lib/useMounted";
 
 export default function ProfilePage() {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
   return (
     <div className="container">
       <div className="hero" style={{ paddingBottom: 8 }}>
