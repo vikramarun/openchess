@@ -7,35 +7,28 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
-import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc } from "@/lib/escrow";
+import {
+  fetchTournament,
+  fetchTournaments,
+  type Tournament,
+  type TournamentGame,
+} from "@/lib/tournaments";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
-type TGame = {
-  game_id: string;
-  white: string;
-  black: string;
-  round: number;
-  // seat tokens are NOT in the public view — fetched per-entrant via /my-games
-};
+// Tournament + TournamentGame come from @/lib/tournaments (shared with the
+// bankroll claim discovery). MyGame is this page's per-entrant seat view
+// (tokens are NOT in the public tournament view — fetched via /my-games).
 type MyGame = {
   game_id: string;
   color: "white" | "black";
   token: string; // empty when the seat is played by the caller's bot
   round: number;
   seat: string; // "bot" | "browser"
-};
-type Tourney = {
-  id: string;
-  name: string;
-  buy_in: string | null;
-  status: string;
-  players: string[];
-  games: TGame[];
-  current_round: number;
-  total_rounds: number;
 };
 
 export default function TournamentPage() {
@@ -57,8 +50,8 @@ export default function TournamentPage() {
 function TournamentClient() {
   const { address } = useAccount();
   const token = useAuthToken();
-  const [config, setConfig] = useState<OnchainConfig | null>(null);
-  const [tourneys, setTourneys] = useState<Tourney[]>([]);
+  const { config, wagerOn } = useOnchainConfig();
+  const [tourneys, setTourneys] = useState<Tournament[]>([]);
   const [err, setErr] = useState<string | null>(null);
   // Tournaments this browser entered with its connected bot (→ spectate).
   const [joinedAsBot, setJoinedAsBot] = useState<Record<string, boolean>>({});
@@ -75,10 +68,6 @@ function TournamentClient() {
   // My own seat tokens for the tournament I'm playing (game_id -> {token,color}).
   const [myTokens, setMyTokens] = useState<Record<string, MyGame>>({});
 
-  useEffect(() => {
-    fetchConfig().then(setConfig);
-  }, []);
-
   const bot = useBotStatus(token);
 
   // Poll tournaments. In the lobby, refresh the whole list; while playing or
@@ -89,23 +78,11 @@ function TournamentClient() {
     const tick = async () => {
       try {
         if (playingTid) {
-          const d = await (await fetch(`${SERVER_HTTP}/tournaments/${playingTid}`)).json();
-          if (live)
-            setTourneys((prev) => [
-              ...prev.filter((t) => t.id !== playingTid),
-              { id: playingTid, ...d } as Tourney,
-            ]);
+          const t = await fetchTournament(playingTid);
+          if (live) setTourneys((prev) => [...prev.filter((x) => x.id !== playingTid), t]);
           return;
         }
-        const ids: { tournament_id: string }[] = await (
-          await fetch(`${SERVER_HTTP}/tournaments`)
-        ).json();
-        const details = await Promise.all(
-          ids.map(async ({ tournament_id }) => {
-            const d = await (await fetch(`${SERVER_HTTP}/tournaments/${tournament_id}`)).json();
-            return { id: tournament_id, ...d } as Tourney;
-          }),
-        );
+        const details = await fetchTournaments();
         if (live) setTourneys(details);
       } catch {
         /* ignore */
@@ -120,13 +97,12 @@ function TournamentClient() {
   }, [playingTid]);
 
   const { available } = useAvailable(config?.escrow);
-  const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
 
-  const identityIn = (t: Tourney): string | null => {
+  const identityIn = (t: Tournament): string | null => {
     if (t.buy_in) return address ? address.toLowerCase() : null;
     return joinedAs[t.id] ?? null;
   };
-  const myGames = (t: Tourney): TGame[] => {
+  const myGames = (t: Tournament): TournamentGame[] => {
     const me = identityIn(t);
     if (!me) return [];
     return t.games.filter(
@@ -168,7 +144,7 @@ function TournamentClient() {
     }
   };
 
-  const join = async (t: Tourney, asBot = false) => {
+  const join = async (t: Tournament, asBot = false) => {
     setErr(null);
     if ((t.buy_in || asBot) && !token)
       return setErr(
@@ -204,7 +180,7 @@ function TournamentClient() {
     }
   };
 
-  const startT = async (t: Tourney) => {
+  const startT = async (t: Tournament) => {
     setErr(null);
     if (t.buy_in && !token) return setErr("Sign in (top right) to start your tournament.");
     try {
@@ -226,7 +202,7 @@ function TournamentClient() {
   };
 
   /// Fetch only MY seat tokens (never exposed in the public view) and enter play.
-  const enterPlay = async (t: Tourney) => {
+  const enterPlay = async (t: Tournament) => {
     setErr(null);
     const me = identityIn(t);
     if (!me) return setErr("Join the tournament first.");

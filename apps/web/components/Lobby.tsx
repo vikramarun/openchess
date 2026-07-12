@@ -10,9 +10,10 @@ import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
-import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 function tryParse(s: string): bigint | null {
@@ -80,7 +81,7 @@ export function Lobby() {
   const router = useRouter();
   const { address } = useAccount();
   const token = useAuthToken();
-  const [config, setConfig] = useState<OnchainConfig | null>(null);
+  const { config, wagerOn } = useOnchainConfig();
   const [offers, setOffers] = useState<Offer[]>([]);
   const [live, setLive] = useState<LiveGame[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -91,10 +92,6 @@ export function Lobby() {
   const [pending, setPending] = useState<Pending | null>(null);
   const [active, setActive] = useState<Active | null>(null);
   const [useBot, setUseBot] = useState(true); // prefer the bot when it's online
-
-  useEffect(() => {
-    fetchConfig().then(setConfig);
-  }, []);
 
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
@@ -171,7 +168,6 @@ export function Lobby() {
   }, [pending, token]);
 
   const { available } = useAvailable(config?.escrow);
-  const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
 
   const modalStakeBig = modalStake.trim() ? tryParse(modalStake) : 0n;
   const modalUnderfunded =

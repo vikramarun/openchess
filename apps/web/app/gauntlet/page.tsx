@@ -6,10 +6,11 @@ import { useEffect, useRef, useState } from "react";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
-import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 type Stats = {
@@ -40,7 +41,7 @@ export default function GauntletPage() {
 
 function GauntletClient() {
   const token = useAuthToken();
-  const [config, setConfig] = useState<OnchainConfig | null>(null);
+  const { config, wagerOn } = useOnchainConfig();
 
   const [stake, setStake] = useState("");
   const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
@@ -56,10 +57,6 @@ function GauntletClient() {
   // Latest games-count, read without re-triggering the queue loop.
   const gamesRef = useRef(0);
 
-  useEffect(() => {
-    fetchConfig().then(setConfig);
-  }, []);
-
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
   useEffect(() => {
@@ -67,7 +64,6 @@ function GauntletClient() {
   }, [stats]);
 
   const { available } = useAvailable(config?.escrow);
-  const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
   const wantStake = stake.trim().length > 0;
   const running = !!session && stats?.status !== "stopped";
   const stakeBig = (() => {

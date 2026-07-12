@@ -4,10 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { TournamentClaim } from "@/components/TournamentClaim";
-import { SERVER_HTTP } from "@/lib/config";
+import { fetchTournaments } from "@/lib/tournaments";
 
 type Candidate = { id: string; name: string; status: string };
-type TournDetail = { name: string; buy_in: string | null; status: string; players: string[] };
 
 /** Tournament payouts / refunds, surfaced alongside the bankroll (they credit
  *  the same escrow balance) instead of scattered across the tournament page.
@@ -35,17 +34,7 @@ export function ClaimWinnings({ escrow, chainId }: { escrow: `0x${string}`; chai
     const me = address.toLowerCase();
     (async () => {
       try {
-        const ids: { tournament_id: string }[] = await fetch(`${SERVER_HTTP}/tournaments`).then(
-          (r) => (r.ok ? r.json() : []),
-        );
-        const details = await Promise.all(
-          ids.map(async ({ tournament_id }) => {
-            const d: TournDetail = await fetch(`${SERVER_HTTP}/tournaments/${tournament_id}`).then(
-              (r) => r.json(),
-            );
-            return { id: tournament_id, ...d };
-          }),
-        );
+        const details = await fetchTournaments();
         if (!live) return;
         // Buy-in tournaments the wallet entered that have reached a state where a
         // payout or refund is possible; TournamentClaim decides per one whether

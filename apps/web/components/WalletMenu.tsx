@@ -5,9 +5,10 @@ import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { ClaimWinnings } from "@/components/ClaimWinnings";
-import { fetchConfig, fmtUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fmtUsdc } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 
 /** Mount gate: the wagmi hook lives in WalletMenuInner so it only runs once the
  *  client-only WagmiProvider (app/providers.tsx) is in the tree. */
@@ -21,13 +22,9 @@ export function WalletMenu() {
  *  wagering server once a wallet is connected — the funds live in escrow. */
 function WalletMenuInner() {
   const { isConnected } = useAccount();
-  const [config, setConfig] = useState<OnchainConfig | null>(null);
+  const { config, wagerOn } = useOnchainConfig();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    fetchConfig().then(setConfig);
-  }, []);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
@@ -48,7 +45,6 @@ function WalletMenuInner() {
   // the same query key and drives faster polling while it's on screen.
   const { available } = useAvailable(config?.escrow, { refetchInterval: 30000 });
 
-  const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
   if (!isConnected || !wagerOn || !config?.escrow) return null;
 
   return (

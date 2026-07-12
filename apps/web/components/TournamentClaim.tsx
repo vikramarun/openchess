@@ -1,16 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import {
-  useAccount,
-  useChainId,
-  usePublicClient,
-  useReadContract,
-  useSwitchChain,
-  useWriteContract,
-} from "wagmi";
+import { useAccount, usePublicClient, useReadContract, useWriteContract } from "wagmi";
 
 import { ESCROW_ABI, fetchClaimProof, fmtUsdc, tidToBytes32, type ClaimProof } from "@/lib/escrow";
+import { useEnsureChain } from "@/lib/useEnsureChain";
 
 const ZERO32 = `0x${"0".repeat(64)}`;
 
@@ -40,8 +34,7 @@ export function TournamentClaim({
   onClaimed?: () => void;
 }) {
   const { address, isConnected } = useAccount();
-  const chainId = useChainId();
-  const { switchChainAsync } = useSwitchChain();
+  const ensureChain = useEnsureChain();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
 
@@ -130,15 +123,11 @@ export function TournamentClaim({
 
   if (!enabled || !exists || !hasEntered) return null;
 
-  const ensureChain = async () => {
-    if (chainId !== expected) await switchChainAsync({ chainId: expected });
-  };
-
   const run = async (fn: () => Promise<`0x${string}`>) => {
     setError(null);
     setBusy(true);
     try {
-      await ensureChain();
+      await ensureChain(expected);
       const hash = await fn();
       await publicClient!.waitForTransactionReceipt({ hash });
       refetchTourn();

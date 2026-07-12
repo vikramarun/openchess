@@ -2,11 +2,13 @@
 
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAccount, useAccountEffect, useChainId, useSignMessage, useSwitchChain } from "wagmi";
+import { useAccount, useAccountEffect, useChainId, useSignMessage } from "wagmi";
 
-import { authAddress, authToken, clearAuth, fetchConfig } from "@/lib/escrow";
+import { authAddress, authToken, clearAuth } from "@/lib/escrow";
 import { signInWithEthereum } from "@/lib/siwe";
+import { useEnsureChain } from "@/lib/useEnsureChain";
 import { useMounted } from "@/lib/useMounted";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 
 /** Mount gate: the wagmi hooks live in AuthButtonInner, which only renders once
  *  the client-only WagmiProvider (app/providers.tsx) is in the tree. */
@@ -23,11 +25,11 @@ export function AuthButton() {
 function AuthButtonInner() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
-  const { switchChainAsync } = useSwitchChain();
+  const ensureChain = useEnsureChain();
   const { signMessageAsync } = useSignMessage();
 
-  const [expected, setExpected] = useState<number | null>(null);
-  const [wagerOn, setWagerOn] = useState(false);
+  const { config, wagerOn } = useOnchainConfig();
+  const expected = config?.chainId ?? null;
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,13 +39,6 @@ function AuthButtonInner() {
   const signTried = useRef<string | null>(null);
   // Latest connected address, readable from inside async callbacks.
   const addressRef = useRef(address);
-
-  useEffect(() => {
-    fetchConfig().then((c) => {
-      setExpected(c.chainId);
-      setWagerOn(c.wagerEnabled);
-    });
-  }, []);
 
   // Recompute sign-in state from storage on account change. Drop a token that
   // belongs to a different wallet OR a legacy token with no bound address
@@ -70,7 +65,7 @@ function AuthButtonInner() {
     setError(null);
     setBusy(true);
     try {
-      if (chainId !== expected) await switchChainAsync({ chainId: expected });
+      await ensureChain(expected);
       await signInWithEthereum(address, expected, (a) => signMessageAsync(a));
       // The account may have switched while the signature was pending — never
       // claim signed-in for a wallet the token wasn't issued to.
@@ -84,7 +79,7 @@ function AuthButtonInner() {
     } finally {
       setBusy(false);
     }
-  }, [address, chainId, expected, signMessageAsync, switchChainAsync]);
+  }, [address, expected, signMessageAsync, ensureChain]);
 
   const ready = isConnected && !!address && expected != null;
 
@@ -128,10 +123,7 @@ function AuthButtonInner() {
         // (the old default ConnectButton did this; the custom chip must too).
         if (wagerOn && expected != null && chainId !== expected) {
           return (
-            <button
-              className="wrong-net"
-              onClick={() => switchChainAsync({ chainId: expected }).catch(() => {})}
-            >
+            <button className="wrong-net" onClick={() => ensureChain(expected).catch(() => {})}>
               Wrong network — switch
             </button>
           );
