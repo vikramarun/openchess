@@ -47,6 +47,9 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
   // Keyboard navigation.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Don't hijack keys while the user is typing in a field.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === "ArrowLeft") setPly((p) => Math.max(0, p - 1));
       else if (e.key === "ArrowRight") setPly((p) => Math.min(total, p + 1));
       else if (e.key === "Home") setPly(0);

@@ -10,7 +10,7 @@ import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
-import { fmtUsdc, parseUsdc, payoutForStake } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -551,8 +551,8 @@ export function Lobby() {
             )}
             {wagerOn && modalStakeBig != null && modalStakeBig > 0n && (
               <div className="stake-callout">
-                Win nets <b>{fmtUsdc(payoutForStake(modalStakeBig))} USDC</b> — both stakes, less a
-                1% fee on the winnings. A draw or opponent no-show returns your stake.
+                Win <b>+{fmtUsdc(profitForStake(modalStakeBig))} USDC</b> — you take your opponent’s
+                stake, less a 1% fee. A draw or opponent no-show returns your stake.
                 <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
                   Rated · non-custodial, settled on-chain by the escrow contract.
                 </div>

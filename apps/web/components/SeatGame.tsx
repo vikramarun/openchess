@@ -14,7 +14,7 @@ import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
-import { contractUrl, fmtUsdc, payoutForStake } from "@/lib/escrow";
+import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
 import { fetchGame } from "@/lib/gameApi";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
@@ -194,7 +194,7 @@ export function SeatGame({
   const { config } = useOnchainConfig();
   const escrowUrl = config?.escrow ? contractUrl(config.chainId, config.escrow) : null;
   const settledText = youWon
-    ? `you won ${fmtUsdc(payoutForStake(stake ?? 0))} USDC`
+    ? `you won +${fmtUsdc(profitForStake(stake ?? 0))} USDC`
     : youLost
       ? `you lost ${fmtUsdc(stake)} USDC`
       : "draw — your stake was returned";
@@ -243,12 +243,12 @@ export function SeatGame({
           {stake && (
             <div className="stake-callout" style={{ marginTop: 10 }}>
               <div>
-                Stake <b>{fmtUsdc(stake)} USDC</b> · win nets{" "}
-                <b>{fmtUsdc(payoutForStake(stake))} USDC</b>
+                Stake <b>{fmtUsdc(stake)} USDC</b> · win{" "}
+                <b>+{fmtUsdc(profitForStake(stake))} USDC</b>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                Winner takes both stakes, less a 1% fee on the winnings; a draw returns your stake.
-                Non-custodial — settled on-chain.
+                Win to take your opponent’s stake, less a 1% fee; a draw or no-show returns your
+                stake. Non-custodial — settled on-chain.
               </div>
             </div>
           )}

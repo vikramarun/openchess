@@ -53,9 +53,11 @@ struct GameDetailView {
     moves: Vec<MoveView>,
 }
 
-/// Full detail for one game: metadata + the move list, so the web app can replay
-/// a finished game and show a wagered game's settlement status. Public (finished
-/// game data is public, like `/games/live`).
+/// Full detail for ANY game (pending/active/finished/aborted): metadata + the
+/// move list, so the web app can decide live-vs-replay, replay a finished game,
+/// and show a wagered game's settlement status. Public — all of it is already
+/// public (moves are broadcast to live spectators; wallets appear in
+/// `/games/live` and on-chain).
 async fn game_detail(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
