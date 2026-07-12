@@ -29,7 +29,9 @@ pub fn fire(text: impl Into<String>) {
             .send()
             .await;
         if let Err(e) = res {
-            tracing::warn!("alert webhook POST failed: {e}");
+            // `without_url()` strips the URL from the error: the webhook URL's
+            // path IS a secret (Slack/Discord tokens), so it must not hit logs.
+            tracing::warn!("alert webhook POST failed: {}", e.without_url());
         }
     });
 }

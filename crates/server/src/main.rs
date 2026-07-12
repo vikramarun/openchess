@@ -314,7 +314,7 @@ async fn rate_limit_auth(
 }
 
 /// A `429 Too Many Requests` response carrying a `Retry-After` hint (seconds).
-fn too_many(retry: std::time::Duration) -> axum::response::Response {
+pub(crate) fn too_many(retry: std::time::Duration) -> axum::response::Response {
     use axum::response::IntoResponse;
     let mut resp = (StatusCode::TOO_MANY_REQUESTS, "rate limited\n").into_response();
     let secs = retry.as_secs().max(1).to_string();

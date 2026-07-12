@@ -163,27 +163,38 @@ pub struct RateLimits {
 }
 
 impl RateLimits {
-    /// Build from env vars, falling back to conservative defaults. All are safe
-    /// to leave unset; production can tighten any of them without a code change.
+    /// Build from env vars, falling back to defaults. All are safe to leave
+    /// unset; production can tighten any of them without a code change.
+    ///
+    /// The keys are the **client IP** (`Fly-Client-IP`). That IP is shared by
+    /// everyone behind CGNAT / an office NAT / a VPN, so per-IP ceilings are
+    /// deliberately generous — the *global* caps are the real node protection,
+    /// and per-IP just stops one source opening thousands of sockets. If abuse
+    /// keys move to the authenticated wallet later, these can tighten. Note the
+    /// `Fly-Client-IP` trust assumption: behind a different proxy the fallback
+    /// header is client-forgeable, so pin header trust to the deployment.
     pub fn from_env() -> Self {
         Self {
-            auth: TokenBucket::new(env_u32("RL_AUTH_BURST", 20), env_f64("RL_AUTH_PER_SEC", 1.0)),
+            auth: TokenBucket::new(env_u32("RL_AUTH_BURST", 40), env_f64("RL_AUTH_PER_SEC", 1.0)),
             offers: TokenBucket::new(
-                env_u32("RL_OFFERS_BURST", 10),
-                env_f64("RL_OFFERS_PER_SEC", 0.5),
+                env_u32("RL_OFFERS_BURST", 20),
+                env_f64("RL_OFFERS_PER_SEC", 1.0),
             ),
-            ws: TokenBucket::new(env_u32("RL_WS_BURST", 30), env_f64("RL_WS_PER_SEC", 1.0)),
+            ws: TokenBucket::new(env_u32("RL_WS_BURST", 60), env_f64("RL_WS_PER_SEC", 2.0)),
             agent_conns: ConnGate::new(
                 env_usize("RL_AGENT_CONNS_MAX", 512),
-                env_usize("RL_AGENT_CONNS_PER_IP", 8),
+                env_usize("RL_AGENT_CONNS_PER_IP", 16),
             ),
             game_conns: ConnGate::new(
                 env_usize("RL_GAME_CONNS_MAX", 2048),
-                env_usize("RL_GAME_CONNS_PER_IP", 32),
+                // Generous per-IP: a whole CGNAT/office of spectators shares one
+                // IP; the global cap protects the node.
+                env_usize("RL_GAME_CONNS_PER_IP", 128),
             ),
-            // Comfortably above the house bot's one-open-offer-per-time-control
+            // Per wallet (or IP for anonymous casual offers). Comfortably above
+            // the house bot's one-open-offer-per-time-control
             // (scripts/house-bot.sh defaults to 4 TCs under one wallet); bump
-            // RL_MAX_OPEN_OFFERS if you run more house time controls.
+            // RL_MAX_OPEN_OFFERS if you run more.
             max_open_offers: env_usize("RL_MAX_OPEN_OFFERS", 8),
         }
     }

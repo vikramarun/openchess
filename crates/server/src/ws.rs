@@ -30,8 +30,8 @@ pub async fn ws_handler(
     // upgrade churn per-IP, then cap concurrent sockets globally + per-IP so a
     // flood of connections can't exhaust the node.
     let ip = crate::ratelimit::client_ip(&headers);
-    if state.0.limits.ws.check(&ip).is_some() {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    if let Some(retry) = state.0.limits.ws.check(&ip) {
+        return crate::too_many(retry);
     }
     let Some(guard) = state.0.limits.game_conns.acquire(&ip) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -191,7 +191,7 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
     };
     let (mut sink, mut stream) = socket.split();
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         let mut seq = 0u64;
         // Replay the game so far to this spectator: game_start + one
         // opponent_moved per historical move rebuilds the board to the current
@@ -245,10 +245,19 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
         let _ = sink.send(Message::Close(None)).await;
     });
 
-    // Drain (and ignore) inbound until the socket closes.
-    while let Some(Ok(m)) = stream.next().await {
-        if matches!(m, Message::Close(_)) {
-            break;
+    // Drain (and ignore) inbound until the socket closes OR the writer stops
+    // (room died, or a live-game send failed on a dead peer). Without watching
+    // the writer, a spectator whose peer vanished without a TCP FIN would leave
+    // this reader pending forever and hold its connection-cap slot indefinitely.
+    loop {
+        tokio::select! {
+            m = stream.next() => {
+                let Some(Ok(m)) = m else { break };
+                if matches!(m, Message::Close(_)) {
+                    break;
+                }
+            }
+            _ = &mut writer => break,
         }
     }
     writer.abort();
