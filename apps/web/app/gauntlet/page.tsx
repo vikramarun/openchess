@@ -102,6 +102,17 @@ function GauntletClient() {
           }),
         });
         if (!r.ok) {
+          if (r.status === 409) {
+            // The session is stopped (e.g. auto-stopped after a no-move
+            // forfeit): don't retry. Reflect it locally so the stopped-state UI
+            // takes over even if the stats refetch fails (otherwise the loop
+            // would strand on a spinner). Best-effort refresh for final W/L/D.
+            setSearching(false);
+            setErr(null);
+            setStats((s) => (s ? { ...s, status: "stopped" } : s));
+            void refreshStats();
+            return;
+          }
           setErr(
             r.status === 424
               ? "Your bot went offline — reconnect the chess-client window."
@@ -300,6 +311,37 @@ function GauntletClient() {
           </div>
         </div>
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
+      </>
+    );
+  }
+
+  // Auto-stopped: the session still exists but is no longer running — the
+  // engine forfeited a game without moving, so the server stopped the run to
+  // protect the stake. Explain it and offer a clean restart.
+  if (session && !running) {
+    return (
+      <>
+        <GauntletScore stats={stats} onStop={stop} />
+        <div className="panel" style={{ textAlign: "center" }}>
+          <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>Gauntlet stopped</div>
+          <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+            Your engine forfeited a game without making a move — it may be offline or
+            misconfigured. The gauntlet stopped so it can’t keep losing your stake.
+            Reconnect your bot, then start a new run.
+          </div>
+          <button
+            className="primary"
+            onClick={() => {
+              setSession(null);
+              setStats(null);
+              setCur(null);
+              setSpectate(null);
+              setErr(null);
+            }}
+          >
+            Start a new gauntlet
+          </button>
+        </div>
       </>
     );
   }

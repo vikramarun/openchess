@@ -178,21 +178,28 @@ impl Room {
                 // then exit. For the slice we simply break.
                 break;
             }
-            // Reap a room that never begins (engines never both connected) so it
+            // Reap a room that never begins (engines never both readied) so it
             // doesn't linger forever as a ghost in the lobby's "live" list.
+            // Resolve it as a forfeit: the side that showed up and readied wins;
+            // if neither did, it's a draw. Routing through `finish()` settles a
+            // wagered escrow on-chain NOW — the stake goes to the player who
+            // showed up (or both are refunded if nobody did) instead of sitting
+            // locked behind the contract's 24h `claimTimeout` — tells that
+            // player they won, and keeps mode standings progressing.
             if !self.started && self.base.elapsed() > Duration::from_secs(60) {
-                tracing::info!(game_id = %self.game_id, "room reaped: never started");
-                // Report a draw so mode standings (esp. tournament rounds) keep
-                // progressing instead of stalling on a game that never began.
-                // Unlinked games (casual/park) ignore it; wagered escrow is
-                // untouched (only finish() settles on-chain).
-                let _ = self
-                    .results_tx
-                    .send(crate::GameOutcome {
-                        game_id: self.game_id,
-                        winner: None,
-                    })
-                    .await;
+                let winner = reap_forfeit_winner(
+                    self.white_occupied,
+                    self.wready,
+                    self.black_occupied,
+                    self.bready,
+                );
+                let reason = if winner.is_some() {
+                    GameEndReason::Forfeit
+                } else {
+                    GameEndReason::Aborted
+                };
+                tracing::info!(game_id = %self.game_id, ?winner, "room reaped: never started");
+                self.finish(GameResult { winner, reason }).await;
                 break;
             }
         }
@@ -532,9 +539,11 @@ impl Room {
     }
 
     async fn finish(&mut self, result: GameResult) {
-        let (pgn, clock, ply) = match self.game.as_ref() {
-            Some(game) => (game.pgn(), game.clock(self.now_ms()), game.ply()),
-            None => return,
+        // A never-started game (a no-show forfeit / abort reaped in `run`) has
+        // no board: settle with an empty move log and ply 0 (never rated).
+        let (pgn, ply) = match self.game.as_ref() {
+            Some(game) => (game.pgn(), game.ply()),
+            None => (String::new(), 0),
         };
         // A game is only rated if it was actually contested — both sides must
         // have made at least one move (ply >= 2). A player who never moves (a
@@ -599,13 +608,21 @@ impl Room {
             .send(crate::GameOutcome {
                 game_id: self.game_id,
                 winner: result.winner,
+                plies: ply,
+                // Readiness is latched (set once on Ready, never cleared), so it
+                // records that a seat's engine came alive — a seat that readied
+                // then briefly dropped its socket still counts as having shown
+                // up. Only a seat that NEVER readies (dead/hung at init) is a
+                // no-show. Do not AND in `occupied`: a transient disconnect must
+                // not be mistaken for a no-show.
+                white_showed_up: self.wready,
+                black_showed_up: self.bready,
             })
             .await;
 
         // Oracle-sign the result commitment so clients can verify it.
         let server_sig = self.settlement.sign_result(&result_hash).await;
 
-        let _ = clock;
         self.send_all(ServerMessage::GameOver {
             game_id: self.game_id,
             result,
@@ -614,6 +631,30 @@ impl Room {
             server_sig,
         })
         .await;
+    }
+}
+
+/// Resolve a never-started game reaped from the lobby. Forfeit the whole stake
+/// to a side ONLY when it actually showed up (still connected AND readied) while
+/// its opponent is a genuine no-show (not connected). Every ambiguous case —
+/// nobody ready, both still connected but one slow to ready, or a side that
+/// readied then dropped its connection — is a draw / refund, never a
+/// confiscation of a present player's stake. (Both sides connected + ready
+/// can't reach the reap: the `Ready` handler would have started the game.)
+fn reap_forfeit_winner(
+    white_occupied: bool,
+    white_ready: bool,
+    black_occupied: bool,
+    black_ready: bool,
+) -> Option<Color> {
+    let white_showed = white_occupied && white_ready;
+    let black_showed = black_occupied && black_ready;
+    if white_showed && !black_occupied {
+        Some(Color::White)
+    } else if black_showed && !white_occupied {
+        Some(Color::Black)
+    } else {
+        None
     }
 }
 
@@ -632,6 +673,7 @@ fn result_strings(r: &GameResult) -> (&'static str, &'static str) {
         GameEndReason::FiftyMoveRule => "fifty_move",
         GameEndReason::Threefold => "threefold",
         GameEndReason::Aborted => "aborted",
+        GameEndReason::Forfeit => "forfeit",
     };
     (winner, reason)
 }
@@ -648,4 +690,32 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_show_forfeits_to_the_present_ready_side() {
+        // White connected + ready, Black never connected → White wins by
+        // forfeit and takes the stake. Symmetric for Black.
+        assert_eq!(reap_forfeit_winner(true, true, false, false), Some(Color::White));
+        assert_eq!(reap_forfeit_winner(false, false, true, true), Some(Color::Black));
+    }
+
+    #[test]
+    fn ambiguous_reap_refunds_instead_of_confiscating() {
+        // Nobody readied → draw / refund both.
+        assert_eq!(reap_forfeit_winner(true, false, true, false), None);
+        // A present but slow-to-ready opponent is NOT confiscated: White ready,
+        // Black still connected but not yet ready → refund, not a White forfeit.
+        assert_eq!(reap_forfeit_winner(true, true, true, false), None);
+        // A side that readied then DISCONNECTED can't win over a present
+        // opponent: White readied then dropped (not connected), Black present
+        // but not ready → refund, and the absent White is never paid.
+        assert_eq!(reap_forfeit_winner(false, true, true, false), None);
+        // Neither connected → refund.
+        assert_eq!(reap_forfeit_winner(false, false, false, false), None);
+    }
 }

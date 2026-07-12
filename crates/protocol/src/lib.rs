@@ -67,8 +67,13 @@ pub enum GameEndReason {
     InsufficientMaterial,
     FiftyMoveRule,
     Threefold,
-    /// Game aborted before it counted (e.g. a player never connected).
+    /// Game aborted before it counted (e.g. neither player connected) —
+    /// settled as a draw / refund.
     Aborted,
+    /// A player never showed up (never readied within the start window) and
+    /// their opponent, who did, wins by forfeit. Unrated (no moves played),
+    /// but a wagered stake still transfers to the player who showed up.
+    Forfeit,
 }
 
 /// The authoritative outcome of a game. `winner == None` means a draw.
