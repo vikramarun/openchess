@@ -273,7 +273,12 @@ async fn main() -> anyhow::Result<()> {
             rate_limit_auth,
         )))
         .merge(matchmaking::routes())
-        .merge(players::routes())
+        // Throttle the public read routes per-IP: cheap per hit, but the
+        // leaderboard query is heavy, so cap how fast one IP can trigger it.
+        .merge(players::routes().route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_reads,
+        )))
         .merge(agents::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -296,10 +301,32 @@ fn env_flag(key: &str) -> bool {
     )
 }
 
-/// Per-IP throttle for the `/auth/*` routes. CORS preflight (`OPTIONS`) is not
-/// counted — it carries no work and browsers send one per request.
+/// Per-IP throttle middleware for the `/auth/*` routes (signature recovery +
+/// credential minting).
 async fn rate_limit_auth(
     State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    throttle(&state.0.limits.auth, req, next).await
+}
+
+/// Per-IP throttle middleware for the public read routes (`/players/*`,
+/// `/leaderboard`) — bounds the rate an IP can trigger the heavy leaderboard
+/// query.
+async fn rate_limit_reads(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    throttle(&state.0.limits.reads, req, next).await
+}
+
+/// Charge one token against `bucket` for the request's client IP, returning 429
+/// (with `Retry-After`) when over budget. CORS preflight (`OPTIONS`) is not
+/// counted — it carries no work and browsers send one per request.
+async fn throttle(
+    bucket: &ratelimit::TokenBucket,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -307,7 +334,7 @@ async fn rate_limit_auth(
         return next.run(req).await;
     }
     let ip = ratelimit::client_ip(req.headers());
-    if let Some(retry) = state.0.limits.auth.check(&ip) {
+    if let Some(retry) = bucket.check(&ip) {
         return too_many(retry);
     }
     next.run(req).await

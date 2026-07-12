@@ -153,6 +153,9 @@ pub struct RateLimits {
     pub offers: TokenBucket,
     /// WebSocket upgrade churn (both `/ws/game` and `/ws/agent`).
     pub ws: TokenBucket,
+    /// Public read endpoints (`/players/*`, `/leaderboard`) — cheap per hit but
+    /// the leaderboard query is heavy, so bound the rate an IP can trigger it.
+    pub reads: TokenBucket,
     /// Concurrent `/ws/agent` (bot control) sockets.
     pub agent_conns: ConnGate,
     /// Concurrent `/ws/game` (player + spectator) sockets.
@@ -184,6 +187,10 @@ impl RateLimits {
                 env_parse("RL_OFFERS_PER_SEC", 1.0),
             ),
             ws: TokenBucket::new(env_parse("RL_WS_BURST", 60), env_parse("RL_WS_PER_SEC", 2.0)),
+            reads: TokenBucket::new(
+                env_parse("RL_READS_BURST", 60),
+                env_parse("RL_READS_PER_SEC", 5.0),
+            ),
             agent_conns: ConnGate::new(
                 env_parse("RL_AGENT_CONNS_MAX", 512),
                 env_parse("RL_AGENT_CONNS_PER_IP", 16),
@@ -229,6 +236,7 @@ impl RateLimits {
         self.auth.sweep();
         self.offers.sweep();
         self.ws.sweep();
+        self.reads.sweep();
     }
 }
 
