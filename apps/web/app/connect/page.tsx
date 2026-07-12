@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
-import { BOT_OFFLINE, fetchBot, loadBotOptions, saveBotOptions, type BotStatus } from "@/lib/bot";
+import { loadBotOptions, saveBotOptions, useBotStatus } from "@/lib/bot";
 import { GITHUB_REPO, SERVER_HTTP } from "@/lib/config";
 import { authToken } from "@/lib/escrow";
 
@@ -38,7 +38,6 @@ export default function ConnectPage() {
   const [token, setToken] = useState<string | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [codeErr, setCodeErr] = useState<string | null>(null);
-  const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
   const [enginePath, setEnginePath] = useState("stockfish");
   const [bookPath, setBookPath] = useState("");
   const [name, setName] = useState("");
@@ -70,18 +69,8 @@ export default function ConnectPage() {
     })();
   }, [token, code]);
 
-  // Live status: flips to "online" the moment the client connects.
-  useEffect(() => {
-    if (!token) return;
-    let alive = true;
-    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
-    tick();
-    const t = setInterval(tick, 3000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [token]);
+  // Live status: flips to "online" the moment the client connects (poll fast).
+  const bot = useBotStatus(token, 3000);
 
   const isWindows = platform === "windows-x64";
   const command = useMemo(() => {
