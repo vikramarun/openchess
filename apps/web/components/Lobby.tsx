@@ -5,15 +5,15 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
-import { BankrollPanel } from "@/components/BankrollPanel";
-import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
-import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 function tryParse(s: string): bigint | null {
@@ -79,9 +79,9 @@ const seatLabel = (name: string | null, addr: string | null, fallback: string) =
  *  challenge (your engine vs theirs), watch games in progress, or stake USDC. */
 export function Lobby() {
   const router = useRouter();
-  const { address, isConnected } = useAccount();
-  const [config, setConfig] = useState<OnchainConfig | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  const { address } = useAccount();
+  const token = useAuthToken();
+  const { config, wagerOn } = useOnchainConfig();
   const [offers, setOffers] = useState<Offer[]>([]);
   const [live, setLive] = useState<LiveGame[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -92,13 +92,6 @@ export function Lobby() {
   const [pending, setPending] = useState<Pending | null>(null);
   const [active, setActive] = useState<Active | null>(null);
   const [useBot, setUseBot] = useState(true); // prefer the bot when it's online
-
-  useEffect(() => {
-    fetchConfig().then(setConfig);
-  }, []);
-  useEffect(() => {
-    setToken(authToken());
-  }, [address, isConnected]);
 
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
@@ -175,7 +168,6 @@ export function Lobby() {
   }, [pending, token]);
 
   const { available } = useAvailable(config?.escrow);
-  const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
 
   const modalStakeBig = modalStake.trim() ? tryParse(modalStake) : 0n;
   const modalUnderfunded =
@@ -345,7 +337,7 @@ export function Lobby() {
                 <>
                   {" "}
                   Want your own engine to play instead?{" "}
-                  <Link href="/connect">Connect it</Link>.
+                  <Link href="/profile">Connect it</Link>.
                 </>
               )}
             </div>
@@ -502,15 +494,6 @@ export function Lobby() {
           </table>
         )}
       </div>
-
-      {/* Personalize the in-browser bot (name / opening book). Hidden
-          only while the native connected bot is the chosen seat driver. */}
-      {!botPlays && <BrowserBotPanel />}
-
-      {/* Optional: deposit for staked play */}
-      {wagerOn && config?.escrow && (
-        <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
-      )}
 
       {/* Stake modal (opens after picking a time control) */}
       {pickTc && (

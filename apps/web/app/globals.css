@@ -125,6 +125,105 @@ a:hover {
   }
 }
 
+/* wallet / bankroll menu */
+.wallet-menu {
+  position: relative;
+}
+.wallet-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-strong);
+  font-size: 13px;
+  cursor: pointer;
+}
+.wallet-pill:hover {
+  border-color: var(--accent);
+}
+.wp-coin {
+  color: var(--accent);
+}
+.wp-amt {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.wp-caret {
+  color: var(--muted);
+  font-size: 10px;
+}
+.wallet-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 340px;
+  max-width: 90vw;
+  z-index: 50;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+}
+.wallet-pop .panel {
+  margin: 0;
+  border: none;
+  background: transparent;
+}
+
+/* account chip (signed-in state of the single auth button) */
+.account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 4px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.account-chip:hover {
+  border-color: var(--accent);
+}
+.chip-av {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.chip-av-fallback {
+  background: var(--accent);
+  color: #0d1b12;
+  font-size: 12px;
+}
+.auth-err {
+  color: var(--danger);
+  font-size: 13px;
+}
+.wrong-net {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.wrong-net:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
 /* ---------- layout ---------- */
 .container {
   max-width: 1040px;

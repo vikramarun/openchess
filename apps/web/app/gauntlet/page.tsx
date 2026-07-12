@@ -2,14 +2,15 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { useAccount } from "wagmi";
 
-import { BankrollPanel } from "@/components/BankrollPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
-import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
+import { useMounted } from "@/lib/useMounted";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
 type Stats = {
@@ -23,8 +24,7 @@ type Stats = {
 type Cur = { gameId: string; token: string; color: "white" | "black" };
 
 export default function GauntletPage() {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
   return (
     <div className="container">
       <div className="hero" style={{ paddingBottom: 8 }}>
@@ -40,9 +40,8 @@ export default function GauntletPage() {
 }
 
 function GauntletClient() {
-  const { address, isConnected } = useAccount();
-  const [config, setConfig] = useState<OnchainConfig | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  const token = useAuthToken();
+  const { config, wagerOn } = useOnchainConfig();
 
   const [stake, setStake] = useState("");
   const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
@@ -58,13 +57,6 @@ function GauntletClient() {
   // Latest games-count, read without re-triggering the queue loop.
   const gamesRef = useRef(0);
 
-  useEffect(() => {
-    fetchConfig().then(setConfig);
-  }, []);
-  useEffect(() => {
-    setToken(authToken());
-  }, [address, isConnected]);
-
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
   useEffect(() => {
@@ -72,7 +64,6 @@ function GauntletClient() {
   }, [stats]);
 
   const { available } = useAvailable(config?.escrow);
-  const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
   const wantStake = stake.trim().length > 0;
   const running = !!session && stats?.status !== "stopped";
   const stakeBig = (() => {
@@ -326,12 +317,6 @@ function GauntletClient() {
         </ol>
       </div>
 
-      {wagerOn && config?.escrow && (
-        <div style={{ marginBottom: 16 }}>
-          <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
-        </div>
-      )}
-
       <div className="panel" style={{ marginBottom: 16 }}>
         <b style={{ color: "var(--text-strong)" }}>Run a gauntlet</b>
         <div className="offer-form">
@@ -394,7 +379,7 @@ function GauntletClient() {
         {startUnderfunded && stakeBig != null && (
           <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>
             Available balance {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(stakeBig)} per game —
-            deposit more above.
+            deposit more from the wallet menu (top right).
           </div>
         )}
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}

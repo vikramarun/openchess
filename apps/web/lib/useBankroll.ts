@@ -7,7 +7,10 @@ import { ESCROW_ABI } from "./escrow";
 /** Read the connected wallet's available (unlocked) escrow balance in USDC base
  *  units. Used to gate wager actions before they fail on-chain. Returns
  *  `undefined` while loading / when no escrow or wallet. */
-export function useAvailable(escrow?: `0x${string}` | null): {
+export function useAvailable(
+  escrow?: `0x${string}` | null,
+  opts?: { refetchInterval?: number },
+): {
   available: bigint | undefined;
   refetch: () => void;
 } {
@@ -19,7 +22,10 @@ export function useAvailable(escrow?: `0x${string}` | null): {
     args: address ? [address] : undefined,
     query: {
       enabled: !!escrow && !!address,
-      refetchInterval: 8000,
+      // Shared query key across observers, so react-query polls at the smallest
+      // active interval — the header pill can idle slower while an open
+      // BankrollPanel keeps it fresh.
+      refetchInterval: opts?.refetchInterval ?? 8000,
     },
   });
   return { available: data as bigint | undefined, refetch };

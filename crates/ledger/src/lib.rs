@@ -810,4 +810,181 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Live end-to-end tournament **claim + refund** against a real chain (Base
+    /// Sepolia). Runs the exact production Merkle code — `merkle_root` /
+    /// `merkle_proof` / `tournament_leaf` — plus the same EIP-712 root-settle the
+    /// server's `OnchainSettlement` performs, so it proves a Rust-built proof
+    /// verifies against the deployed Solidity `_verifyProof`, on real block timing
+    /// and gas (the Anvil test above only covers a local dev chain, and nothing
+    /// else exercises `claimRefund`). One provider sends every `me`-signed tx to
+    /// keep nonces in step — see the note below.
+    ///
+    /// Opt-in and `#[ignore]`d: never runs in a normal `cargo test`. Drive it via
+    /// `scripts/test-sepolia-tournament.sh`, which sets:
+    ///   LEDGER_TEST_RPC  — Base Sepolia RPC URL
+    ///   LEDGER_TEST_KEY  — a funded testnet private key (deployer/oracle/entrant)
+    ///   LEDGER_TEST_TIMEOUT — refund window in seconds (default 30)
+    /// It deploys throwaway MockUSDC + escrows, so it's repeatable and the refund
+    /// window is short enough to wait out.
+    #[tokio::test]
+    #[ignore = "live testnet run; use scripts/test-sepolia-tournament.sh"]
+    async fn tournament_claim_and_refund_live() -> anyhow::Result<()> {
+        let (rpc, key) = match (
+            std::env::var("LEDGER_TEST_RPC"),
+            std::env::var("LEDGER_TEST_KEY"),
+        ) {
+            (Ok(r), Ok(k)) => (r, k),
+            _ => {
+                eprintln!(
+                    "skipping tournament_claim_and_refund_live: set LEDGER_TEST_RPC + LEDGER_TEST_KEY"
+                );
+                return Ok(());
+            }
+        };
+        let refund_timeout: u64 = std::env::var("LEDGER_TEST_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+
+        let url = rpc.parse::<alloy::transports::http::reqwest::Url>()?;
+        let signer: PrivateKeySigner = key.parse()?; // deployer + oracle + the funded entrant
+        let me = signer.address();
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(signer.clone()))
+            .connect_http(url.clone());
+        // A fee recipient distinct from the entrant (entering as the fee sink reverts).
+        let fee_recipient = Address::from([0xEE; 20]);
+        let explorer = "https://sepolia.basescan.org/tx";
+        eprintln!("live tournament test: rpc={rpc} signer={me} refund_timeout={refund_timeout}s");
+
+        let usdc = MockUSDC::deploy(&provider).await?;
+        // Long window for the claim flow (settle never races the timeout); short
+        // window for the refund flow (so we can actually wait past it).
+        let escrow_pay =
+            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, 3600u64).await?;
+        let escrow_ref =
+            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, refund_timeout)
+                .await?;
+        eprintln!(
+            "deployed: usdc={} escrow_pay={} escrow_ref={}",
+            usdc.address(),
+            escrow_pay.address(),
+            escrow_ref.address()
+        );
+
+        // mint + approve + deposit `amt` into `me`'s bankroll on `escrow`.
+        let fund = |escrow: Address, amt: U256| {
+            let provider = &provider;
+            let usdc_addr = *usdc.address();
+            async move {
+                MockUSDC::new(usdc_addr, provider)
+                    .mint(me, amt)
+                    .send()
+                    .await?
+                    .get_receipt()
+                    .await?;
+                MockUSDC::new(usdc_addr, provider)
+                    .approve(escrow, amt)
+                    .send()
+                    .await?
+                    .get_receipt()
+                    .await?;
+                ChessEscrow::new(escrow, provider)
+                    .deposit(amt)
+                    .send()
+                    .await?
+                    .get_receipt()
+                    .await?;
+                anyhow::Ok(())
+            }
+        };
+
+        // Everything `me` signs goes through this ONE provider so nonces stay in
+        // step (the escrow's oracle is `me`, so `signer` also signs the EIP-712
+        // root). This mirrors OnchainSettlement — itself covered by the Anvil test
+        // above — while keeping a single sender to avoid cross-provider nonce
+        // races; the Merkle tree is the real production code either way.
+
+        // ---- payout claim flow (root-settled, "large" field) ----
+        // One large entry funds the pool; the payout tree is decoupled from the
+        // entrant set (the contract never ties leaves to entrants), so a single
+        // key can stand in for a full field. buy_in covers a 17-leaf tree.
+        let buy_in = U256::from(17_000_000u64); // 17 USDC (6dp)
+        let leaf_amt = U256::from(1_000_000u64); // 1 USDC per winner leaf
+        fund(*escrow_pay.address(), buy_in).await?;
+        let pay = ChessEscrow::new(*escrow_pay.address(), &provider);
+        let tid = Uuid::new_v4();
+        let gid = game_id_to_bytes32(tid);
+        pay.openTournament(gid, buy_in).send().await?.get_receipt().await?;
+        pay.enterTournament(gid, me).send().await?.get_receipt().await?; // pool = 17 USDC
+
+        // 17 leaves: index 0 is our test winner, the rest synthetic. Total == pool.
+        let winner = Address::from([0x11; 20]);
+        let mut leaves = vec![(winner, leaf_amt)];
+        for i in 0u8..16 {
+            leaves.push((Address::from([0x40 + i; 20]), leaf_amt));
+        }
+        let leaf_hashes: Vec<B256> = leaves
+            .iter()
+            .map(|(a, amt)| tournament_leaf(*a, *amt))
+            .collect();
+        let root = merkle_root(&leaf_hashes);
+        let total = leaves.iter().fold(U256::ZERO, |acc, (_, amt)| acc + *amt);
+        let deadline = U256::from(unix_now().saturating_add(3600));
+        let digest = pay
+            .digestTournamentRoot(gid, root, total, deadline)
+            .call()
+            .await?;
+        let sig = signer.sign_hash(&digest).await?;
+        let v: u8 = if sig.v() { 28 } else { 27 };
+        pay.settleTournamentRoot(gid, root, total, deadline, v, B256::from(sig.r()), B256::from(sig.s()))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eprintln!("root committed: root={root} tid_bytes32={gid} (== web tidToBytes32)");
+
+        let proof = merkle_proof(&leaf_hashes, 0);
+        let before = pay.bankroll(winner).call().await?;
+        let rcpt = pay
+            .claimTournament(gid, winner, leaf_amt, proof.clone())
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        let after = pay.bankroll(winner).call().await?;
+        assert_eq!(after - before, leaf_amt, "payout credited to winner bankroll");
+        eprintln!("claim OK: winner bankroll += 1 USDC  tx={}/{}", explorer, rcpt.transaction_hash);
+
+        // A second claim must revert (AlreadyClaimed). Assert via a static call
+        // (eth_call) — an actual send that reverts would leave the sender's cached
+        // nonce with a phantom gap and stall the next transaction.
+        let dbl = pay
+            .claimTournament(gid, winner, leaf_amt, proof)
+            .call()
+            .await;
+        assert!(dbl.is_err(), "double-claim must revert (AlreadyClaimed)");
+        eprintln!("double-claim rejected ✓");
+
+        // ---- refund flow (never settled past the timeout) ----
+        fund(*escrow_ref.address(), buy_in).await?;
+        let re = ChessEscrow::new(*escrow_ref.address(), &provider);
+        let tid2 = Uuid::new_v4();
+        let gid2 = game_id_to_bytes32(tid2);
+        re.openTournament(gid2, buy_in).send().await?.get_receipt().await?;
+        re.enterTournament(gid2, me).send().await?.get_receipt().await?; // bankroll[me] -= buy_in
+        let before_ref = re.bankroll(me).call().await?;
+
+        // Wait out the settle window (opened ~now; over-wait to clear the boundary).
+        let wait = refund_timeout + 15;
+        eprintln!("waiting {wait}s for the refund window to open…");
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+        let rcpt2 = re.claimRefund(gid2, me).send().await?.get_receipt().await?;
+        let after_ref = re.bankroll(me).call().await?;
+        assert_eq!(after_ref - before_ref, buy_in, "refund restored the buy-in");
+        eprintln!("refund OK: entrant bankroll += buy-in  tx={}/{}", explorer, rcpt2.transaction_hash);
+        eprintln!("LIVE TOURNAMENT CLAIM + REFUND: PASS");
+        Ok(())
+    }
 }

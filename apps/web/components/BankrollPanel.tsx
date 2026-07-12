@@ -6,11 +6,11 @@ import {
   useChainId,
   usePublicClient,
   useReadContract,
-  useSwitchChain,
   useWriteContract,
 } from "wagmi";
 
 import { ERC20_ABI, ESCROW_ABI, fmtUsdc, parseUsdc } from "@/lib/escrow";
+import { useEnsureChain } from "@/lib/useEnsureChain";
 
 /** Deposit / withdraw USDC into the non-custodial escrow bankroll, and show the
  *  available (unlocked) balance. Funds live in the contract — never with us. */
@@ -23,8 +23,10 @@ export function BankrollPanel({
 }) {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
-  const { switchChainAsync } = useSwitchChain();
-  const publicClient = usePublicClient();
+  const ensureChain = useEnsureChain();
+  // Pin the receipt-reading client to the escrow chain: after ensureChain
+  // switches, the connected chain's client would otherwise be stale/undefined.
+  const publicClient = usePublicClient({ chainId: expected });
   const { writeContractAsync } = useWriteContract();
 
   const [amount, setAmount] = useState("");
@@ -77,10 +79,6 @@ export function BankrollPanel({
     refetchAllowance();
   };
 
-  const ensureChain = async () => {
-    if (chainId !== expected) await switchChainAsync({ chainId: expected });
-  };
-
   const doDeposit = async () => {
     setError(null);
     let amt: bigint;
@@ -93,7 +91,7 @@ export function BankrollPanel({
     if (amt <= 0n) return setError("amount must be positive");
     setBusy("deposit");
     try {
-      await ensureChain();
+      await ensureChain(expected);
       if (!token) throw new Error("token not loaded");
       if (((allowance as bigint) ?? 0n) < amt) {
         setStage("approving USDC…");
@@ -136,7 +134,7 @@ export function BankrollPanel({
     if (amt > ((available as bigint) ?? 0n)) return setError("exceeds available balance");
     setBusy("withdraw");
     try {
-      await ensureChain();
+      await ensureChain(expected);
       setStage("withdrawing…");
       const h = await writeContractAsync({
         address: escrow,
