@@ -112,7 +112,18 @@ are done; the remaining gap is mostly ops:
    (`RL_AUTH_BURST`/`RL_AUTH_PER_SEC`, `RL_OFFERS_*`, `RL_WS_*`,
    `RL_AGENT_CONNS_MAX`/`_PER_IP`, `RL_GAME_CONNS_MAX`/`_PER_IP`,
    `RL_MAX_OPEN_OFFERS`) with conservative defaults; behind Fly the key is
-   `Fly-Client-IP`. Also: best-effort **alerting** (`crates/server/src/alert.rs`)
+   `Fly-Client-IP`. **Security-pass hardening (this round):** the previously
+   un-throttled game/tournament **creation** routes (`POST /games`, `/queue`,
+   `/gauntlet/start`, `/tournaments` + `/tournaments/{id}/join`|`/start`) now go
+   through a per-IP `create` throttle (`RL_CREATE_BURST`/`RL_CREATE_PER_SEC`),
+   `start_game` enforces a **global room ceiling** (`RL_MAX_ROOMS`) before any
+   escrow opens, and `tourney_create` caps concurrently-open **buy-in
+   tournaments per organizer** (`RL_MAX_OPEN_TOURNAMENTS`) so one authed wallet
+   can't drain oracle gas by looping `openTournament`. SIWE `verify` now
+   **fails closed** if on-chain settlement is configured but `SIWE_DOMAIN` is
+   unset (no localhost-default acceptance in prod), and `settlement_outbox` has a
+   `UNIQUE(game_id)` idempotency backstop (migration `0009`). Also: best-effort
+   **alerting** (`crates/server/src/alert.rs`)
    POSTs to `ALERT_WEBHOOK_URL` (unset ⇒ no-op) on the two money-critical failure
    logs (escrow-refund-after-abort, settlement outbox give-ups) so stuck funds
    get noticed. The public read routes (`/players/*`, `/leaderboard`) get a

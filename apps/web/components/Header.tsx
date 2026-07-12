@@ -23,8 +23,10 @@ export function Header() {
       </Link>
       <nav className="nav">
         <Link href="/">Play</Link>
+        <Link href="/gauntlet">Gauntlet</Link>
+        <Link href="/tournament">Tournament</Link>
         <Link href="/play">Quick&nbsp;Play</Link>
-        <Link href="/profile">My&nbsp;Profile</Link>
+        <Link href="/profile">Profile</Link>
       </nav>
       <div className="header-actions">
         <span className="engine-pill" title="Stockfish runs in your browser — free">

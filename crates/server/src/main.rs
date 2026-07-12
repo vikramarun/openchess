@@ -826,8 +826,12 @@ pub struct CreateGameResp {
 /// each seat is bound to the wallet that consented to stake it.
 async fn create_game(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateGameReq>,
 ) -> Result<Json<CreateGameResp>, StatusCode> {
+    // Unauthenticated + spawns a room actor on every call — throttle per-IP so a
+    // flood can't exhaust tasks/memory on the single node.
+    state.reject_if_rate_limited_create(&headers)?;
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     let resp = state
         .start_game(
@@ -892,6 +896,17 @@ impl AppState {
         // Maintenance/drain: the single chokepoint every mode funnels through,
         // so one guard blocks all new games while existing ones play out.
         self.reject_if_draining()?;
+
+        // Global room ceiling: bound concurrent room actors so a creation flood
+        // can't exhaust memory/tasks on the single node. Checked here (before any
+        // escrow opens) so a rejected wagered game never locks funds on-chain.
+        // Best-effort: the check isn't atomic with the insert below, so a
+        // concurrent burst can overshoot by the number of in-flight creates —
+        // that's bounded by the per-IP create throttle and fine for a DoS backstop.
+        if self.0.rooms.lock().len() >= self.0.limits.max_rooms {
+            tracing::warn!("refusing new game: room ceiling reached ({})", self.0.limits.max_rooms);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
 
         let game_id = Uuid::new_v4();
         let stake_info = wager.map(|w| StakeInfo {
@@ -1118,6 +1133,20 @@ impl AppState {
         } else {
             Ok(())
         }
+    }
+
+    /// Per-IP throttle for the game/tournament **creation** routes. Each such
+    /// call spawns a room actor and/or an oracle-gas-costing on-chain tx, so
+    /// they must not be spammable. Call at the top of every creation handler
+    /// (`create_game`, `queue_join`, `gauntlet_start`, `tourney_create/join/start`)
+    /// — these live on the un-throttled matchmaking router (a shared route layer
+    /// would also throttle the UI's polling GETs on the same paths).
+    pub fn reject_if_rate_limited_create(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let ip = ratelimit::client_ip(headers);
+        if self.0.limits.create.check(&ip).is_some() {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        Ok(())
     }
 
     /// The wallet allowed to administer the server, resolving it lazily if the

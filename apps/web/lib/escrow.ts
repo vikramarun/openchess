@@ -98,6 +98,28 @@ export function clearAuth() {
   notifyAuthChanged();
 }
 
+/** The escrow's rake, in basis points, mirroring the deployed ChessEscrow's
+ *  `feeBps` (currently 1%). The contract snapshots the fee per game at open; keep
+ *  this in sync with the live deploy so the payout the UI quotes matches
+ *  settlement. Used only for display — the contract is authoritative. */
+export const FEE_BPS = 100n;
+
+/** What the winner of a matched wager nets, in base units. Mirrors
+ *  ChessEscrow.settleGame exactly: the rake is charged on ONE stake
+ *  (`rake = stake * feeBps / 10000`), and the winner receives both stakes minus
+ *  that rake (`2*stake - rake`) — their own stake back plus `stake - rake` from
+ *  the loser. A draw returns each side's own stake. All bigint math, never float. */
+export function payoutForStake(stake: bigint | string | number): bigint {
+  let s: bigint;
+  try {
+    s = BigInt(stake);
+  } catch {
+    return 0n;
+  }
+  const rake = (s * FEE_BPS) / 10_000n; // on a single stake, per the contract
+  return s * 2n - rake;
+}
+
 /** USDC display string (base units → "1.50"). */
 export function fmtUsdc(base: bigint | string | number | undefined | null): string {
   if (base === undefined || base === null) return "—";

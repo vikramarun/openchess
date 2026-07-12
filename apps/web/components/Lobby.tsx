@@ -10,11 +10,11 @@ import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
-import { fmtUsdc, parseUsdc } from "@/lib/escrow";
+import { fmtUsdc, parseUsdc, payoutForStake } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
-import { TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
+import { TC_NAME, TIME_CONTROLS, tcLabel, type TimeControl } from "@/lib/timeControls";
 
 function tryParse(s: string): bigint | null {
   try {
@@ -23,12 +23,6 @@ function tryParse(s: string): bigint | null {
     return null;
   }
 }
-const TC_NAME: Record<string, string> = {
-  "1+0": "Bullet",
-  "3+0": "Blitz",
-  "5+0": "Blitz",
-  "10+0": "Rapid",
-};
 
 type Offer = {
   offer_id: string;
@@ -416,9 +410,28 @@ export function Lobby() {
                         </span>
                       )}
                     </td>
-                    <td>{o.stake ? `${fmtUsdc(o.stake)} USDC` : "Free"}</td>
                     <td>
-                      {o.initial_secs / 60}+{o.increment_secs}
+                      {o.stake ? (
+                        <>
+                          {fmtUsdc(o.stake)} USDC{" "}
+                          <span className="tag tag-rated" title="Rated — affects Elo">
+                            Rated
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          Free{" "}
+                          <span className="tag" title="Casual — does not affect Elo">
+                            Casual
+                          </span>
+                        </>
+                      )}
+                    </td>
+                    <td>
+                      {tcLabel(o.initial_secs, o.increment_secs)}
+                      <div className="muted" style={{ fontSize: 11 }}>
+                        {TC_NAME[tcLabel(o.initial_secs, o.increment_secs)] ?? "Custom"}
+                      </div>
                     </td>
                     <td style={{ textAlign: "right" }}>
                       {mine ? (
@@ -479,9 +492,23 @@ export function Lobby() {
                       );
                     })()}
                   </td>
-                  <td>{g.stake ? `${fmtUsdc(g.stake)} USDC` : "Free"}</td>
                   <td>
-                    {g.initial_secs / 60}+{g.increment_secs}
+                    {g.stake ? (
+                      <>
+                        {fmtUsdc(g.stake)} USDC{" "}
+                        <span className="tag tag-rated">Rated</span>
+                      </>
+                    ) : (
+                      <>
+                        Free <span className="tag">Casual</span>
+                      </>
+                    )}
+                  </td>
+                  <td>
+                    {tcLabel(g.initial_secs, g.increment_secs)}
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      {TC_NAME[tcLabel(g.initial_secs, g.increment_secs)] ?? "Custom"}
+                    </div>
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <Link href={`/game/${g.game_id}`} className="ghost">
@@ -498,7 +525,13 @@ export function Lobby() {
       {/* Stake modal (opens after picking a time control) */}
       {pickTc && (
         <div className="modal-overlay" onClick={() => setPickTc(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`New ${pickTc.label} game`}
+          >
             <div className="modal-title">
               {pickTc.label} · {TC_NAME[pickTc.label] ?? "Custom"}
             </div>
@@ -515,6 +548,15 @@ export function Lobby() {
                 disabled={creating}
                 autoFocus
               />
+            )}
+            {wagerOn && modalStakeBig != null && modalStakeBig > 0n && (
+              <div className="stake-callout">
+                Win nets <b>{fmtUsdc(payoutForStake(modalStakeBig))} USDC</b> — both stakes, less a
+                1% fee on the winnings. A draw or opponent no-show returns your stake.
+                <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
+                  Rated · non-custodial, settled on-chain by the escrow contract.
+                </div>
+              </div>
             )}
             <button
               className="ghost modal-post"

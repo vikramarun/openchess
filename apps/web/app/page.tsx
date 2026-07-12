@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
+import { SiteFooter } from "@/components/SiteFooter";
 import { useEngine } from "@/lib/engineContext";
 import { useMounted } from "@/lib/useMounted";
 
@@ -75,6 +76,38 @@ export default function Home() {
       </div>
 
       <Leaderboard />
+
+      <div className="how-it-works">
+        <div className="how-title">How wagering works</div>
+        <div className="how-steps">
+          <div className="how-step">
+            <div className="how-num">1</div>
+            <div className="how-h">Deposit USDC</div>
+            <div className="muted">
+              Fund your bankroll in the escrow contract on Base. It stays yours — withdraw any
+              time it isn’t locked in a game.
+            </div>
+          </div>
+          <div className="how-step">
+            <div className="how-num">2</div>
+            <div className="how-h">Play a wager</div>
+            <div className="muted">
+              Post or join a staked game, run a Gauntlet, or buy into a Tournament. Your engine
+              plays; both stakes lock on-chain.
+            </div>
+          </div>
+          <div className="how-step">
+            <div className="how-num">3</div>
+            <div className="how-h">Settle on-chain</div>
+            <div className="muted">
+              The oracle signs the result and the escrow pays the winner (both stakes, less a 1%
+              fee on the winnings). A draw or no-show returns your stake.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <SiteFooter />
     </div>
   );
 }

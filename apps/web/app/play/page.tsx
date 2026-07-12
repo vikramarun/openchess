@@ -7,6 +7,8 @@ import { parseUci } from "chessops/util";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { PlayerBar } from "@/components/PlayerBar";
+import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { ensureBookLoaded } from "@/lib/browserBot";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
@@ -17,14 +19,11 @@ import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 type Clock = { white_ms: number; black_ms: number };
 type Result = { winner: "white" | "black" | null; reason: string };
 
-function fmt(ms: number) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
 export default function PlayPage() {
   const [fen, setFen] = useState(INITIAL_FEN);
   const [moves, setMoves] = useState<string[]>([]);
+  const [lastUci, setLastUci] = useState<string | null>(null);
+  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
   const [clock, setClock] = useState<Clock | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [verified, setVerified] = useState<Verification | null>(null);
@@ -104,6 +103,8 @@ export default function PlayPage() {
               pos.current = Chess.default();
               setFen(INITIAL_FEN);
               setMoves([]);
+              setLastUci(null);
+              setInCheck(null);
               if (m.clock) setClock(m.clock);
               break;
             case "opponent_moved": {
@@ -112,6 +113,8 @@ export default function PlayPage() {
                 const san = makeSanAndPlay(pos.current, mv);
                 setFen(makeFen(pos.current.toSetup()));
                 setMoves((x) => [...x, san]);
+                setLastUci(m.uci);
+                setInCheck(pos.current.isCheck() ? pos.current.turn : null);
               }
               if (m.clock) setClock(m.clock);
               break;
@@ -156,15 +159,33 @@ export default function PlayPage() {
       : "Draw"
     : null;
 
+  const live = !result && status === "playing";
+  const turn = sideToMoveFromFen(fen);
+  const mat = material(fen);
+
   return (
     <div className="container">
       <div className="game-wrap">
-        <div>
-          <Chessboard fen={fen} />
-          <div className="clocks" style={{ display: "flex", gap: 12, marginTop: 12 }}>
-            <div className="clock">⚪ {clock ? fmt(clock.white_ms) : "—"}</div>
-            <div className="clock">⚫ {clock ? fmt(clock.black_ms) : "—"}</div>
-          </div>
+        <div className="board-col">
+          <PlayerBar
+            color="black"
+            name="Stockfish"
+            engine="in browser"
+            clockMs={clock?.black_ms}
+            active={live && turn === "black"}
+            captured={mat.blackCaptured}
+            edge={-mat.advantage}
+          />
+          <Chessboard fen={fen} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+          <PlayerBar
+            color="white"
+            name="Stockfish"
+            engine="in browser"
+            clockMs={clock?.white_ms}
+            active={live && turn === "white"}
+            captured={mat.whiteCaptured}
+            edge={mat.advantage}
+          />
         </div>
 
         <div className="sidebar">
