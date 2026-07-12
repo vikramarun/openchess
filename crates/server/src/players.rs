@@ -11,8 +11,40 @@ use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/leaderboard", get(leaderboard))
         .route("/players/{address}", get(profile))
         .route("/players/{address}/games", get(games))
+}
+
+#[derive(Serialize)]
+struct LeaderboardEntry {
+    rank: i64,
+    address: String,
+    rating: i64,
+    games: i64,
+}
+
+/// Top-rated players for the lobby board. Rank is 1-based (server-assigned so
+/// the client doesn't re-derive it). Empty when there are no rated games yet.
+async fn leaderboard(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<LeaderboardEntry>>, StatusCode> {
+    let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let rows = db
+        .leaderboard(100)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let entries = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| LeaderboardEntry {
+            rank: i as i64 + 1,
+            address: r.wallet.to_lowercase(),
+            rating: r.rating.round() as i64,
+            games: r.games,
+        })
+        .collect();
+    Ok(Json(entries))
 }
 
 #[derive(Serialize)]
