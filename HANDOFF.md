@@ -72,31 +72,40 @@ docs.
   park is never empty — run it 24/7 somewhere cheap.
 - **Guardrails for the unaudited launch:** server `MAX_STAKE` capped at **25
   USDC** (`crates/server/src/main.rs`), 1% rake, 24h settle timeout.
-- **Tests:** 32 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
+- **Tests:** 39 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
   `pnpm -C apps/web test:book` (polyglot spec vectors). CI in
   `.github/workflows/ci.yml`; releases in `release.yml`.
 
 ## ⚠️ Not yet done — the gap between "merged" and "shareable"
 
 The BYO-multiplayer feature set (PRs #2–#4) is **complete and on `main`, but not
-all of it is deployed**, and two hardening tasks gate a public launch:
+all of it is deployed**, and one hardening task still gates a public launch:
 
 1. **Cut the first release + deploy the browser-bot changes.** No `v*` tag
    exists yet, so the `/connect` download buttons currently 404
    (`git tag v0.1.0 && git push origin v0.1.0`), and `openchess.ai` still serves
    the pre-SF18 web build until the next Vercel deploy. Start a house bot
    (`scripts/house-bot.sh`) so first visitors have an opponent.
-2. **Rate limiting / abuse guardrails (recommended #1 before sharing).** There
-   is **no throttling** on any HTTP/WS route — a money-adjacent API. Add per-IP
-   limits on `/auth/*`, park offer create/accept, and the WS upgrades
-   (`tower-governor` is a drop-in); cap open offers per wallet/IP; add idle/ping
-   timeouts + a connection cap on `/ws/agent`. Also add alerting on the two
-   loud failure logs (escrow-refund-after-abort, settlement outbox give-ups) —
-   today nobody would notice stuck funds.
-3. **Deploy survivability.** Every `deploy-server.sh` kills live games (rooms are
-   in-memory; wagered games die into the 24h `claimTimeout`). The pragmatic slice
-   is **room rehydration** (rebuild from the `moves` table + `last_move_at` on
-   boot) + a pre-deploy drain — a subset of the multi-node task below.
+2. **Rate limiting / abuse guardrails — DONE** (`crates/server/src/ratelimit.rs`).
+   In-process, single-node (moves behind Redis with the rest of the state when
+   multi-node lands). Per-IP token-bucket throttles on `/auth/*` (middleware),
+   park offer create/accept, and both WS upgrades; a per-owner (wallet, else IP)
+   **open-offer cap**; global + per-IP **concurrent-connection caps** on
+   `/ws/game` and `/ws/agent`; a **pre-Hello timeout** + keepalive ping on
+   `/ws/agent` (an idle-by-design bot is never killed on silence — the ping's
+   send-failure reclaims dead-TCP sockets instead). All limits are env-tunable
+   (`RL_AUTH_BURST`/`RL_AUTH_PER_SEC`, `RL_OFFERS_*`, `RL_WS_*`,
+   `RL_AGENT_CONNS_MAX`/`_PER_IP`, `RL_GAME_CONNS_MAX`/`_PER_IP`,
+   `RL_MAX_OPEN_OFFERS`) with conservative defaults; behind Fly the key is
+   `Fly-Client-IP`. Also: best-effort **alerting** (`crates/server/src/alert.rs`)
+   POSTs to `ALERT_WEBHOOK_URL` (unset ⇒ no-op) on the two money-critical failure
+   logs (escrow-refund-after-abort, settlement outbox give-ups) so stuck funds
+   get noticed.
+3. **Deploy survivability (now the top hardening task).** Every
+   `deploy-server.sh` kills live games (rooms are in-memory; wagered games die
+   into the 24h `claimTimeout`). The pragmatic slice is **room rehydration**
+   (rebuild from the `moves` table + `last_move_at` on boot) + a pre-deploy
+   drain — a subset of the multi-node task below.
 
 ## The big infra task: make it multi-node (true HA)
 

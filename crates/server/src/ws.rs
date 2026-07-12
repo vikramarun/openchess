@@ -3,6 +3,7 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientEnvelope, ClientMessage, Color, Envelope, GameId, ServerMessage};
@@ -22,8 +23,20 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     Path(game_id): Path<GameId>,
     Query(q): Query<WsQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // Abuse guardrails on a public endpoint (spectators need no auth): throttle
+    // upgrade churn per-IP, then cap concurrent sockets globally + per-IP so a
+    // flood of connections can't exhaust the node.
+    let ip = crate::ratelimit::client_ip(&headers);
+    if state.0.limits.ws.check(&ip).is_some() {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let Some(guard) = state.0.limits.game_conns.acquire(&ip) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+
     // Resolve role: a valid token bound to this game => player; else spectator.
     let seat = q
         .token
@@ -35,11 +48,14 @@ pub async fn ws_handler(
     // Bound message/frame size — clients only ever send small JSON envelopes.
     let ws = ws.max_message_size(16 * 1024).max_frame_size(16 * 1024);
     ws.on_upgrade(move |socket| async move {
+        // Hold the connection slot for the socket's whole lifetime.
+        let _guard = guard;
         match seat {
             Some(color) => handle_player(state, game_id, color, socket).await,
             None => handle_spectator(state, game_id, socket).await,
         }
     })
+    .into_response()
 }
 
 async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socket: WebSocket) {
