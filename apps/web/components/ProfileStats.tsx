@@ -1,10 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, fmtUsdcSigned } from "@/lib/escrow";
+
+const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 type Profile = {
   address: string;
@@ -46,11 +49,18 @@ export function ProfileStats({ address }: { address: string }) {
 
   useEffect(() => {
     let live = true;
+    // Validate the wallet before interpolating it into the API path — a route
+    // param is user-controlled, so reject anything that isn't a hex address.
+    if (!ADDR_RE.test(me)) {
+      setErr("invalid wallet address");
+      return;
+    }
     (async () => {
       try {
+        const seg = encodeURIComponent(me);
         const [pr, gr] = await Promise.all([
-          fetch(`${SERVER_HTTP}/players/${me}`).then((r) => r.json()),
-          fetch(`${SERVER_HTTP}/players/${me}/games`).then((r) => r.json()),
+          fetch(`${SERVER_HTTP}/players/${seg}`).then((r) => r.json()),
+          fetch(`${SERVER_HTTP}/players/${seg}/games`).then((r) => r.json()),
         ]);
         if (live) {
           setP(pr);
@@ -141,7 +151,13 @@ export function ProfileStats({ address }: { address: string }) {
                 return (
                   <tr key={g.game_id}>
                     <td>{g.mode}</td>
-                    <td>{shortAddress(opp, "—")}</td>
+                    <td>
+                      {opp ? (
+                        <Link href={`/player/${opp.toLowerCase()}`}>{shortAddress(opp)}</Link>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td>
                       <span className={`pill ${oc}`}>
                         {oc === "win" ? "W" : oc === "loss" ? "L" : oc === "draw" ? "½" : "-"}

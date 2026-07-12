@@ -3,10 +3,10 @@
   --bg-2: #1b1a17;
   --panel: #262421;
   --panel-2: #2b2a27;
-  --border: #00000050;
+  --border: #ffffff14;
   --text: #bababa;
   --text-strong: #ededec;
-  --muted: #8b8780;
+  --muted: #9c968c;
   --accent: #629924;
   --accent-hover: #6fab2a;
   --blue: #3692e7;
@@ -595,6 +595,121 @@ pre {
 .board-wrap {
   width: 100%;
 }
+.board-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Player name-plate above/below the board (name, engine, clock, captured). */
+.player-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.player-bar.active {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.player-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.player-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #0006;
+  flex: none;
+}
+.player-dot.white {
+  background: #f0f0f0;
+}
+.player-dot.black {
+  background: #333;
+  border-color: #666;
+}
+.player-name {
+  font-weight: 700;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+.player-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.player-rating {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--bg-2);
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+.player-captured {
+  font-size: 14px;
+  color: var(--muted);
+  letter-spacing: -1px;
+}
+.player-edge {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0;
+}
+.player-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  font-weight: 700;
+  padding: 3px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--text-strong);
+  flex: none;
+}
+.player-bar.active .player-clock {
+  background: var(--accent);
+  color: #fff;
+}
+/* At-a-glance stake/payout disclosure at the point of wager. */
+.stake-callout {
+  padding: 9px 11px;
+  margin-top: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--text-strong);
+  font-size: 14px;
+}
+/* Rated / casual chips in lobby tables. */
+.tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--muted);
+  vertical-align: middle;
+}
+.tag-rated {
+  background: #2a3a1c;
+  color: var(--accent-hover);
+}
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -978,4 +1093,137 @@ pre {
 .maint-err {
   color: var(--danger);
   font-size: 0.82rem;
+}
+
+/* ---------- how-it-works + footer ---------- */
+.how-it-works {
+  margin-top: 24px;
+}
+.how-title {
+  font-weight: 700;
+  color: var(--text-strong);
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+.how-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.how-step {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.how-num {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+.how-h {
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: 4px;
+}
+.site-footer {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+}
+.footer-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+.footer-h {
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: 6px;
+}
+.footer-legal {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+@media (max-width: 720px) {
+  .how-steps,
+  .footer-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- accessibility: visible keyboard focus ---------- */
+/* A money app must give keyboard users a reliable focus ring. */
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible,
+.tc-tile:focus-visible,
+.tc-pill:focus-visible,
+.mode-card:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- responsive header + board (mobile) ---------- */
+@media (max-width: 720px) {
+  .site-header {
+    flex-wrap: wrap;
+    height: auto;
+    gap: 12px 18px;
+    padding: 10px 16px;
+  }
+  .nav {
+    order: 3;
+    flex-basis: 100%;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .header-actions {
+    margin-left: auto;
+    gap: 10px;
+  }
+  .brand {
+    font-size: 20px;
+  }
+  .game-wrap {
+    grid-template-columns: 1fr;
+  }
+  .player-name {
+    max-width: 150px;
+  }
+}
+@media (max-width: 380px) {
+  .game-wrap {
+    /* let the board shrink below 320 so it never forces horizontal scroll */
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

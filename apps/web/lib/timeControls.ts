@@ -15,3 +15,18 @@ export const DEFAULT_TC: TimeControl = TIME_CONTROLS[1]; // 3+0
 export function tcByLabel(label?: string | null): TimeControl {
   return TIME_CONTROLS.find((t) => t.label === label) ?? DEFAULT_TC;
 }
+
+export const TC_NAME: Record<string, string> = {
+  "1+0": "Bullet",
+  "3+0": "Blitz",
+  "5+0": "Blitz",
+  "10+0": "Rapid",
+};
+
+/** Canonical time-control label: whole minutes when divisible ("3+0"), else
+ *  seconds ("30s+0") — never the fractional "0.5+0" a naïve /60 produces. */
+export function tcLabel(initialSecs: number, incSecs: number): string {
+  const mins = initialSecs / 60;
+  const base = Number.isInteger(mins) ? `${mins}` : `${initialSecs}s`;
+  return `${base}+${incSecs}`;
+}

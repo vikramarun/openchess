@@ -66,7 +66,8 @@ crates/ledger        on-chain settlement (alloy), EIP-712 results, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox
 contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
 apps/web             Next.js UI: lobby, in-browser WASM engine, wallet/SIWE, spectator, profiles
-scripts/             onchain-demo.sh, tournament-demo.sh (local Anvil money-loop demos)
+scripts/             onchain-demo.sh (1v1), tournament-demo.sh + tournament-e2e.py
+                     (settled + abandoned tournament money-loop, real Postgres)
 Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
 ```
 
@@ -163,8 +164,9 @@ chess-client connect --server https://openchess.fly.dev \
 #   unattended matchmaking instead of web-driven: add --auto
 #     [--stake <usdc-base-units> --initial-secs N --increment-secs N --games N]
 
-# Tournament — staked buy-in pool distributed by standings on Anvil (65/25/10)
-bash scripts/tournament-demo.sh
+# Tournament — live E2E: settled pool distributed by standings (65/25/10) AND
+# an abandoned tournament recovered via on-chain claimRefund (real Postgres).
+bash scripts/tournament-demo.sh   # wraps scripts/tournament-e2e.py
 
 # House bot — keep the park populated so visitors always have an opponent:
 # one casual autopilot per lobby time control under one (UNFUNDED) wallet.

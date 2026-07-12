@@ -151,6 +151,13 @@ pub struct RateLimits {
     pub auth: TokenBucket,
     /// Park offer create/accept.
     pub offers: TokenBucket,
+    /// Game/queue/gauntlet/tournament **creation** routes (`POST /games`,
+    /// `/queue`, `/gauntlet/start`, `/tournaments`, `/tournaments/{id}/join`,
+    /// `/tournaments/{id}/start`). Each spawns a room actor and/or an
+    /// oracle-gas-costing on-chain call, so they're the most expensive things to
+    /// spam. Kept off the shared router layer so it never throttles the UI's
+    /// frequent read/poll GETs on the same paths.
+    pub create: TokenBucket,
     /// WebSocket upgrade churn (both `/ws/game` and `/ws/agent`).
     pub ws: TokenBucket,
     /// Public read endpoints (`/players/*`, `/leaderboard`) — cheap per hit but
@@ -163,6 +170,17 @@ pub struct RateLimits {
     /// Max simultaneously-open park offers a single owner (wallet, or IP for
     /// anonymous casual offers) may hold.
     pub max_open_offers: usize,
+    /// Max not-yet-finished **buy-in** tournaments a single organizer wallet may
+    /// have open at once. Each buy-in tournament opens an on-chain pool at
+    /// creation (oracle-paid gas) while the attacker locks nothing until someone
+    /// joins, so without this cap one authed wallet could drain oracle ETH by
+    /// looping `POST /tournaments {buy_in}`. Casual (no-pool) tournaments are
+    /// not counted.
+    pub max_open_tournaments: usize,
+    /// Global ceiling on concurrent in-memory game rooms (room actor tasks +
+    /// map entries). Unstarted casual rooms only self-reap after 60s, so without
+    /// a ceiling a creation flood could exhaust memory/tasks on the single node.
+    pub max_rooms: usize,
 }
 
 impl RateLimits {
@@ -186,6 +204,10 @@ impl RateLimits {
                 env_parse("RL_OFFERS_BURST", 20),
                 env_parse("RL_OFFERS_PER_SEC", 1.0),
             ),
+            create: TokenBucket::new(
+                env_parse("RL_CREATE_BURST", 20),
+                env_parse("RL_CREATE_PER_SEC", 0.5),
+            ),
             ws: TokenBucket::new(env_parse("RL_WS_BURST", 60), env_parse("RL_WS_PER_SEC", 2.0)),
             reads: TokenBucket::new(
                 env_parse("RL_READS_BURST", 60),
@@ -206,6 +228,11 @@ impl RateLimits {
             // (scripts/house-bot.sh defaults to 4 TCs under one wallet); bump
             // RL_MAX_OPEN_OFFERS if you run more.
             max_open_offers: env_parse("RL_MAX_OPEN_OFFERS", 8),
+            // A legitimate organizer runs one buy-in tournament at a time; a
+            // small allowance covers back-to-back events without letting one
+            // wallet open dozens of oracle-funded pools.
+            max_open_tournaments: env_parse("RL_MAX_OPEN_TOURNAMENTS", 3),
+            max_rooms: env_parse("RL_MAX_ROOMS", 4096),
         }
     }
 
@@ -235,6 +262,7 @@ impl RateLimits {
     pub fn sweep(&self) {
         self.auth.sweep();
         self.offers.sweep();
+        self.create.sweep();
         self.ws.sweep();
         self.reads.sweep();
     }

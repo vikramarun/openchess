@@ -4,20 +4,38 @@ import { Chess } from "chessops/chess";
 import { INITIAL_FEN, makeFen } from "chessops/fen";
 import { makeSanAndPlay } from "chessops/san";
 import { parseUci } from "chessops/util";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { SERVER_WS } from "@/lib/config";
+import { PlayerBar } from "@/components/PlayerBar";
+import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { shortAddress } from "@/lib/address";
+import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
+import { fmtUsdc } from "@/lib/escrow";
+import { TC_NAME, tcLabel } from "@/lib/timeControls";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number; increment_ms: number };
 type Result = { winner: "white" | "black" | null; reason: string };
+type Meta = {
+  white: string | null;
+  black: string | null;
+  white_name: string | null;
+  black_name: string | null;
+  white_engine: string | null;
+  black_engine: string | null;
+  stake: string | null;
+  initial_secs: number;
+  increment_secs: number;
+};
 
-function fmt(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, "0")}`;
+/** Best display name for a seat: declared name, else short wallet, else engine. */
+function seatName(name: string | null, addr: string | null): string {
+  if (name) return name;
+  if (addr) return shortAddress(addr);
+  return "Engine";
 }
 
 export default function GamePage() {
@@ -26,12 +44,32 @@ export default function GamePage() {
 
   const [fen, setFen] = useState(INITIAL_FEN);
   const [moves, setMoves] = useState<string[]>([]);
+  const [lastUci, setLastUci] = useState<string | null>(null);
+  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
   const [clock, setClock] = useState<Clock | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("connecting…");
+  const [meta, setMeta] = useState<Meta | null>(null);
 
   const pos = useRef(Chess.default());
+
+  // Fetch the live-game metadata once so the spectator sees who's playing, the
+  // stake, and the time control — not just a bare game id.
+  useEffect(() => {
+    let off = false;
+    fetch(`${SERVER_HTTP}/games/live`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((games: (Meta & { game_id: string })[]) => {
+        if (off) return;
+        const g = games.find((x) => x.game_id === id);
+        if (g) setMeta(g);
+      })
+      .catch(() => {});
+    return () => {
+      off = true;
+    };
+  }, [id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +90,8 @@ export default function GamePage() {
             pos.current = Chess.default();
             setFen(INITIAL_FEN);
             setMoves([]);
+            setLastUci(null);
+            setInCheck(null);
             setResult(null);
             if (msg.clock) setClock(msg.clock);
             break;
@@ -63,6 +103,8 @@ export default function GamePage() {
               const san = makeSanAndPlay(pos.current, move);
               setFen(makeFen(pos.current.toSetup()));
               setMoves((m) => [...m, san]);
+              setLastUci(msg.uci);
+              setInCheck(pos.current.isCheck() ? pos.current.turn : null);
             }
             if (msg.clock) setClock(msg.clock);
             break;
@@ -112,25 +154,69 @@ export default function GamePage() {
       : "Draw"
     : null;
 
+  const live = !result && status === "watching";
+  const turn = sideToMoveFromFen(fen);
+  const mat = material(fen);
+  const tc = meta ? tcLabel(meta.initial_secs, meta.increment_secs) : null;
+
   return (
     <div className="container">
+      <div style={{ marginBottom: 12 }}>
+        <Link href="/" className="muted">
+          ← Back to lobby
+        </Link>
+      </div>
       <div className="game-wrap">
-        <div>
-          <Chessboard fen={fen} />
-          <div className="clocks" style={{ display: "flex", gap: 12, marginTop: 12 }}>
-            <div className="clock">⚪ {clock ? fmt(clock.white_ms) : "—"}</div>
-            <div className="clock">⚫ {clock ? fmt(clock.black_ms) : "—"}</div>
-          </div>
+        <div className="board-col">
+          <PlayerBar
+            color="black"
+            name={meta ? seatName(meta.black_name, meta.black) : "Black"}
+            engine={meta?.black_engine}
+            clockMs={clock?.black_ms}
+            active={live && turn === "black"}
+            captured={mat.blackCaptured}
+            edge={-mat.advantage}
+          />
+          <Chessboard fen={fen} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+          <PlayerBar
+            color="white"
+            name={meta ? seatName(meta.white_name, meta.white) : "White"}
+            engine={meta?.white_engine}
+            clockMs={clock?.white_ms}
+            active={live && turn === "white"}
+            captured={mat.whiteCaptured}
+            edge={mat.advantage}
+          />
         </div>
 
         <div className="sidebar">
           <div className="panel">
-            <div className="muted" style={{ fontSize: 13 }}>
-              Spectating
+            <div style={{ fontWeight: 700, color: "var(--text-strong)" }}>
+              Spectating {status === "reconnecting…" && <span className="muted">· reconnecting…</span>}
             </div>
-            <code>{id}</code>
-            <div style={{ marginTop: 8 }} className="muted">
-              Status: {status}
+            <div className="muted" style={{ marginTop: 6, fontSize: 14 }}>
+              {meta ? (
+                <>
+                  {meta.stake ? (
+                    <>
+                      Stake <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(meta.stake)} USDC</b>{" "}
+                      <span className="tag tag-rated">Rated</span>
+                    </>
+                  ) : (
+                    <>
+                      Casual <span className="tag">Free</span>
+                    </>
+                  )}
+                  {tc && (
+                    <>
+                      {" · "}
+                      {tc} {TC_NAME[tc] ?? ""}
+                    </>
+                  )}
+                </>
+              ) : (
+                <>Loading game details…</>
+              )}
             </div>
           </div>
 
@@ -142,6 +228,14 @@ export default function GamePage() {
                   ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
                 </div>
               )}
+              <div style={{ marginTop: 10, display: "flex", gap: 8, justifyContent: "center" }}>
+                <Link href="/" className="ghost">
+                  Watch another
+                </Link>
+                <Link href="/" className="ghost">
+                  Play
+                </Link>
+              </div>
             </div>
           )}
 

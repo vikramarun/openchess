@@ -777,6 +777,7 @@ async fn queue_join(
 ) -> Result<Json<QueueResp>, StatusCode> {
     // Drain: reject before enqueueing (a match would spawn a game).
     state.reject_if_draining()?;
+    state.reject_if_rate_limited_create(&headers)?;
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     let bot = is_bot_seat(&req.seat);
     // Wagered tiers AND bot seats require auth; the seat (and the agent it
@@ -1119,6 +1120,7 @@ async fn gauntlet_start(
 ) -> Result<Json<GauntletStartResp>, StatusCode> {
     // Drain: reject new gauntlets during maintenance.
     state.reject_if_draining()?;
+    state.reject_if_rate_limited_create(&headers)?;
     validate_tc(req.initial_secs, req.increment_secs)?;
     let addr = if req.stake.is_some() {
         Some(
@@ -1326,6 +1328,7 @@ async fn tourney_create(
     // Drain: reject before opening an on-chain pool (burns oracle gas) for a
     // tournament that couldn't be started (tourney_start is also drained).
     state.reject_if_draining()?;
+    state.reject_if_rate_limited_create(&headers)?;
     validate_tc(req.initial_secs, req.increment_secs)?;
     let id = Uuid::new_v4();
     // The creating wallet (if authenticated) — only they may start it later.
@@ -1334,8 +1337,26 @@ async fn tourney_create(
     // A buy-in tournament opens its on-chain pool now (fail-closed). Require an
     // authenticated caller so an anonymous request can't burn oracle gas.
     if let Some(buy_in_str) = &req.buy_in {
-        if state.authed_wallet(&headers).is_none() {
-            return Err(StatusCode::UNAUTHORIZED);
+        let creator = state
+            .authed_wallet(&headers)
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        // Cap the number of not-yet-finished buy-in tournaments this wallet may
+        // have open at once. Each one opens an oracle-gas-funded pool while the
+        // organizer locks nothing until someone joins, so without this a single
+        // authed wallet could drain oracle ETH by looping creation.
+        {
+            let ts = state.0.lobby.tournaments.lock();
+            let open = ts
+                .values()
+                .filter(|t| {
+                    t.buy_in.is_some()
+                        && !matches!(t.status.as_str(), "settled" | "complete" | "abandoned")
+                        && t.organizer.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&creator))
+                })
+                .count();
+            if open >= state.0.limits.max_open_tournaments {
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
         }
         let buy_in = buy_in_str
             .parse::<U256>()
@@ -1437,6 +1458,9 @@ async fn tourney_join(
     // couldn't be started (this handler returns a bare StatusCode).
     if state.maintenance_on() {
         return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    if state.reject_if_rate_limited_create(&headers).is_err() {
+        return StatusCode::TOO_MANY_REQUESTS;
     }
     // Read the tournament's terms + whether this entrant is already in.
     let (buy_in, status, full) = {
@@ -1673,6 +1697,7 @@ async fn tourney_start(
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
     // Drain: reject before spawning any games.
     state.reject_if_draining()?;
+    state.reject_if_rate_limited_create(&headers)?;
     let caller = state.authed_wallet(&headers);
     {
         let mut ts = state.0.lobby.tournaments.lock();

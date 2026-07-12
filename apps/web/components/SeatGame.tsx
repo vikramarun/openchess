@@ -7,21 +7,18 @@ import { parseUci } from "chessops/util";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { PlayerBar } from "@/components/PlayerBar";
 import { ensureBookLoaded } from "@/lib/browserBot";
+import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
-import { fmtUsdc } from "@/lib/escrow";
+import { fmtUsdc, payoutForStake } from "@/lib/escrow";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number };
 type Result = { winner: "white" | "black" | null; reason: string };
 type Opponent = { name: string; declared_engine: string | null };
-
-function fmt(ms: number) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
 
 /** Play ONE seat of a server game in the browser (the opponent runs theirs).
  *  Renders the live board from a spectator socket; drives the user's seat with
@@ -46,6 +43,8 @@ export function SeatGame({
 }) {
   const [fen, setFen] = useState(INITIAL_FEN);
   const [moves, setMoves] = useState<string[]>([]);
+  const [lastUci, setLastUci] = useState<string | null>(null);
+  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
   const [clock, setClock] = useState<Clock | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [opponent, setOpponent] = useState<Opponent | null>(null);
@@ -61,6 +60,73 @@ export function SeatGame({
     let engine: BrowserEngine | null = null;
     let spectator: WebSocket | null = null;
     let seat: { close: () => void } | null = null;
+    let specTimer: ReturnType<typeof setTimeout> | undefined;
+    let specRetry = 0;
+    let finished = false;
+
+    const onSpecMessage = (ev: MessageEvent) => {
+      let m: any;
+      try {
+        m = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      try {
+        switch (m.type) {
+          case "game_start":
+            pos.current = Chess.default();
+            setFen(INITIAL_FEN);
+            setMoves([]);
+            setLastUci(null);
+            setInCheck(null);
+            if (m.clock) setClock(m.clock);
+            break;
+          case "opponent_moved": {
+            const mv = parseUci(m.uci);
+            if (mv && pos.current.isLegal(mv)) {
+              const san = makeSanAndPlay(pos.current, mv);
+              setFen(makeFen(pos.current.toSetup()));
+              setMoves((x) => [...x, san]);
+              setLastUci(m.uci);
+              setInCheck(pos.current.isCheck() ? pos.current.turn : null);
+            }
+            if (m.clock) setClock(m.clock);
+            break;
+          }
+          case "clock_sync":
+            if (m.clock) setClock(m.clock);
+            break;
+          case "game_over":
+            finished = true; // stop reconnecting — the game is over
+            setResult(m.result);
+            setStatus("finished");
+            verifyResultSig(m.result_hash, m.server_sig).then(setVerified);
+            onResultRef.current?.(m.result?.winner ?? null);
+            break;
+        }
+      } catch {
+        /* ignore one bad frame */
+      }
+    };
+
+    // The spectator socket renders the live board. Reconnect with backoff so a
+    // dropped connection mid-wager shows "reconnecting…" and recovers, rather
+    // than silently freezing the board while money is on the line.
+    const connectSpectator = () => {
+      if (cancelled || finished) return;
+      spectator = new WebSocket(`${SERVER_WS}/ws/game/${gameId}`);
+      spectator.onopen = () => {
+        specRetry = 0;
+        if (!finished) setStatus("playing");
+      };
+      spectator.onmessage = onSpecMessage;
+      spectator.onclose = () => {
+        if (cancelled || finished) return;
+        setStatus("reconnecting…");
+        specRetry = Math.min(specRetry + 1, 6);
+        specTimer = setTimeout(connectSpectator, 500 * 2 ** (specRetry - 1)); // backoff to ~16s
+      };
+    };
 
     const run = async () => {
       engine = new BrowserEngine();
@@ -69,47 +135,7 @@ export function SeatGame({
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
 
-      spectator = new WebSocket(`${SERVER_WS}/ws/game/${gameId}`);
-      spectator.onopen = () => setStatus("playing");
-      spectator.onmessage = (ev) => {
-        let m: any;
-        try {
-          m = JSON.parse(ev.data);
-        } catch {
-          return;
-        }
-        try {
-          switch (m.type) {
-            case "game_start":
-              pos.current = Chess.default();
-              setFen(INITIAL_FEN);
-              setMoves([]);
-              if (m.clock) setClock(m.clock);
-              break;
-            case "opponent_moved": {
-              const mv = parseUci(m.uci);
-              if (mv && pos.current.isLegal(mv)) {
-                const san = makeSanAndPlay(pos.current, mv);
-                setFen(makeFen(pos.current.toSetup()));
-                setMoves((x) => [...x, san]);
-              }
-              if (m.clock) setClock(m.clock);
-              break;
-            }
-            case "clock_sync":
-              if (m.clock) setClock(m.clock);
-              break;
-            case "game_over":
-              setResult(m.result);
-              setStatus("finished");
-              verifyResultSig(m.result_hash, m.server_sig).then(setVerified);
-              onResultRef.current?.(m.result?.winner ?? null);
-              break;
-          }
-        } catch {
-          /* ignore one bad frame */
-        }
-      };
+      connectSpectator();
 
       // Drive only our seat; the fixed movetime is a fallback — playSeat uses
       // the authoritative clock from your_turn when present.
@@ -133,6 +159,7 @@ export function SeatGame({
 
     return () => {
       cancelled = true;
+      if (specTimer) clearTimeout(specTimer);
       spectator?.close();
       seat?.close();
       engine?.dispose();
@@ -147,14 +174,37 @@ export function SeatGame({
   const youWon = result && result.winner === color;
   const youLost = result && result.winner && result.winner !== color;
 
+  const oppColor = color === "white" ? "black" : "white";
+  const live = !result && status === "playing";
+  const turn = sideToMoveFromFen(fen);
+  const mat = material(fen);
+  const myClock = clock ? (color === "white" ? clock.white_ms : clock.black_ms) : null;
+  const oppClock = clock ? (color === "white" ? clock.black_ms : clock.white_ms) : null;
+  const myCaptured = color === "white" ? mat.whiteCaptured : mat.blackCaptured;
+  const oppCaptured = color === "white" ? mat.blackCaptured : mat.whiteCaptured;
+  const myEdge = color === "white" ? mat.advantage : -mat.advantage;
+
   return (
     <div className="game-wrap">
-      <div>
-        <Chessboard fen={fen} orientation={color} />
-        <div className="clocks" style={{ display: "flex", gap: 12, marginTop: 12 }}>
-          <div className="clock">⚪ {clock ? fmt(clock.white_ms) : "—"}</div>
-          <div className="clock">⚫ {clock ? fmt(clock.black_ms) : "—"}</div>
-        </div>
+      <div className="board-col">
+        <PlayerBar
+          color={oppColor}
+          name={opponent?.name ?? "Opponent"}
+          engine={opponent?.declared_engine}
+          clockMs={oppClock}
+          active={live && turn === oppColor}
+          captured={oppCaptured}
+          edge={-myEdge}
+        />
+        <Chessboard fen={fen} orientation={color} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+        <PlayerBar
+          color={color}
+          name="You"
+          clockMs={myClock}
+          active={live && turn === color}
+          captured={myCaptured}
+          edge={myEdge}
+        />
       </div>
 
       <div className="sidebar">
@@ -165,15 +215,16 @@ export function SeatGame({
           <div className="muted" style={{ fontSize: 14 }}>
             Your engine plays your seat in your browser; your opponent runs theirs.
           </div>
-          {opponent && (
-            <div className="muted" style={{ marginTop: 6, fontSize: 14 }}>
-              Opponent: <b style={{ color: "var(--text-strong)" }}>{opponent.name}</b>
-              {opponent.declared_engine && <> · 🤖 {opponent.declared_engine}</>}
-            </div>
-          )}
           {stake && (
-            <div className="muted" style={{ marginTop: 6 }}>
-              Stake: <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(stake)} USDC</b>
+            <div className="stake-callout" style={{ marginTop: 10 }}>
+              <div>
+                Stake <b>{fmtUsdc(stake)} USDC</b> · win nets{" "}
+                <b>{fmtUsdc(payoutForStake(stake))} USDC</b>
+              </div>
+              <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
+                Winner takes both stakes minus a 1% fee; a draw returns your stake. Non-custodial —
+                settled on-chain.
+              </div>
             </div>
           )}
           <div className="muted" style={{ marginTop: 8 }}>
