@@ -8,7 +8,8 @@ import { SERVER_HTTP } from "./config";
 
 export const USDC_DECIMALS = 6;
 
-/** Minimal ChessEscrow ABI — only the user-facing bankroll functions. */
+/** Minimal ChessEscrow ABI — the user-facing bankroll + tournament claim
+ *  functions and the getters the claim UI reads. */
 export const ESCROW_ABI = [
   { type: "function", name: "deposit", stateMutability: "nonpayable", inputs: [{ name: "amount", type: "uint256" }], outputs: [] },
   { type: "function", name: "withdraw", stateMutability: "nonpayable", inputs: [{ name: "amount", type: "uint256" }], outputs: [] },
@@ -16,6 +17,15 @@ export const ESCROW_ABI = [
   { type: "function", name: "bankroll", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ type: "uint256" }] },
   { type: "function", name: "locked", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ type: "uint256" }] },
   { type: "function", name: "token", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
+  // Tournament payout (root-settled fields) — winner claims their signed share.
+  { type: "function", name: "claimTournament", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "account", type: "address" }, { name: "amount", type: "uint256" }, { name: "proof", type: "bytes32[]" }], outputs: [] },
+  // Reclaim a buy-in from a tournament that never settled past the timeout.
+  { type: "function", name: "claimRefund", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "account", type: "address" }], outputs: [] },
+  // tournaments(tid) → (buyIn, pool, claimedAmount, entrants, openedAt, settled, payoutRoot, exists)
+  { type: "function", name: "tournaments", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [{ name: "buyIn", type: "uint256" }, { name: "pool", type: "uint256" }, { name: "claimedAmount", type: "uint256" }, { name: "entrants", type: "uint32" }, { name: "openedAt", type: "uint64" }, { name: "settled", type: "bool" }, { name: "payoutRoot", type: "bytes32" }, { name: "exists", type: "bool" }] },
+  { type: "function", name: "tournamentClaimed", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
+  { type: "function", name: "tournamentEntered", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
+  { type: "function", name: "settleTimeout", stateMutability: "view", inputs: [], outputs: [{ type: "uint64" }] },
 ] as const;
 
 /** Minimal ERC-20 ABI for USDC (approve + reads). */
@@ -69,4 +79,28 @@ export function fmtUsdc(base: bigint | string | number | undefined | null): stri
 /** Parse a human USDC amount ("1.5") to base units. Throws on bad input. */
 export function parseUsdc(human: string): bigint {
   return parseUnits(human.trim(), USDC_DECIMALS);
+}
+
+/** UUID → on-chain tournament id: the 16 UUID bytes left-aligned in a bytes32
+ *  (right-padded with zeros), matching the server's `game_id_to_bytes32`. */
+export function tidToBytes32(uuid: string): `0x${string}` {
+  const hex = uuid.replace(/-/g, "").toLowerCase();
+  return `0x${hex}${"0".repeat(32)}` as `0x${string}`;
+}
+
+/** A winner's Merkle claim: the signed payout amount + its proof path. */
+export type ClaimProof = { amount: bigint; proof: `0x${string}`[] };
+
+/** Fetch a winner's Merkle claim proof for a root-settled tournament. Returns
+ *  null when the address isn't a winner or the tournament isn't root-settled
+ *  (the server answers 404). */
+export async function fetchClaimProof(tid: string, address: string): Promise<ClaimProof | null> {
+  try {
+    const r = await fetch(`${SERVER_HTTP}/tournaments/${tid}/claim/${address}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return { amount: BigInt(j.amount), proof: (j.proof ?? []) as `0x${string}`[] };
+  } catch {
+    return null;
+  }
 }
