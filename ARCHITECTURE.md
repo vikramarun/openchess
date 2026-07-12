@@ -87,6 +87,20 @@ The default experience is a free, in-browser casual lobby (`apps/web` +
   replays the full move history to that socket (a `Snapshot` command → `GameStart`
   + one `OpponentMoved` per move) so a **mid-game** spectator rebuilds the board,
   then streams live.
+- **Leaderboard** — `GET /leaderboard` ranks wallets with ≥1 finished rated game
+  by Elo (updated by `update_ratings` as games finish; one overall rating today).
+
+## Abuse guardrails (rate limiting)
+
+A money-adjacent public API, so `crates/server/src/ratelimit.rs` adds in-process,
+per-IP guardrails (keyed on `Fly-Client-IP`): token-bucket throttles on `/auth/*`,
+park offer create/accept, the WS upgrades, and the public read routes; global +
+per-IP concurrent-connection caps on `/ws/game` and `/ws/agent`; a per-owner
+open-offer cap; and a pre-Hello timeout + keepalive ping on the bot-control
+socket. All are env-tunable (`RL_*`) and single-node (they move behind Redis with
+the rest of the live state when the server goes multi-node). A best-effort
+`ALERT_WEBHOOK_URL` fires on the two money-critical failure paths (a refund
+failing after an aborted dispatch, and the settlement outbox exhausting retries).
 
 ## Money flow (per-game)
 

@@ -67,15 +67,21 @@ honest checklist.
 - [ ] **TLS everywhere**: serve the web over `https` and the server over `wss`
   (terminate at a reverse proxy). The launch token rides in the WS query string —
   keep it on TLS and out of logs.
-- [ ] **Per-IP rate limiting at the edge** (nginx/Cloudflare/API gateway). The app
-  has size caps + state eviction but no in-app per-IP limiter.
+- [x] **Per-IP rate limiting in-app** (`crates/server/src/ratelimit.rs`):
+  token-bucket throttles on `/auth/*`, park create/accept, WS upgrades, and
+  `/players/*`+`/leaderboard`; global + per-IP WS connection caps; a per-owner
+  open-offer cap. Env-tunable (`RL_*`), keyed on `Fly-Client-IP`. **Still add
+  edge rate limiting** (Cloudflare/gateway) as defense-in-depth for the L3/L4
+  floods the app never sees, and pin `Fly-Client-IP` trust to the deploy.
 - [ ] Set `REQUIRE_ONCHAIN=1` so a misconfigured node refuses to boot.
 
 ### 4. Observability
 - [ ] Put `/ready` (DB check) in the load-balancer health check; keep `/health`
   for liveness.
-- [ ] **Alert on settlement failures and outbox depth/age** — a settlement that
-  exhausts retries currently only logs an error; stuck funds must page someone.
+- [~] **Alert on settlement failures and outbox depth/age.** `ALERT_WEBHOOK_URL`
+  (unset ⇒ no-op) now fires a best-effort webhook on the two money-critical
+  give-ups (escrow-refund-after-abort, settlement-outbox exhausted). Still add
+  real paging + outbox depth/age metrics — a single webhook POST can itself fail.
 - [ ] Monitor on-chain events (`OracleUpdated`, `PausedSet`, `Ownership*`,
   `GameSettled`, `Tournament*`) and reconcile `Deposited/Withdrawn` vs the
   contract's USDC balance to detect solvency drift.
@@ -241,6 +247,8 @@ but do the contract audit + oracle-key hardening + legal review first.)
 | `SIWE_CHAIN_ID` | no (`8453`) | expected chain in SIWE messages |
 | `WEB_ORIGIN` | prod yes | CORS allow-origin |
 | `REQUIRE_ONCHAIN` | recommended | `1` ⇒ fail boot unless fully configured |
+| `ALERT_WEBHOOK_URL` | recommended | Slack/Discord/generic webhook; best-effort alert on money-critical failures (unset ⇒ no-op) |
+| `RL_*` | no | rate-limit tuning (per-bucket burst/rate, WS conn caps, open-offer cap); sane defaults in `ratelimit.rs` |
 
 **Web** (`apps/web`): `NEXT_PUBLIC_SERVER_HTTP`, `NEXT_PUBLIC_SERVER_WS`,
 `NEXT_PUBLIC_WC_PROJECT_ID`.

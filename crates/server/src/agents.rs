@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -27,6 +28,14 @@ use crate::{sanitize_label, AppState};
 /// Monotonic id distinguishing agent connections, so a stale connection's
 /// teardown can't evict its own replacement.
 static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// A newly-opened control socket must send its `Hello` within this window or
+/// it's dropped — bounds slot-holding by connections that never authenticate.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Keepalive ping cadence for an idle control socket. A connected bot waiting
+/// for its owner to start a game is idle by design, so we never time it out on
+/// silence; instead we ping, and a failed send reclaims a dead-TCP socket.
+const AGENT_PING: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct AgentMeta {
@@ -193,66 +202,91 @@ async fn agent_status(
     }))
 }
 
-async fn ws_agent(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn ws_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    // Throttle upgrade churn per-IP, then cap concurrent control sockets
+    // (global + per-IP) so a flood can't exhaust the node before anyone even
+    // authenticates. The slot is held for the socket's whole lifetime.
+    let guard = match state.0.limits.admit_ws(&headers, &state.0.limits.agent_conns) {
+        Ok(g) => g,
+        Err(resp) => return resp,
+    };
+
     // Auth happens on the Hello frame, NOT a URL query parameter: the session
     // token is a 24h wallet-scoped credential (it can move money via staked
     // seats), and query strings end up in proxy/access logs and URI traces.
     let ws = ws.max_message_size(64 * 1024).max_frame_size(64 * 1024);
-    ws.on_upgrade(move |socket| handle_agent(state, socket))
+    ws.on_upgrade(move |socket| async move {
+        let _guard = guard; // released when the socket task ends
+        handle_agent(state, socket).await;
+    })
+    .into_response()
 }
 
 async fn handle_agent(state: AppState, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
 
-    // First frame must be Hello (auth + registration).
-    let (wallet, meta) = loop {
-        match stream.next().await {
-            Some(Ok(Message::Text(t))) => {
-                let Ok(env) = serde_json::from_str::<AgentEnvelope>(t.as_str()) else {
-                    continue;
-                };
-                if let AgentToServer::Hello {
-                    token,
-                    name,
-                    engine,
-                    mut options,
-                    ..
-                } = env.msg
-                {
-                    // The control channel can move money (staked seats), so it
-                    // is always wallet-authenticated — no anonymous bots.
-                    let Some(wallet) = state.0.auth.wallet_for_token(&token) else {
-                        let err = Envelope::new(
-                            1,
-                            0,
-                            ServerToAgent::Error {
-                                code: "unauthorized".into(),
-                                message: "invalid or expired session token".into(),
-                            },
-                        );
-                        if let Ok(text) = serde_json::to_string(&err) {
-                            let _ = sink.send(Message::Text(text.into())).await;
-                        }
-                        return;
+    // First frame must be Hello (auth + registration). A real client sends it
+    // immediately; bound the wait so an un-authenticated socket can't sit here
+    // holding a connection slot.
+    let hello = tokio::time::timeout(HELLO_TIMEOUT, async {
+        loop {
+            match stream.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let Ok(env) = serde_json::from_str::<AgentEnvelope>(t.as_str()) else {
+                        continue;
                     };
-                    options.truncate(128);
-                    let engine = sanitize_label(&engine).unwrap_or_else(|| "engine".into());
-                    break (
-                        wallet,
-                        AgentMeta {
-                            name: name
-                                .as_deref()
-                                .and_then(sanitize_label)
-                                .unwrap_or_else(|| engine.clone()),
-                            engine,
-                            options,
-                        },
-                    );
+                    if let AgentToServer::Hello {
+                        token,
+                        name,
+                        engine,
+                        mut options,
+                        ..
+                    } = env.msg
+                    {
+                        // The control channel can move money (staked seats), so
+                        // it is always wallet-authenticated — no anonymous bots.
+                        let Some(wallet) = state.0.auth.wallet_for_token(&token) else {
+                            let err = Envelope::new(
+                                1,
+                                0,
+                                ServerToAgent::Error {
+                                    code: "unauthorized".into(),
+                                    message: "invalid or expired session token".into(),
+                                },
+                            );
+                            if let Ok(text) = serde_json::to_string(&err) {
+                                let _ = sink.send(Message::Text(text.into())).await;
+                            }
+                            return None;
+                        };
+                        options.truncate(128);
+                        let engine = sanitize_label(&engine).unwrap_or_else(|| "engine".into());
+                        return Some((
+                            wallet,
+                            AgentMeta {
+                                name: name
+                                    .as_deref()
+                                    .and_then(sanitize_label)
+                                    .unwrap_or_else(|| engine.clone()),
+                                engine,
+                                options,
+                            },
+                        ));
+                    }
                 }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                _ => continue,
             }
-            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-            _ => continue,
         }
+    })
+    .await;
+    let Ok(Some((wallet, meta))) = hello else {
+        // Timed out, closed, or failed auth before registering.
+        return;
     };
 
     let (tx, mut rx) = mpsc::channel::<ServerToAgent>(16);
@@ -270,39 +304,60 @@ async fn handle_agent(state: AppState, socket: WebSocket) {
         let _ = sink.send(Message::Text(text.into())).await;
     }
 
-    // Writer: registry -> agent.
-    let writer = tokio::spawn(async move {
+    // Writer: registry -> agent, plus a keepalive ping on an idle socket.
+    let mut writer = tokio::spawn(async move {
         let mut seq = 1u64;
-        while let Some(msg) = rx.recv().await {
-            seq += 1;
-            let env = Envelope::new(seq, 0, msg);
-            let Ok(text) = serde_json::to_string(&env) else {
-                continue;
-            };
-            if sink.send(Message::Text(text.into())).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(AGENT_PING);
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    // Sender dropped (agent replaced by a reconnect, or torn
+                    // down): stop writing.
+                    let Some(msg) = msg else { break };
+                    seq += 1;
+                    let env = Envelope::new(seq, 0, msg);
+                    let Ok(text) = serde_json::to_string(&env) else { continue };
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = ping.tick() => {
+                    // No pong is required — an idle tokio-tungstenite client only
+                    // flushes its auto-pong on its next write. The point is that a
+                    // failed *send* reveals a dead TCP peer so we reclaim the slot.
+                    if sink.send(Message::Ping(Default::default())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
 
-    // Reader: status updates until the socket closes. Client frames may only
-    // make the agent LESS available — the idle transition is server-owned
-    // (game_ended via cleanup_task), so a buggy or hostile client can never
-    // clear a live claim and trigger double dispatch.
-    while let Some(Ok(m)) = stream.next().await {
-        match m {
-            Message::Text(t) => {
-                let Ok(env) = serde_json::from_str::<AgentEnvelope>(t.as_str()) else {
-                    continue;
-                };
-                if let AgentToServer::Status { state: s, .. } = env.msg {
-                    if s == "playing" {
-                        state.0.agents.set_busy(&wallet, conn_id, true);
+    // Reader: status updates until the socket closes OR the writer stops (its
+    // keepalive ping hit a dead peer, or a reconnect replaced this agent).
+    // Client frames may only make the agent LESS available — the idle
+    // transition is server-owned (game_ended via cleanup_task), so a buggy or
+    // hostile client can never clear a live claim and trigger double dispatch.
+    loop {
+        tokio::select! {
+            m = stream.next() => {
+                let Some(Ok(m)) = m else { break };
+                match m {
+                    Message::Text(t) => {
+                        let Ok(env) = serde_json::from_str::<AgentEnvelope>(t.as_str()) else {
+                            continue;
+                        };
+                        if let AgentToServer::Status { state: s, .. } = env.msg {
+                            if s == "playing" {
+                                state.0.agents.set_busy(&wallet, conn_id, true);
+                            }
+                        }
                     }
+                    Message::Close(_) => break,
+                    _ => {}
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
+            _ = &mut writer => break,
         }
     }
 

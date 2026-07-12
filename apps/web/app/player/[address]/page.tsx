@@ -3,6 +3,7 @@
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP } from "@/lib/config";
 
 type Profile = {
@@ -26,8 +27,6 @@ type GameItem = {
   finished_at: string | null;
 };
 
-const short = (a?: string | null) =>
-  a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—";
 const usdc = (base?: string | null) => {
   if (!base) return "—";
   const n = Number(base) / 1e6;
@@ -78,7 +77,7 @@ export default function PlayerPage() {
       <div className="profile-head">
         <div className="avatar">♟</div>
         <div>
-          <div className="who">{short(address)}</div>
+          <div className="who">{shortAddress(address)}</div>
           <div className="muted" style={{ fontSize: 13, wordBreak: "break-all" }}>
             {address}
           </div>
@@ -146,7 +145,7 @@ export default function PlayerPage() {
                 return (
                   <tr key={g.game_id}>
                     <td>{g.mode}</td>
-                    <td>{short(opp)}</td>
+                    <td>{shortAddress(opp, "—")}</td>
                     <td>
                       <span className={`pill ${oc}`}>
                         {oc === "win" ? "W" : oc === "loss" ? "L" : oc === "draw" ? "½" : "-"}
