@@ -594,19 +594,29 @@ impl Db {
     /// sitting at the default 1500 don't pad the board. Powers the lobby
     /// leaderboard.
     pub async fn leaderboard(&self, limit: i64) -> Result<Vec<LeaderboardRow>> {
+        // Count finished rated games per wallet in a single GROUP BY pass over
+        // `games` (each qualifying game contributes one row per side), then join
+        // the counts back to `users`. This is O(users + games) — the old form ran
+        // a correlated COUNT(*) per user (O(users × games)). COUNT(DISTINCT id)
+        // keeps a hypothetical self-play game (white == black) counted once, and
+        // the inner join makes the "at least one game" filter implicit.
         let rows = sqlx::query_as::<_, LeaderboardRow>(
-            r#"SELECT wallet, rating, games FROM (
-                 SELECT u.wallet AS wallet, u.rating AS rating,
-                   (SELECT COUNT(*) FROM games g
-                      WHERE g.status='finished' AND g.result IS NOT NULL
-                        AND g.white_wallet IS NOT NULL AND g.black_wallet IS NOT NULL
-                        AND (lower(g.white_wallet)=lower(u.wallet)
-                          OR lower(g.black_wallet)=lower(u.wallet))
-                   ) AS games
-                 FROM users u
-               ) t
-               WHERE games > 0
-               ORDER BY rating DESC, games DESC
+            r#"SELECT u.wallet AS wallet, u.rating AS rating, gc.games AS games
+               FROM users u
+               JOIN (
+                 SELECT wallet, COUNT(DISTINCT game_id) AS games
+                 FROM (
+                   SELECT id AS game_id, lower(white_wallet) AS wallet FROM games
+                     WHERE status='finished' AND result IS NOT NULL
+                       AND white_wallet IS NOT NULL AND black_wallet IS NOT NULL
+                   UNION ALL
+                   SELECT id AS game_id, lower(black_wallet) AS wallet FROM games
+                     WHERE status='finished' AND result IS NOT NULL
+                       AND white_wallet IS NOT NULL AND black_wallet IS NOT NULL
+                 ) sides
+                 GROUP BY wallet
+               ) gc ON gc.wallet = lower(u.wallet)
+               ORDER BY u.rating DESC, gc.games DESC
                LIMIT $1"#,
         )
         .bind(limit)
@@ -718,6 +728,83 @@ mod tests {
         assert_eq!(g.status, "finished");
         assert_eq!(g.result.as_deref(), Some("white"));
         assert_eq!(g.pgn.as_deref(), Some("1. e4 e5"));
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn leaderboard_counts_and_ordering() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // Unique wallets per run so the assertions don't collide with other data.
+        let tag = Uuid::new_v4().simple().to_string();
+        let alice = format!("0xA_{tag}"); // mixed case on purpose (see below)
+        let bob = format!("0xb_{tag}");
+        let carol = format!("0xc_{tag}"); // signs in but never finishes a game
+
+        db.upsert_user(&alice).await?;
+        db.upsert_user(&bob).await?;
+        db.upsert_user(&carol).await?;
+
+        // Two finished games between alice and bob, alice winning both (so her
+        // Elo ends above bob's — deterministic ordering, no test-only setter).
+        // The second game stores alice's wallet lowercased, so the case-insensitive
+        // count must fold the two together.
+        let finish = |white: String, black: String, result: &'static str| {
+            let db = db.clone();
+            async move {
+                let id = Uuid::new_v4();
+                db.create_game(
+                    id,
+                    "park",
+                    Some(&white),
+                    Some(&black),
+                    Tc { initial_ms: 60000, increment_ms: 1000 },
+                    None,
+                )
+                .await?;
+                db.set_game_active(id).await?;
+                db.finish_game(id, result, "checkmate", "hash", "1. e4 e5").await?;
+                db.update_ratings(id).await?;
+                Ok::<_, anyhow::Error>(())
+            }
+        };
+        finish(alice.clone(), bob.clone(), "white").await?; // alice (white) wins
+        finish(bob.clone(), alice.to_lowercase(), "black").await?; // alice (black) wins
+
+        // A pending (unfinished) game must not count.
+        let pending = Uuid::new_v4();
+        db.create_game(
+            pending,
+            "park",
+            Some(&alice),
+            Some(&bob),
+            Tc { initial_ms: 60000, increment_ms: 1000 },
+            None,
+        )
+        .await?;
+
+        let board = db.leaderboard(100).await?;
+        let get = |addr: &str| {
+            let addr = addr.to_lowercase();
+            board.iter().find(move |r| r.wallet.to_lowercase() == addr)
+        };
+
+        let a = get(&alice).expect("alice on the board");
+        let b = get(&bob).expect("bob on the board");
+        assert_eq!(a.games, 2, "both finished games count for alice (case-folded)");
+        assert_eq!(b.games, 2, "both finished games count for bob");
+        assert!(get(&carol).is_none(), "no finished games => not on the board");
+
+        // Ordered by rating desc: alice (won both -> higher Elo) before bob.
+        let ai = board.iter().position(|r| r.wallet.to_lowercase() == alice.to_lowercase());
+        let bi = board.iter().position(|r| r.wallet.to_lowercase() == bob.to_lowercase());
+        assert!(ai < bi, "higher rating ranks first");
         Ok(())
     }
 }
