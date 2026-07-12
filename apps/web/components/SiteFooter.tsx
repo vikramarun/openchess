@@ -1,21 +1,15 @@
 "use client";
 
 import { shortAddress } from "@/lib/address";
+import { contractUrl as explorerContractUrl } from "@/lib/escrow";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
-
-// Block explorers per chain, so the footer links the *actual* escrow the server
-// is settling against (mainnet vs Base Sepolia).
-const EXPLORER: Record<number, string> = {
-  8453: "https://basescan.org",
-  84532: "https://sepolia.basescan.org",
-};
 
 /** Trust footer for a money app: non-custodial framing, the fee, and a direct
  *  link to the escrow contract on the block explorer so anyone can verify it. */
 export function SiteFooter() {
   const { config } = useOnchainConfig();
-  const explorer = config ? EXPLORER[config.chainId] : undefined;
-  const contractUrl = config?.escrow && explorer ? `${explorer}/address/${config.escrow}` : null;
+  const contractUrl =
+    config?.escrow ? explorerContractUrl(config.chainId, config.escrow) : null;
 
   return (
     <footer className="site-footer">

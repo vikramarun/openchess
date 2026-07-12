@@ -108,6 +108,35 @@ pub struct GameRow {
     pub pgn: Option<String>,
 }
 
+/// Full detail for a single game — powers the public game view (replay of a
+/// finished game + settlement status for a wagered one).
+#[derive(Debug, sqlx::FromRow)]
+pub struct GameDetailRow {
+    pub id: Uuid,
+    pub mode: String,
+    pub status: String,
+    pub white_wallet: Option<String>,
+    pub black_wallet: Option<String>,
+    pub stake: Option<Decimal>,
+    pub result: Option<String>,
+    pub result_reason: Option<String>,
+    pub result_hash: Option<String>,
+    pub settlement_status: String,
+    pub time_initial_ms: i64,
+    pub time_increment_ms: i64,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One played move (for replaying a finished game move-by-move).
+#[derive(Debug, sqlx::FromRow)]
+pub struct MoveRow {
+    pub ply: i32,
+    pub uci: String,
+    pub san: String,
+    pub white_ms: i64,
+    pub black_ms: i64,
+}
+
 impl Db {
     pub async fn connect(url: &str) -> Result<Db> {
         let pool = PgPoolOptions::new()
@@ -475,6 +504,31 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Full detail for one game (public game view: replay + settlement status).
+    pub async fn game_detail(&self, game_id: Uuid) -> Result<Option<GameDetailRow>> {
+        let row = sqlx::query_as::<_, GameDetailRow>(
+            r#"SELECT id, mode, status, white_wallet, black_wallet, stake, result,
+                      result_reason, result_hash, settlement_status,
+                      time_initial_ms, time_increment_ms, finished_at
+               FROM games WHERE id=$1"#,
+        )
+        .bind(game_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// A game's moves in play order, for move-by-move replay.
+    pub async fn game_moves(&self, game_id: Uuid) -> Result<Vec<MoveRow>> {
+        let rows = sqlx::query_as::<_, MoveRow>(
+            "SELECT ply, uci, san, white_ms, black_ms FROM moves WHERE game_id=$1 ORDER BY ply",
+        )
+        .bind(game_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Mark a game aborted (e.g. escrow failed to open — it never really started).

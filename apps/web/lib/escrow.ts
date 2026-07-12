@@ -98,6 +98,19 @@ export function clearAuth() {
   notifyAuthChanged();
 }
 
+/** Block explorer per chain, so links point at the chain the escrow lives on. */
+const EXPLORER: Record<number, string> = {
+  8453: "https://basescan.org",
+  84532: "https://sepolia.basescan.org",
+};
+
+/** Block-explorer URL for a contract address on the given chain, or null for an
+ *  unknown chain. */
+export function contractUrl(chainId: number, address: string): string | null {
+  const base = EXPLORER[chainId];
+  return base ? `${base}/address/${address}` : null;
+}
+
 /** The escrow's rake, in basis points, mirroring the deployed ChessEscrow's
  *  `feeBps` (currently 1%). The contract snapshots the fee per game at open; keep
  *  this in sync with the live deploy so the payout the UI quotes matches

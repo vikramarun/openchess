@@ -142,6 +142,7 @@ export function ProfileStats({ address }: { address: string }) {
                 <th>Stake</th>
                 <th>Moves</th>
                 <th>Date</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -168,6 +169,9 @@ export function ProfileStats({ address }: { address: string }) {
                     <td>{g.moves}</td>
                     <td className="muted">
                       {g.finished_at ? new Date(g.finished_at).toLocaleDateString() : "—"}
+                    </td>
+                    <td>
+                      <Link href={`/game/${g.game_id}`}>Review ▸</Link>
                     </td>
                   </tr>
                 );

@@ -755,6 +755,56 @@ pre {
   color: var(--muted);
   margin-right: 4px;
 }
+/* Clickable move in a replay move-list. */
+.move-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.move-btn:hover {
+  background: var(--panel-2);
+  color: var(--text-strong);
+}
+.move-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+/* Replay transport controls under the board. */
+.replay-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.replay-nav button {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-strong);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.replay-nav button:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+.replay-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.replay-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  min-width: 60px;
+  text-align: center;
+  font-size: 13px;
+}
 .result-banner {
   text-align: center;
   padding: 14px;

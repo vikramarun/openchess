@@ -14,7 +14,9 @@ import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
-import { fmtUsdc, payoutForStake } from "@/lib/escrow";
+import { contractUrl, fmtUsdc, payoutForStake } from "@/lib/escrow";
+import { fetchGame } from "@/lib/gameApi";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 type Clock = { white_ms: number; black_ms: number };
@@ -51,6 +53,7 @@ export function SeatGame({
   const [opponent, setOpponent] = useState<Opponent | null>(null);
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("loading engine…");
+  const [settleStatus, setSettleStatus] = useState<string | null>(null);
   const pos = useRef(Chess.default());
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
@@ -155,6 +158,31 @@ export function SeatGame({
     };
   }, [gameId, token]);
 
+  // Once a wagered game ends, poll the game's settlement status so the banner can
+  // confirm "Settled ✓" (or surface a failure) instead of leaving the user
+  // staring at "settling…". Bounded; the durable outbox usually settles within a
+  // few seconds.
+  useEffect(() => {
+    if (!result || !stake) return;
+    let off = false;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () => {
+      fetchGame(gameId).then((d) => {
+        if (off) return;
+        const s = d?.settlement_status ?? null;
+        if (s) setSettleStatus(s);
+        if (s === "settled" || s === "failed") return; // terminal
+        if (++tries < 20) timer = setTimeout(poll, 3000); // ~60s
+      });
+    };
+    poll();
+    return () => {
+      off = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [result, stake, gameId]);
+
   const winnerText = result
     ? result.winner
       ? `${result.winner === "white" ? "White" : "Black"} wins`
@@ -162,6 +190,14 @@ export function SeatGame({
     : null;
   const youWon = result && result.winner === color;
   const youLost = result && result.winner && result.winner !== color;
+
+  const { config } = useOnchainConfig();
+  const escrowUrl = config?.escrow ? contractUrl(config.chainId, config.escrow) : null;
+  const settledText = youWon
+    ? `you won ${fmtUsdc(payoutForStake(stake ?? 0))} USDC`
+    : youLost
+      ? `you lost ${fmtUsdc(stake)} USDC`
+      : "draw — your stake was returned";
 
   const oppColor = color === "white" ? "black" : "white";
   const live = !result && status === "playing";
@@ -225,8 +261,26 @@ export function SeatGame({
           <div className={`result-banner ${youWon ? "won" : youLost ? "lost" : ""}`}>
             {youWon ? "You win" : youLost ? "You lose" : winnerText} · {result.reason}
             {stake && (
-              <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-                Settling on-chain — your bankroll updates once the oracle posts the result.
+              <div style={{ fontSize: 13, marginTop: 6 }}>
+                {settleStatus === "settled" ? (
+                  <span style={{ color: youWon ? "var(--accent)" : "var(--text)" }}>
+                    Settled on-chain ✓ — {settledText}
+                  </span>
+                ) : settleStatus === "failed" ? (
+                  <span className="muted">
+                    Settlement delayed — your funds are safe and recoverable on-chain after the
+                    settle window.{" "}
+                    {escrowUrl && (
+                      <a href={escrowUrl} target="_blank" rel="noopener noreferrer">
+                        View escrow ↗
+                      </a>
+                    )}
+                  </span>
+                ) : (
+                  <span className="muted">
+                    Settling on-chain — your bankroll updates once the oracle posts the result.
+                  </span>
+                )}
               </div>
             )}
             {verified?.signed && (
