@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
 import { useEngine } from "@/lib/engineContext";
 
@@ -76,6 +77,8 @@ export default function Home() {
           </div>
         </Link>
       </div>
+
+      <Leaderboard />
 
       <div
         className="panel"
