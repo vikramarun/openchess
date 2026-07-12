@@ -5,6 +5,7 @@
 node_modules/
 apps/web/.next/
 .turbo/
+*.tsbuildinfo
 
 # Foundry build output (run `forge build` to regenerate)
 contracts/out/

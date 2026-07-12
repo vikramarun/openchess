@@ -1354,8 +1354,8 @@ async fn tourney_create(
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
     }
 
-    let (buy_in, initial_secs, increment_secs) =
-        (req.buy_in.clone(), req.initial_secs, req.increment_secs);
+    let (name, buy_in, initial_secs, increment_secs) =
+        (req.name.clone(), req.buy_in.clone(), req.initial_secs, req.increment_secs);
     state.0.lobby.tournaments.lock().insert(
         id,
         Tournament {
@@ -1381,6 +1381,7 @@ async fn tourney_create(
         let _ = db
             .upsert_tournament(
                 id,
+                &name,
                 buy_in.as_deref(),
                 initial_secs as i64,
                 increment_secs as i64,
@@ -1399,6 +1400,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) {
         let ts = state.0.lobby.tournaments.lock();
         ts.get(&tid).map(|t| {
             (
+                t.name.clone(),
                 t.buy_in.clone(),
                 t.initial_secs as i64,
                 t.increment_secs as i64,
@@ -1407,9 +1409,9 @@ async fn persist_tournament(state: &AppState, tid: Uuid) {
             )
         })
     };
-    if let Some((buy_in, init, inc, status, players)) = snap {
+    if let Some((name, buy_in, init, inc, status, players)) = snap {
         let _ = db
-            .upsert_tournament(tid, buy_in.as_deref(), init, inc, &status, &players)
+            .upsert_tournament(tid, &name, buy_in.as_deref(), init, inc, &status, &players)
             .await;
     }
 }

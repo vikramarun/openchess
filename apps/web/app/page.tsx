@@ -1,19 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
 
 import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
 import { useEngine } from "@/lib/engineContext";
+import { useMounted } from "@/lib/useMounted";
 
 export default function Home() {
   const { status } = useEngine();
-  const router = useRouter();
-  const [addr, setAddr] = useState("");
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
 
   const banner =
     status === "ready" ? (
@@ -79,25 +75,6 @@ export default function Home() {
       </div>
 
       <Leaderboard />
-
-      <div
-        className="panel"
-        style={{ marginTop: 16, display: "flex", gap: 10, alignItems: "center" }}
-      >
-        <span className="muted">Look up a player:</span>
-        <input
-          value={addr}
-          onChange={(e) => setAddr(e.target.value)}
-          placeholder="0x… wallet address"
-          style={{ flex: 1 }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && addr.trim()) router.push(`/player/${addr.trim()}`);
-          }}
-        />
-        <button className="ghost" onClick={() => addr.trim() && router.push(`/player/${addr.trim()}`)}>
-          View profile
-        </button>
-      </div>
     </div>
   );
 }

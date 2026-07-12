@@ -1,4 +1,5 @@
 import { SERVER_HTTP } from "./config";
+import { setAuth } from "./escrow";
 
 /** Run the SIWE flow: fetch nonce, sign an EIP-4361 message, verify, store the
  *  session token. `signMessageAsync` comes from wagmi's useSignMessage. */
@@ -32,6 +33,8 @@ export async function signInWithEthereum(
   });
   if (!resp.ok) throw new Error(`sign-in failed (${resp.status})`);
   const { token } = await resp.json();
-  localStorage.setItem("chess_token", token);
+  // Bind the session to the wallet it was issued for (so a disconnect or account
+  // switch can invalidate a stale token) and notify useAuthToken subscribers.
+  setAuth(token, address);
   return token;
 }

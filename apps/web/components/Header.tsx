@@ -3,9 +3,8 @@
 import Link from "next/link";
 
 import { useEngine } from "@/lib/engineContext";
-import { ProfileLink } from "./ProfileLink";
-import { SignIn } from "./SignIn";
-import { WalletButton } from "./WalletButton";
+import { AuthButton } from "./AuthButton";
+import { WalletMenu } from "./WalletMenu";
 
 export function Header() {
   const { status } = useEngine();
@@ -25,15 +24,14 @@ export function Header() {
       <nav className="nav">
         <Link href="/">Play</Link>
         <Link href="/play">Quick&nbsp;Play</Link>
-        <Link href="/connect">Connect&nbsp;Engine</Link>
-        <ProfileLink />
+        <Link href="/profile">My&nbsp;Profile</Link>
       </nav>
       <div className="header-actions">
         <span className="engine-pill" title="Stockfish runs in your browser — free">
           <span className={`dot ${status}`} /> {label}
         </span>
-        <SignIn />
-        <WalletButton />
+        <WalletMenu />
+        <AuthButton />
       </div>
     </header>
   );
