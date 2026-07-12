@@ -89,11 +89,11 @@ The BYO-multiplayer feature set (PRs #2–#4), rate limiting, and the bot
 leaderboard (PRs #6–#7) are **complete and on `main`, but not all of it is
 deployed**, and one hardening task still gates a public launch:
 
-1. **Cut the first release + deploy the browser-bot changes.** No `v*` tag
-   exists yet, so the `/connect` download buttons currently 404
-   (`git tag v0.1.0 && git push origin v0.1.0`), and `openchess.ai` still serves
-   the pre-SF18 web build until the next Vercel deploy. Start a house bot
-   (`scripts/house-bot.sh`) so first visitors have an opponent.
+1. **Deploy the release to web + start a house bot.** `v0.1.0` is **cut** — the
+   Release workflow builds the prebuilt `chess-client` binaries the `/connect`
+   page links to. Remaining ops: **redeploy `openchess.ai` on Vercel** (it serves
+   the pre-SF18 build until then), and run `scripts/house-bot.sh` so first
+   visitors always have an opponent.
 2. **Rate limiting / abuse guardrails — DONE** (`crates/server/src/ratelimit.rs`).
    In-process, single-node (moves behind Redis with the rest of the state when
    multi-node lands). Per-IP token-bucket throttles on `/auth/*` (middleware),
@@ -114,11 +114,13 @@ deployed**, and one hardening task still gates a public launch:
    wallet columns, `LIMIT` applied after counting) — fine at launch scale, but
    rewrite it as a `GROUP BY` join + an index on the wallet columns before the
    user base grows.
-3. **Deploy survivability (now the top hardening task).** Every
-   `deploy-server.sh` kills live games (rooms are in-memory; wagered games die
-   into the 24h `claimTimeout`). The pragmatic slice is **room rehydration**
-   (rebuild from the `moves` table + `last_move_at` on boot) + a pre-deploy
-   drain — a subset of the multi-node task below.
+3. **Deploy survivability — handled by maintenance/drain mode; full rehydration
+   descoped.** Every `deploy-server.sh` kills live in-memory games, so the
+   accepted mitigation is the owner-triggered **maintenance/drain mode** (PR #8):
+   flip it on, let live games finish, then deploy. Full **room rehydration**
+   (rebuilding in-flight games from the `moves` table after an *unplanned*
+   restart) is **deliberately not planned** — the drain path is good enough at
+   this scale. (Revisit only if crash-loss of live wagered games becomes real.)
 
 ## The big infra task: make it multi-node (true HA)
 
@@ -161,17 +163,17 @@ all in `crates/server` + a Redis dependency.
 
 ## Feature opportunities (the multiplayer loop is complete; these make it sticky)
 
-- **Bot leaderboard — DONE (PR #7):** top players by Elo surfaced in the lobby
-  (`GET /leaderboard` + `Leaderboard.tsx`). Still one overall Elo; the natural
-  next step is **per-time-control Elo** (below), plus the query optimization
-  noted in item #2.
-- **Bot seats for Gauntlet + Tournament** — bot seats are park-only today, but
-  `SeatDelivery::{Browser,Agent}` in `start_game` already generalizes the
-  claim/dispatch/rollback, so wiring gauntlet `queue_join` and `tourney_start`
+- **Bot seats for Gauntlet + Tournament — NEXT UP.** Bot seats are park-only
+  today, but `SeatDelivery::{Browser,Agent}` in `start_game` already generalizes
+  the claim/dispatch/rollback, so wiring gauntlet `queue_join` and `tourney_start`
   is a per-endpoint change + a web toggle, not a re-implementation. Gauntlet is
-  what bot-grinders actually want (leave a bot climbing a tier overnight).
-- **Per-time-control Elo** — one overall Elo today; Bullet/Blitz/Rapid buckets
-  need time-control-keyed rating rows. Pairs naturally with the leaderboard.
+  what bot-grinders actually want (leave a bot climbing a tier overnight). It
+  touches wagered seat dispatch, so lean on the existing `SeatDelivery` abort/
+  refund path and review the money flow carefully.
+- **Bot leaderboard — DONE (PR #7):** top players by Elo surfaced in the lobby
+  (`GET /leaderboard` + `Leaderboard.tsx`). One overall Elo; the query
+  optimization noted in item #2 is the main follow-up. (Per-time-control Elo is
+  **not planned** — deliberately descoped.)
 
 ## Other known gaps (money-side, external gates)
 
