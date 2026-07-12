@@ -40,9 +40,11 @@ async fn set_maintenance(
     headers: HeaderMap,
     Json(req): Json<MaintenanceReq>,
 ) -> Result<Json<MaintenanceResp>, StatusCode> {
-    if !state.is_admin(&headers) {
+    if !state.is_admin(&headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    let maintenance = state.set_maintenance(req.on).await;
+    // set_maintenance persists first and returns Err(500) if the durable write
+    // fails, so a 200 here always means the pause will survive a restart.
+    let maintenance = state.set_maintenance(req.on).await?;
     Ok(Json(MaintenanceResp { maintenance }))
 }

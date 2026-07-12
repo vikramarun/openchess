@@ -191,10 +191,10 @@ pub trait SettlementSink: Send + Sync {
         false
     }
 
-    /// The escrow contract's owner (`Ownable2Step`) — the wallet allowed to
-    /// administer the server (e.g. toggle maintenance). `None` off-chain or if
-    /// the view call fails. Reads live from chain, so it tracks ownership
-    /// transfers without a redeploy.
+    /// The escrow contract's current owner (`Ownable2Step`) — the wallet
+    /// allowed to administer the server (e.g. toggle maintenance). Each call
+    /// reads the live on-chain owner; `None` off-chain or if the view call
+    /// fails. (Callers may cache it — see `AppState::admin_wallet`.)
     async fn owner(&self) -> Option<Address> {
         None
     }

@@ -31,6 +31,12 @@ function MaintenanceBannerInner() {
   if (!maintenance && !isAdmin) return null;
 
   async function toggle(on: boolean) {
+    // The endpoint needs a SIWE session; without one the POST just 403s. Guide
+    // the owner to sign in first instead of surfacing a confusing failure.
+    if (!authToken()) {
+      setErr("Sign in with the owner wallet to use this.");
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -73,7 +79,7 @@ function MaintenanceBannerInner() {
 
   return (
     <div className="maint-bar maint-on">
-      <span className="maint-msg">
+      <span>
         <strong>Maintenance mode.</strong> No new games can be started — games
         already in progress will finish normally.
       </span>
