@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
+import { ClaimWinnings } from "@/components/ClaimWinnings";
 import { fetchConfig, fmtUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
@@ -68,6 +69,7 @@ function WalletMenuInner() {
       {open && (
         <div className="wallet-pop">
           <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
+          <ClaimWinnings escrow={config.escrow} chainId={config.chainId} />
         </div>
       )}
     </div>

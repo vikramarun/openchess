@@ -24,12 +24,19 @@ export function TournamentClaim({
   status,
   escrow,
   chainId: expected,
+  label,
+  onResolved,
   onClaimed,
 }: {
   tid: string;
   status: string;
   escrow: `0x${string}`;
   chainId: number;
+  /** Optional tournament name shown above the action (for the bankroll list). */
+  label?: string;
+  /** Reports whether this tournament actually renders an action/state, so a
+   *  parent list can hide its header when nothing is claimable. */
+  onResolved?: (hasAction: boolean) => void;
   onClaimed?: () => void;
 }) {
   const { address, isConnected } = useAccount();
@@ -104,11 +111,24 @@ export function TournamentClaim({
     };
   }, [tid, address, rootSet, hasClaimed]);
 
-  if (!enabled || !exists || !hasEntered) return null;
-
   const now = Math.floor(Date.now() / 1000);
   const refundReady =
     !settled && settleTimeout != null && now > openedAt + settleTimeout && !hasClaimed;
+  // Whether this tournament will render an action/state (vs null), reported up
+  // so a "Tournament winnings" list can hide its header when nothing applies.
+  const hasAction =
+    enabled &&
+    exists &&
+    hasEntered &&
+    (hasClaimed ||
+      (rootSet && !!proof) ||
+      refundReady ||
+      (status === "abandoned" && !settled && settleTimeout != null));
+  useEffect(() => {
+    onResolved?.(hasAction);
+  }, [hasAction, onResolved]);
+
+  if (!enabled || !exists || !hasEntered) return null;
 
   const ensureChain = async () => {
     if (chainId !== expected) await switchChainAsync({ chainId: expected });
@@ -155,41 +175,32 @@ export function TournamentClaim({
     );
 
   const errLine = error ? <span style={{ color: "#e06c6c", fontSize: 12 }}>{error}</span> : null;
-  const wrap = (node: React.ReactNode) => (
-    <span style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
-      {node}
-      {errLine}
-    </span>
-  );
 
+  // The single action/state for this tournament, or null when there's nothing
+  // to show (non-winner, already credited to bankroll, etc.).
+  let node: React.ReactNode = null;
   if (hasClaimed) {
-    return (
+    node = (
       <span className="muted" style={{ fontSize: 13 }}>
         {rootSet ? "Payout claimed ✓" : "Refund claimed ✓"}
       </span>
     );
-  }
-
-  // Winner of a root-settled field → Merkle claim.
-  if (rootSet && proof) {
-    return wrap(
+  } else if (rootSet && proof) {
+    // Winner of a root-settled field → Merkle claim.
+    node = (
       <button className="primary" onClick={doClaim} disabled={busy}>
         {busy ? "Claiming…" : `Claim ${fmtUsdc(proof.amount)} USDC`}
-      </button>,
+      </button>
     );
-  }
-
-  // Never settled past the timeout → reclaim the buy-in.
-  if (refundReady) {
-    return wrap(
+  } else if (refundReady) {
+    // Never settled past the timeout → reclaim the buy-in.
+    node = (
       <button className="ghost" onClick={doRefund} disabled={busy}>
         {busy ? "Refunding…" : `Claim refund · ${fmtUsdc(buyIn)} USDC`}
-      </button>,
+      </button>
     );
-  }
-
-  // Abandoned but the refund window hasn't opened yet — tell the entrant when.
-  if (status === "abandoned" && !settled && settleTimeout != null) {
+  } else if (status === "abandoned" && !settled && settleTimeout != null) {
+    // Abandoned but the refund window hasn't opened yet — tell the entrant when.
     const left = openedAt + settleTimeout - now;
     const dur =
       left <= 0
@@ -199,12 +210,23 @@ export function TournamentClaim({
           : left >= 3600
             ? `~${Math.ceil(left / 3600)}h`
             : `~${Math.max(1, Math.ceil(left / 60))}m`;
-    return (
+    node = (
       <span className="muted" style={{ fontSize: 13 }}>
         Refund available in {dur}
       </span>
     );
   }
 
-  return null;
+  if (!node) return null;
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
+      {label && (
+        <span className="muted" style={{ fontSize: 12 }}>
+          {label}
+        </span>
+      )}
+      {node}
+      {errLine}
+    </span>
+  );
 }

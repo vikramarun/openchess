@@ -5,7 +5,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
-import { TournamentClaim } from "@/components/TournamentClaim";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
@@ -120,7 +119,7 @@ function TournamentClient() {
     };
   }, [playingTid]);
 
-  const { available, refetch: refetchAvailable } = useAvailable(config?.escrow);
+  const { available } = useAvailable(config?.escrow);
   const wagerOn = !!config?.wagerEnabled && !!config?.escrow;
 
   const identityIn = (t: Tourney): string | null => {
@@ -346,19 +345,9 @@ function TournamentClient() {
             <>
               <b style={{ color: "var(--text-strong)" }}>Tournament finished 🎉</b>
               <p className="muted">
-                Standings decide the pool; a winning share is credited to your bankroll.
+                Standings decide the pool; a winning share is credited to your bankroll — claim
+                any payout or refund from the wallet menu (top right).
               </p>
-              {wagerOn && config?.escrow && activeT.buy_in && (
-                <div style={{ margin: "10px 0" }}>
-                  <TournamentClaim
-                    tid={activeT.id}
-                    status={activeT.status}
-                    escrow={config.escrow}
-                    chainId={config.chainId}
-                    onClaimed={refetchAvailable}
-                  />
-                </div>
-              )}
               {backBtn}
             </>
           ) : (
@@ -399,19 +388,9 @@ function TournamentClient() {
             <b style={{ color: "var(--text-strong)" }}>You’ve finished your games 🎉</b>
             <p className="muted">
               Standings are tallied as every pairing completes. Small fields credit your winning
-              share to your bankroll directly; large fields settle a Merkle root you claim below.
+              share to your bankroll directly; large fields settle a Merkle root — claim it from
+              the wallet menu (top right).
             </p>
-            {wagerOn && config?.escrow && activeT.buy_in && (
-              <div style={{ margin: "10px 0" }}>
-                <TournamentClaim
-                  tid={activeT.id}
-                  status={activeT.status}
-                  escrow={config.escrow}
-                  chainId={config.chainId}
-                  onClaimed={refetchAvailable}
-                />
-              </div>
-            )}
           </>
         ) : (
           <p className="muted">Waiting for your next round to start…</p>
@@ -542,20 +521,6 @@ function TournamentClient() {
                     {t.status !== "open" && joined && mine.length === 0 && (
                       <span className="muted">no games</span>
                     )}
-                    {wagerOn &&
-                      config?.escrow &&
-                      t.buy_in &&
-                      (t.status === "settled" ||
-                        t.status === "complete" ||
-                        t.status === "abandoned") && (
-                        <TournamentClaim
-                          tid={t.id}
-                          status={t.status}
-                          escrow={config.escrow}
-                          chainId={config.chainId}
-                          onClaimed={refetchAvailable}
-                        />
-                      )}
                   </div>
                 </div>
               );
