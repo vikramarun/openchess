@@ -62,12 +62,12 @@ type Pending = {
 };
 
 /** Offer body for a browser-driven seat: the user's configured bot name +
- *  strength-aware engine label, declared to opponents (unverified). */
+ *  engine label, declared to opponents (unverified). */
 function browserSeat(): { name?: string; engine: string } {
   const cfg = getBrowserBotConfig();
   return {
     ...(cfg.name.trim() ? { name: cfg.name.trim() } : {}),
-    engine: browserEngineLabel(cfg),
+    engine: browserEngineLabel(),
   };
 }
 
@@ -511,7 +511,7 @@ export function Lobby() {
         )}
       </div>
 
-      {/* Personalize the in-browser bot (name / strength / opening book). Hidden
+      {/* Personalize the in-browser bot (name / opening book). Hidden
           only while the native connected bot is the chosen seat driver. */}
       {!botPlays && <BrowserBotPanel />}
 

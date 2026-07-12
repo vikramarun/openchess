@@ -6,8 +6,6 @@ import {
   clearUserBook,
   DEFAULT_CONFIG,
   getBrowserBotConfig,
-  MAX_ELO,
-  MIN_ELO,
   saveBrowserBotConfig,
   saveUserBook,
   userBookInfo,
@@ -15,7 +13,10 @@ import {
   type BrowserBotConfig,
 } from "@/lib/browserBot";
 
-/** Personalize the in-browser bot — name, strength, and an uploaded Polyglot
+/** Shared small-button style used across this panel. */
+const SMALL_BTN = { fontSize: 13, padding: "4px 10px" } as const;
+
+/** Personalize the in-browser bot — a display name and an uploaded Polyglot
  *  opening book — with no download. Settings persist locally and apply to
  *  every browser-seat game. */
 export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string) => void }) {
@@ -51,14 +52,12 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
     }
   };
 
-  const limited = cfg.strength !== "max";
-
   return (
     <div className="panel" style={{ marginBottom: 16 }}>
       <b style={{ color: "var(--text-strong)" }}>🤖 Your browser bot</b>
       <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-        Personalize the in-browser Stockfish — no download. Applies to every game your browser
-        plays.
+        Full-strength Stockfish 18 in your browser — no download. Give it a name and an opening
+        book; applies to every game your browser plays.
       </div>
 
       <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
@@ -73,42 +72,6 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
         </label>
 
         <div className="muted" style={{ fontSize: 13 }}>
-          Strength
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-            <button
-              className={limited ? "ghost" : "primary"}
-              style={{ fontSize: 13, padding: "4px 10px" }}
-              onClick={() => update({ strength: "max" })}
-            >
-              Full
-            </button>
-            <button
-              className={limited ? "primary" : "ghost"}
-              style={{ fontSize: 13, padding: "4px 10px" }}
-              onClick={() => update({ strength: limited ? cfg.strength : 1600 })}
-            >
-              Limited
-            </button>
-            {limited && (
-              <>
-                <input
-                  type="range"
-                  min={MIN_ELO}
-                  max={MAX_ELO}
-                  step={10}
-                  value={cfg.strength as number}
-                  onChange={(e) => update({ strength: Number(e.target.value) })}
-                  style={{ flex: 1 }}
-                />
-                <span style={{ color: "var(--text-strong)", minWidth: 72, textAlign: "right" }}>
-                  ~{cfg.strength} Elo
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className="muted" style={{ fontSize: 13 }}>
           Opening book (Polyglot <code>.bin</code>) — played before the engine, instantly
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
             <input
@@ -120,7 +83,7 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
             />
             <button
               className="ghost"
-              style={{ fontSize: 13, padding: "4px 10px" }}
+              style={SMALL_BTN}
               disabled={busy}
               onClick={() => fileRef.current?.click()}
             >
@@ -133,7 +96,7 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
                 </span>
                 <button
                   className="ghost"
-                  style={{ fontSize: 13, padding: "4px 10px" }}
+                  style={SMALL_BTN}
                   onClick={() => clearUserBook().then(() => setBook(null))}
                 >
                   Remove

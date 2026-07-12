@@ -1,16 +1,27 @@
-// In-browser UCI engine: Stockfish compiled to WASM, run in a Web Worker on the
-// USER's CPU. This is what makes "load an engine by default" free — the engine
-// never touches our servers. The web page itself becomes a bring-your-own-engine
-// client (see lib/play.ts), speaking the same protocol as the native client.
+// In-browser UCI engine: Stockfish 18 (NNUE) compiled to WASM, run in a Web
+// Worker on the USER's CPU. This is what makes "load an engine by default"
+// free — the engine never touches our servers. The web page itself becomes a
+// bring-your-own-engine client (see lib/play.ts), speaking the same protocol
+// as the native client.
+//
+// Build: stockfish-18-lite-single (single-threaded, 7 MB) from the `stockfish`
+// npm package (v18.0.x) — see public/ENGINE.md. Single-threaded avoids the
+// SharedArrayBuffer/COOP+COEP headers a multi-threaded build would require.
+
+/** Worker script served from public/; the sibling .wasm is located next to it. */
+const ENGINE_URL = "/stockfish-18-lite-single.js";
+/** Transposition-table size (MB). Modest fixed default — bigger helps slightly
+ *  at longer time controls; two engines run at once on the self-play page. */
+const HASH_MB = 64;
 
 export class BrowserEngine {
   private worker: Worker;
   private listeners: ((line: string) => void)[] = [];
   private ready: Promise<void>;
-  public name = "Stockfish (WASM, in your browser)";
+  public name = "Stockfish 18 (browser)";
 
   constructor() {
-    this.worker = new Worker("/stockfish.js");
+    this.worker = new Worker(ENGINE_URL);
     this.worker.onmessage = (e: MessageEvent) => {
       const line: string =
         typeof e.data === "string" ? e.data : (e.data && e.data.data) || "";
@@ -53,6 +64,7 @@ export class BrowserEngine {
     this.send("uci");
     await this.waitFor((l) => l.includes("uciok"));
     this.send("setoption name MultiPV value 1");
+    this.send(`setoption name Hash value ${HASH_MB}`);
     this.send("isready");
     await this.waitFor((l) => l.includes("readyok"));
   }
@@ -60,23 +72,6 @@ export class BrowserEngine {
   /** Resolves once the engine has completed its UCI handshake. */
   whenReady() {
     return this.ready;
-  }
-
-  /** Set a UCI option (fire-and-forget; engines ignore unknown options). */
-  setOption(name: string, value: string | number | boolean) {
-    this.send(`setoption name ${name} value ${value}`);
-  }
-
-  /** Apply the user's browser-bot settings (strength + hash). Call after
-   *  whenReady(); fire-and-forget per UCI semantics. */
-  applyConfig(cfg: { strength: "max" | number; hashMb: number }) {
-    this.setOption("Hash", cfg.hashMb);
-    if (cfg.strength === "max") {
-      this.setOption("UCI_LimitStrength", false);
-    } else {
-      this.setOption("UCI_LimitStrength", true);
-      this.setOption("UCI_Elo", cfg.strength);
-    }
   }
 
   /** Set the position and `go …`, resolving with the engine's bestmove. */

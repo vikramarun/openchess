@@ -6,8 +6,7 @@
 // byte-for-byte on which positions are "in book". Verified against the
 // polyglot spec's reference keys (see scripts/test in the PR).
 
-import { Chess } from "chessops/chess";
-import { makeUci } from "chessops/util";
+import type { Chess } from "chessops/chess";
 
 import { CASTLING, EN_PASSANT, PIECES, WHITE_TURN } from "./polyglotTable";
 
@@ -94,7 +93,11 @@ export function decodeMove(pos: Chess, mv: number): string | null {
     return `${FILES[from & 7]}${(from >> 3) + 1}${FILES[kingTo & 7]}${(kingTo >> 3) + 1}`;
   }
 
-  const promoStr = ["", "n", "b", "r", "q"][promo] ?? "";
+  // Polyglot promo: 0 none, 1 knight … 4 queen. Values 5-7 are out of spec —
+  // reject rather than silently dropping the promotion (which would yield an
+  // illegal, non-promoting move).
+  if (promo > 4) return null;
+  const promoStr = ["", "n", "b", "r", "q"][promo];
   return (
     `${FILES[fromFile]}${fromRank + 1}${FILES[toFile]}${toRank + 1}` + promoStr
   );
@@ -122,6 +125,3 @@ export function pickBookMove(entries: BookEntry[], pos: Chess): string | null {
   const best = found.reduce((a, b) => (b.weight > a.weight ? b : a));
   return decodeMove(pos, best.move);
 }
-
-// makeUci is re-exported for callers that already hold a chessops Move.
-export { makeUci };

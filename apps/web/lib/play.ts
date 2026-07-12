@@ -4,7 +4,7 @@
 import { Chess } from "chessops/chess";
 import { parseUci } from "chessops/util";
 
-import { ensureBookLoaded, probeUserBook } from "./browserBot";
+import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
@@ -13,21 +13,27 @@ export type PlayHandlers = {
   onEvent?: (msg: any) => void;
 };
 
+/** True if `uci` is legal in `pos`. */
+function isLegalUci(pos: Chess, uci: string): boolean {
+  const m = parseUci(uci);
+  return !!m && pos.isLegal(m);
+}
+
 /** A book move for this history — the user's uploaded Polyglot book first,
- *  then the built-in mainline set — but only if it's actually legal in the
- *  reconstructed position, so a bad book can never send an illegal move (it
- *  just falls through to the engine). */
+ *  then the built-in mainline set — returning the first LEGAL of the two, so a
+ *  bad/illegal user-book entry falls through to the built-in book (and then to
+ *  the engine) rather than suppressing it. */
 function legalBookMove(movesUci: string[]): string | null {
   const pos = Chess.default();
   for (const u of movesUci) {
-    const m = parseUci(u);
-    if (!m || !pos.isLegal(m)) return null;
-    pos.play(m);
+    if (!isLegalUci(pos, u)) return null;
+    pos.play(parseUci(u)!);
   }
-  const candidate = probeUserBook(pos, movesUci.length) ?? bookMove(movesUci);
-  if (!candidate) return null;
-  const cm = parseUci(candidate);
-  return cm && pos.isLegal(cm) ? candidate : null;
+  const maxPly = getBrowserBotConfig().bookMaxPly;
+  const user = probeUserBook(pos, movesUci.length, maxPly);
+  if (user && isLegalUci(pos, user)) return user;
+  const builtin = bookMove(movesUci);
+  return builtin && isLegalUci(pos, builtin) ? builtin : null;
 }
 
 /** Play one seat of a game in the browser, driving `engine`. Resolves when the
