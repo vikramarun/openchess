@@ -695,6 +695,10 @@ struct Ticket {
     color: Option<String>,
     /// Gauntlet session this ticket belongs to (for standings), if any.
     session_id: Option<Uuid>,
+    /// The seat is played by the owner's connected agent (browser spectates).
+    seat_bot: bool,
+    /// UCI option overrides for a bot seat, relayed to the agent on dispatch.
+    uci_options: Vec<(String, String)>,
     created_at: Instant,
 }
 
@@ -710,6 +714,10 @@ struct QueueReq {
     /// Optional self-declared display name / engine (shown to the opponent).
     name: Option<String>,
     engine: Option<String>,
+    /// "bot" seats the joiner's connected agent; anything else = browser.
+    seat: Option<String>,
+    /// UCI option overrides for a bot seat (applied by the agent per game).
+    uci_options: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -725,8 +733,10 @@ async fn queue_join(
     // Drain: reject before enqueueing (a match would spawn a game).
     state.reject_if_draining()?;
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
-    // Wagered tiers require auth; the seat is the authed wallet.
-    let addr = if req.stake.is_some() {
+    let bot = is_bot_seat(&req.seat);
+    // Wagered tiers AND bot seats require auth; the seat (and the agent it
+    // dispatches to) is always the authed wallet's. Casual browser seats need none.
+    let addr = if req.stake.is_some() || bot {
         Some(
             state
                 .authed_wallet(&headers)
@@ -735,6 +745,23 @@ async fn queue_join(
     } else {
         None
     };
+
+    let mut my_meta = SeatMeta {
+        name: req.name.as_deref().and_then(sanitize_label),
+        engine: req.engine.as_deref().and_then(sanitize_label),
+    };
+    if bot {
+        // The bot must be online to queue as it; default its identity from the
+        // registration so the opponent/lobby see what it actually runs.
+        let wallet = addr.as_deref().unwrap_or_default();
+        let (meta, _busy) = state
+            .0
+            .agents
+            .view(wallet)
+            .ok_or(StatusCode::FAILED_DEPENDENCY)?; // 424: bot offline
+        my_meta.name = my_meta.name.or(Some(meta.name));
+        my_meta.engine = my_meta.engine.or(Some(meta.engine));
+    }
 
     // Only a gauntlet session's owner may attribute games to it (prevents
     // stat-poisoning a staked session via a crafted session_id).
@@ -756,10 +783,7 @@ async fn queue_join(
         req.initial_secs,
         req.increment_secs
     );
-    let my_meta = SeatMeta {
-        name: req.name.as_deref().and_then(sanitize_label),
-        engine: req.engine.as_deref().and_then(sanitize_label),
-    };
+    let my_uci = clean_uci_options(req.uci_options);
     let my_id = Uuid::new_v4();
     state.0.lobby.tickets.lock().insert(
         my_id,
@@ -771,6 +795,8 @@ async fn queue_join(
             token: None,
             color: None,
             session_id: req.session_id,
+            seat_bot: bot,
+            uci_options: my_uci.clone(),
             created_at: Instant::now(),
         },
     );
@@ -780,69 +806,8 @@ async fn queue_join(
         queue.entry(key.clone()).or_default().pop_front()
     };
 
-    if let Some(opp_id) = opponent {
-        let (opp_addr, opp_meta, opp_session) = state
-            .0
-            .lobby
-            .tickets
-            .lock()
-            .get(&opp_id)
-            .map(|t| (t.addr.clone(), t.meta.clone(), t.session_id))
-            .unwrap_or((None, SeatMeta::default(), None));
-
-        // opponent = white, me = black
-        let wager = if let Some(stake) = req.stake.clone() {
-            let white = opp_addr.clone().ok_or(StatusCode::CONFLICT)?;
-            let black = addr.clone().ok_or(StatusCode::UNAUTHORIZED)?;
-            if white.eq_ignore_ascii_case(&black) {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            Some(build_wager(&white, &black, &stake)?)
-        } else {
-            None
-        };
-
-        let resp = state
-            .start_game(
-                tc,
-                "gauntlet",
-                wager,
-                [opp_meta, my_meta],
-                [SeatDelivery::Browser, SeatDelivery::Browser],
-            )
-            .await?;
-
-        // Attribute the game's result to any gauntlet sessions involved.
-        let mut links = Vec::new();
-        if let Some(sid) = opp_session {
-            links.push((sid, Color::White));
-        }
-        if let Some(sid) = req.session_id {
-            links.push((sid, Color::Black));
-        }
-        if !links.is_empty() {
-            state
-                .0
-                .lobby
-                .game_to_gauntlet
-                .lock()
-                .insert(resp.game_id, links);
-        }
-
-        let mut tickets = state.0.lobby.tickets.lock();
-        if let Some(t) = tickets.get_mut(&opp_id) {
-            t.status = "matched".into();
-            t.game_id = Some(resp.game_id);
-            t.token = Some(resp.white_token);
-            t.color = Some("white".into());
-        }
-        if let Some(t) = tickets.get_mut(&my_id) {
-            t.status = "matched".into();
-            t.game_id = Some(resp.game_id);
-            t.token = Some(resp.black_token);
-            t.color = Some("black".into());
-        }
-    } else {
+    // No waiting opponent — sit in the queue.
+    let Some(opp_id) = opponent else {
         state
             .0
             .lobby
@@ -851,7 +816,157 @@ async fn queue_join(
             .entry(key)
             .or_default()
             .push_back(my_id);
+        return Ok(Json(QueueResp { ticket_id: my_id }));
+    };
+
+    // Paired: opponent = white, me = black.
+    let (opp_addr, opp_meta, opp_session, opp_bot, opp_uci) = state
+        .0
+        .lobby
+        .tickets
+        .lock()
+        .get(&opp_id)
+        .map(|t| {
+            (
+                t.addr.clone(),
+                t.meta.clone(),
+                t.session_id,
+                t.seat_bot,
+                t.uci_options.clone(),
+            )
+        })
+        .unwrap_or((None, SeatMeta::default(), None, false, Vec::new()));
+
+    // Rollback used on any failure between popping the opponent and the game
+    // existing. `release` frees claimed agents; the inline requeues make sure no
+    // player is orphaned (a still-viable opponent goes back to the front).
+    let release = |claimed: &[String]| {
+        for w in claimed {
+            state.0.agents.release(w);
+        }
+    };
+    let requeue_opp_then_fail = |code: StatusCode| -> StatusCode {
+        state
+            .0
+            .lobby
+            .queue
+            .lock()
+            .entry(key.clone())
+            .or_default()
+            .push_front(opp_id);
+        state.0.lobby.tickets.lock().remove(&my_id);
+        code
+    };
+
+    let wager = if let Some(stake) = req.stake.clone() {
+        let white = match opp_addr.clone() {
+            Some(w) => w,
+            // Wagered pairing but the opponent has no wallet (shouldn't happen —
+            // staked tickets are authed): keep me waiting, drop the bad opponent.
+            None => {
+                state.0.lobby.tickets.lock().remove(&opp_id);
+                state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+                return Ok(Json(QueueResp { ticket_id: my_id }));
+            }
+        };
+        let black = match addr.clone() {
+            Some(b) => b,
+            None => return Err(requeue_opp_then_fail(StatusCode::UNAUTHORIZED)),
+        };
+        if white.eq_ignore_ascii_case(&black) {
+            return Err(requeue_opp_then_fail(StatusCode::BAD_REQUEST));
+        }
+        match build_wager(&white, &black, &stake) {
+            Ok(w) => Some(w),
+            Err(e) => return Err(requeue_opp_then_fail(e)),
+        }
+    } else {
+        None
+    };
+
+    // Claim both bots BEFORE creating the game, so we never open a game (or an
+    // escrow) whose engine can't show up.
+    let mut claimed: Vec<String> = Vec::new();
+    let white_delivery = if opp_bot {
+        let w = opp_addr.clone().unwrap_or_default();
+        match state.0.agents.claim(&w) {
+            Ok(tx) => {
+                claimed.push(w.clone());
+                SeatDelivery::Agent { wallet: w, tx, uci_options: opp_uci }
+            }
+            // The opponent's bot went offline/busy since it queued: its ticket
+            // is stale — drop it and put me back to wait for a fresh opponent.
+            Err(_) => {
+                state.0.lobby.tickets.lock().remove(&opp_id);
+                state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+                return Ok(Json(QueueResp { ticket_id: my_id }));
+            }
+        }
+    } else {
+        SeatDelivery::Browser
+    };
+    let black_delivery = if bot {
+        let w = addr.clone().unwrap_or_default();
+        match state.0.agents.claim(&w) {
+            Ok(tx) => {
+                claimed.push(w.clone());
+                SeatDelivery::Agent { wallet: w, tx, uci_options: my_uci }
+            }
+            // My own bot can't play — fail my join, keep the opponent waiting.
+            Err(e) => {
+                release(&claimed);
+                return Err(requeue_opp_then_fail(match e {
+                    AgentUnavailable::Offline => StatusCode::FAILED_DEPENDENCY,
+                    AgentUnavailable::Busy => StatusCode::CONFLICT,
+                }));
+            }
+        }
+    } else {
+        SeatDelivery::Browser
+    };
+
+    // start_game creates the room, locks escrow, and DISPATCHES bot seats — and
+    // aborts (escrow refunded) if an agent vanished, returning Err. On any Err
+    // the claims are released and both players are put back.
+    let resp = match state
+        .start_game(tc, "gauntlet", wager, [opp_meta, my_meta], [white_delivery, black_delivery])
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            release(&claimed);
+            return Err(requeue_opp_then_fail(e));
+        }
+    };
+
+    // Attribute the game's result to any gauntlet sessions involved.
+    let mut links = Vec::new();
+    if let Some(sid) = opp_session {
+        links.push((sid, Color::White));
     }
+    if let Some(sid) = req.session_id {
+        links.push((sid, Color::Black));
+    }
+    if !links.is_empty() {
+        state.0.lobby.game_to_gauntlet.lock().insert(resp.game_id, links);
+    }
+
+    // Mark both tickets matched. A bot-held seat's token stays server-side (the
+    // agent has it); the browser spectates.
+    let mut tickets = state.0.lobby.tickets.lock();
+    if let Some(t) = tickets.get_mut(&opp_id) {
+        t.status = "matched".into();
+        t.game_id = Some(resp.game_id);
+        t.token = (!opp_bot).then(|| resp.white_token.clone());
+        t.color = Some("white".into());
+    }
+    if let Some(t) = tickets.get_mut(&my_id) {
+        t.status = "matched".into();
+        t.game_id = Some(resp.game_id);
+        t.token = (!bot).then_some(resp.black_token);
+        t.color = Some("black".into());
+    }
+    drop(tickets);
 
     Ok(Json(QueueResp { ticket_id: my_id }))
 }
@@ -862,6 +977,9 @@ struct TicketResp {
     game_id: Option<GameId>,
     token: Option<String>,
     color: Option<String>,
+    /// "bot" when this seat was dispatched to the caller's agent (the browser
+    /// should spectate instead of driving the seat); "browser" otherwise.
+    seat: Option<String>,
 }
 
 async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<TicketResp> {
@@ -872,12 +990,14 @@ async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<
             game_id: t.game_id,
             token: t.token.clone(),
             color: t.color.clone(),
+            seat: Some(if t.seat_bot { "bot" } else { "browser" }.into()),
         }),
         None => Json(TicketResp {
             status: "not_found".into(),
             game_id: None,
             token: None,
             color: None,
+            seat: None,
         }),
     }
 }
@@ -1728,4 +1848,164 @@ async fn tourney_claim_proof(
         amount: amount.to_string(),
         proof: proof.iter().map(|p| format!("{p:#x}")).collect(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::AgentMeta;
+    use crate::{AppState, Inner};
+    use protocol::ServerToAgent;
+    use std::sync::Arc;
+
+    // A minimal in-memory AppState (no DB, log-only settlement) for driving the
+    // matchmaking handlers directly. The returned receivers are kept alive so the
+    // room's cleanup/results senders stay valid for the test's lifetime.
+    fn test_state() -> (
+        AppState,
+        mpsc::Receiver<GameId>,
+        mpsc::Receiver<crate::GameOutcome>,
+    ) {
+        let (cleanup_tx, cleanup_rx) = mpsc::channel(16);
+        let (results_tx, results_rx) = mpsc::channel(16);
+        let state = AppState(Arc::new(Inner {
+            rooms: Mutex::new(HashMap::new()),
+            live_games: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            settlement: ledger::from_env(),
+            db: None,
+            lobby: Lobby::default(),
+            auth: crate::auth::Auth::default(),
+            agents: crate::agents::Agents::default(),
+            limits: crate::ratelimit::RateLimits::from_env(),
+            maintenance: std::sync::atomic::AtomicBool::new(false),
+            admin_wallet: Mutex::new(None),
+            cleanup_tx,
+            results_tx,
+        }));
+        (state, cleanup_rx, results_rx)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    fn bot_req() -> QueueReq {
+        QueueReq {
+            stake: None,
+            initial_secs: 60,
+            increment_secs: 1,
+            session_id: None,
+            name: None,
+            engine: None,
+            seat: Some("bot".into()),
+            uci_options: None,
+        }
+    }
+
+    fn register_bot(state: &AppState, wallet: &str) -> (String, mpsc::Receiver<ServerToAgent>) {
+        let (tx, rx) = mpsc::channel::<ServerToAgent>(8);
+        state.0.agents.register(
+            wallet,
+            AgentMeta {
+                name: "bot".into(),
+                engine: "e".into(),
+                options: vec![],
+            },
+            tx,
+        );
+        (state.0.auth.mint_session(wallet), rx)
+    }
+
+    #[tokio::test]
+    async fn gauntlet_pairs_two_bots_and_dispatches_seats() {
+        let (state, _c, _r) = test_state();
+        let wa = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let wb = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let (ta, mut rx_a) = register_bot(&state, wa);
+        let (tb, mut rx_b) = register_bot(&state, wb);
+
+        // Bot A queues first — no opponent yet, so it only waits (NOT claimed,
+        // NOT dispatched).
+        queue_join(State(state.clone()), bearer(&ta), Json(bot_req()))
+            .await
+            .expect("A join");
+        assert!(rx_a.try_recv().is_err(), "A must not be dispatched while waiting");
+        assert!(state.0.agents.claim(wa).is_ok(), "A not claimed while waiting");
+        state.0.agents.release(wa);
+
+        // Bot B queues — pairs with A; BOTH seats dispatch to their agents.
+        let r2 = queue_join(State(state.clone()), bearer(&tb), Json(bot_req()))
+            .await
+            .expect("B join");
+
+        assert!(
+            matches!(rx_a.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "A (white) got its seat"
+        );
+        assert!(
+            matches!(rx_b.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "B (black) got its seat"
+        );
+
+        // B's ticket is matched, holds NO launch token (its bot has it), seat=bot.
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id)).await.0;
+        assert_eq!(tr.status, "matched");
+        assert!(tr.token.is_none(), "a bot seat's token stays server-side");
+        assert_eq!(tr.seat.as_deref(), Some("bot"));
+
+        // Both agents are now busy (claimed + bound to the game).
+        assert!(state.0.agents.claim(wa).is_err(), "A busy");
+        assert!(state.0.agents.claim(wb).is_err(), "B busy");
+    }
+
+    #[tokio::test]
+    async fn gauntlet_bot_seat_requires_auth() {
+        let (state, _c, _r) = test_state();
+        let err = queue_join(State(state), HeaderMap::new(), Json(bot_req()))
+            .await
+            .err();
+        assert_eq!(err, Some(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn gauntlet_offline_bot_join_is_rejected() {
+        let (state, _c, _r) = test_state();
+        // Authenticated, but no agent connected for this wallet.
+        let token = state
+            .0
+            .auth
+            .mint_session("0xcccccccccccccccccccccccccccccccccccccccc");
+        let err = queue_join(State(state), bearer(&token), Json(bot_req()))
+            .await
+            .err();
+        assert_eq!(err, Some(StatusCode::FAILED_DEPENDENCY)); // 424: bot offline
+    }
+
+    #[tokio::test]
+    async fn gauntlet_casual_browser_still_pairs() {
+        let (state, _c, _r) = test_state();
+        let browser = || QueueReq {
+            stake: None,
+            initial_secs: 60,
+            increment_secs: 1,
+            session_id: None,
+            name: None,
+            engine: None,
+            seat: None,
+            uci_options: None,
+        };
+        queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+            .await
+            .expect("p1");
+        let r2 = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+            .await
+            .expect("p2");
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id)).await.0;
+        assert_eq!(tr.status, "matched");
+        assert!(tr.token.is_some(), "a browser seat gets a launch token");
+        assert_eq!(tr.seat.as_deref(), Some("browser"));
+    }
 }
