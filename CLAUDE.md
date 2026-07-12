@@ -79,4 +79,12 @@ wallet.
 ## Conventions
 - Money is `rust_decimal` / `U256` — never `f64`. USDC has 6 decimals.
 - IDs are UUIDs. Time controls are `{initial_secs, increment_secs}`.
+- **Bot seats** work in all 3 modes: a seat is played by the in-browser engine
+  or a connected agent (`SeatDelivery::{Browser,Agent}` in `start_game`), claimed
+  per game. **Tournaments dispatch round-by-round** (circle method,
+  `matchmaking.rs`), so a single-agent bot only ever plays one game at once; an
+  offline bot at a round's dispatch forfeits that pairing.
+- **Forfeit vs rating:** a no-show/forfeit loses the stake or buy-in, but a game
+  is **rated (Elo) only if both sides made ≥1 move** (`ply >= 2`, guarded in
+  `room.rs finish()`) — never ding rating for a game a player didn't play.
 - End commit messages with the `Co-Authored-By: Claude …` trailer.
