@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP } from "@/lib/config";
-import { fmtUsdcSigned } from "@/lib/escrow";
+import { fmtUsdc, fmtUsdcSigned } from "@/lib/escrow";
 
 type Profile = {
   address: string;
@@ -148,7 +148,7 @@ export function ProfileStats({ address }: { address: string }) {
                       </span>{" "}
                       <span className="muted">{g.reason}</span>
                     </td>
-                    <td>{g.stake ? fmtUsdcSigned(g.stake).replace("+", "") : "—"}</td>
+                    <td>{g.stake ? fmtUsdc(g.stake) : "—"}</td>
                     <td>{g.moves}</td>
                     <td className="muted">
                       {g.finished_at ? new Date(g.finished_at).toLocaleDateString() : "—"}

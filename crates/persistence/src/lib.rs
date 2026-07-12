@@ -86,7 +86,6 @@ pub struct TournamentGameRow {
 pub struct ClaimableTournamentRow {
     pub id: Uuid,
     pub name: String,
-    pub buy_in: Option<String>,
     pub status: String,
 }
 
@@ -406,7 +405,7 @@ impl Db {
     /// must be lowercased (entrants are stored lowercased).
     pub async fn claimable_tournaments(&self, address: &str) -> Result<Vec<ClaimableTournamentRow>> {
         let rows = sqlx::query_as::<_, ClaimableTournamentRow>(
-            r#"SELECT id, name, buy_in, status FROM tournaments
+            r#"SELECT id, name, status FROM tournaments
                WHERE status IN ('complete','settled','abandoned')
                  AND buy_in IS NOT NULL
                  AND players @> to_jsonb($1::text)"#,

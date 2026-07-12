@@ -20,9 +20,9 @@ import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
-// Tournament + TournamentGame come from @/lib/tournaments (shared with the
-// bankroll claim discovery). MyGame is this page's per-entrant seat view
-// (tokens are NOT in the public tournament view — fetched via /my-games).
+// Tournament + TournamentGame come from @/lib/tournaments. MyGame is this
+// page's per-entrant seat view (tokens are NOT in the public tournament view —
+// fetched via /my-games).
 type MyGame = {
   game_id: string;
   color: "white" | "black";

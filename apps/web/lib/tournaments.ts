@@ -21,7 +21,6 @@ export type Tournament = {
 export type ClaimableTournament = {
   tournament_id: string;
   name: string;
-  buy_in: string | null;
   status: string;
 };
 

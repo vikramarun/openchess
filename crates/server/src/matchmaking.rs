@@ -171,7 +171,6 @@ pub fn routes() -> Router<AppState> {
             "/tournaments/{id}/claim/{address}",
             get(tourney_claim_proof),
         )
-        .route("/tournaments/claimable/{address}", get(tourney_claimable))
 }
 
 fn di() -> u64 {
@@ -2079,40 +2078,6 @@ async fn tourney_claim_proof(
         amount: amount.to_string(),
         proof: proof.iter().map(|p| format!("{p:#x}")).collect(),
     }))
-}
-
-#[derive(Serialize)]
-struct ClaimableView {
-    tournament_id: Uuid,
-    name: String,
-    buy_in: Option<String>,
-    status: String,
-}
-
-/// DB-sourced list of the connected wallet's finished buy-in tournaments, so the
-/// bankroll claim UI can surface payouts/refunds even after a restart wipes the
-/// in-memory tournaments map. Read-only + best-effort: empty when there's no DB.
-async fn tourney_claimable(
-    State(state): State<AppState>,
-    Path(address): Path<String>,
-) -> Json<Vec<ClaimableView>> {
-    let Some(db) = &state.0.db else {
-        return Json(Vec::new());
-    };
-    let rows = db
-        .claimable_tournaments(&address.to_lowercase())
-        .await
-        .unwrap_or_default();
-    Json(
-        rows.into_iter()
-            .map(|r| ClaimableView {
-                tournament_id: r.id,
-                name: r.name,
-                buy_in: r.buy_in,
-                status: r.status,
-            })
-            .collect(),
-    )
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::AppState;
 
@@ -14,6 +15,41 @@ pub fn routes() -> Router<AppState> {
         .route("/leaderboard", get(leaderboard))
         .route("/players/{address}", get(profile))
         .route("/players/{address}/games", get(games))
+        // Lives here (not in matchmaking) so it inherits the read rate-limit
+        // layer — it's the one tournament route that hits Postgres.
+        .route("/tournaments/claimable/{address}", get(tourney_claimable))
+}
+
+#[derive(Serialize)]
+struct ClaimableView {
+    tournament_id: Uuid,
+    name: String,
+    status: String,
+}
+
+/// DB-sourced list of the connected wallet's finished buy-in tournaments, so the
+/// bankroll claim UI can surface payouts/refunds even after a restart wipes the
+/// in-memory tournaments map. Read-only + best-effort: empty when there's no DB.
+async fn tourney_claimable(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Json<Vec<ClaimableView>> {
+    let Some(db) = state.0.db.as_ref() else {
+        return Json(Vec::new());
+    };
+    let rows = db
+        .claimable_tournaments(&address.to_lowercase())
+        .await
+        .unwrap_or_default();
+    Json(
+        rows.into_iter()
+            .map(|r| ClaimableView {
+                tournament_id: r.id,
+                name: r.name,
+                status: r.status,
+            })
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
