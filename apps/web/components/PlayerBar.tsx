@@ -8,14 +8,13 @@ function fmtClock(ms: number | null | undefined) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** A player's name-plate above/below the board: color dot, name, engine/rating,
+/** A player's name-plate above/below the board: color dot, name, engine,
  *  captured-material strip, and a bound clock that highlights on their turn —
  *  the layout Chess.com / Lichess use. */
 export function PlayerBar({
   color,
   name,
   engine,
-  rating,
   clockMs,
   active,
   captured,
@@ -24,7 +23,6 @@ export function PlayerBar({
   color: "white" | "black";
   name: string;
   engine?: string | null;
-  rating?: number | null;
   clockMs?: number | null;
   /** True when it is this player's turn (game still live). */
   active?: boolean;
@@ -39,7 +37,6 @@ export function PlayerBar({
         <span className={`player-dot ${color}`} aria-hidden />
         <span className="player-name">{name}</span>
         {engine && <span className="player-sub">🤖 {engine}</span>}
-        {rating != null && <span className="player-rating">{rating}</span>}
         {((captured && captured.length > 0) || (edge != null && edge > 0)) && (
           <span className="player-captured" aria-label="captured pieces">
             {captured && captured.length > 0 && capturedGlyphs(captured)}

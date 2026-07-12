@@ -13,6 +13,7 @@ import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
+import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc, payoutForStake } from "@/lib/escrow";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
@@ -58,20 +59,17 @@ export function SeatGame({
     let cancelled = false;
     const cancelledFn = () => cancelled;
     let engine: BrowserEngine | null = null;
-    let spectator: WebSocket | null = null;
+    let spectator: { close: () => void } | null = null;
     let seat: { close: () => void } | null = null;
-    let specTimer: ReturnType<typeof setTimeout> | undefined;
-    let specRetry = 0;
     let finished = false;
 
-    const onSpecMessage = (ev: MessageEvent) => {
+    const onSpecFrame = (data: string) => {
       let m: any;
       try {
-        m = JSON.parse(ev.data);
+        m = JSON.parse(data);
       } catch {
         return;
       }
-      specRetry = 0; // a real frame proves the room is alive — reset the give-up counter
       try {
         switch (m.type) {
           case "game_start":
@@ -110,31 +108,6 @@ export function SeatGame({
       }
     };
 
-    // The spectator socket renders the live board. Reconnect with backoff so a
-    // dropped connection mid-wager shows "reconnecting…" and recovers, rather
-    // than silently freezing the board while money is on the line.
-    const connectSpectator = () => {
-      if (cancelled || finished) return;
-      spectator = new WebSocket(`${SERVER_WS}/ws/game/${gameId}`);
-      spectator.onopen = () => {
-        if (!finished) setStatus("playing");
-      };
-      spectator.onmessage = onSpecMessage;
-      spectator.onclose = () => {
-        if (cancelled || finished) return;
-        // Give up after ~8 dead reconnects (e.g. the room was reaped before we
-        // saw game_over) so a stale tab doesn't churn forever; specRetry resets
-        // to 0 on any received frame.
-        specRetry += 1;
-        if (specRetry > 8) {
-          setStatus("disconnected");
-          return;
-        }
-        setStatus("reconnecting…");
-        specTimer = setTimeout(connectSpectator, 500 * 2 ** Math.min(specRetry - 1, 5)); // ~16s cap
-      };
-    };
-
     const run = async () => {
       engine = new BrowserEngine();
       await engine.whenReady();
@@ -142,7 +115,17 @@ export function SeatGame({
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
 
-      connectSpectator();
+      // The spectator socket renders the live board; it reconnects with backoff
+      // so a dropped connection mid-wager shows "reconnecting…" and recovers
+      // rather than freezing the board while money is on the line.
+      spectator = connectSpectator({
+        url: `${SERVER_WS}/ws/game/${gameId}`,
+        onFrame: onSpecFrame,
+        onStatus: setStatus,
+        liveStatus: "playing",
+        isFinished: () => finished,
+        isCancelled: () => cancelled,
+      });
 
       // Drive only our seat; the fixed movetime is a fallback — playSeat uses
       // the authoritative clock from your_turn when present.
@@ -166,7 +149,6 @@ export function SeatGame({
 
     return () => {
       cancelled = true;
-      if (specTimer) clearTimeout(specTimer);
       spectator?.close();
       seat?.close();
       engine?.dispose();

@@ -13,6 +13,7 @@ import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
+import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc } from "@/lib/escrow";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
@@ -51,37 +52,33 @@ export default function GamePage() {
   const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [meta, setMeta] = useState<Meta | null>(null);
-  const [metaTried, setMetaTried] = useState(false);
 
   const pos = useRef(Chess.default());
 
   // Fetch the live-game metadata so the spectator sees who's playing, the stake,
   // and the time control — not just a bare game id. A game only appears in
-  // /games/live once both engines are ready, so poll a few times to cover the
-  // just-started gap; give up (metaTried) so the UI can degrade gracefully for a
-  // finished/never-live game instead of showing "Loading…" forever.
+  // /games/live once both engines are ready, so poll until it's found (a game
+  // opened just before we mounted appears once it starts). The bound covers the
+  // 60s never-started reap; whether it's found or not, the sidebar message is
+  // derived from the live WS status below, so a late-starting game never latches
+  // a stale "not live" note.
   useEffect(() => {
     let off = false;
     let tries = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const again = () => {
+      if (!off && ++tries < 24) timer = setTimeout(poll, 2500); // ~60s
+    };
     const poll = () => {
       fetch(`${SERVER_HTTP}/games/live`)
         .then((r) => (r.ok ? r.json() : []))
         .then((games: (Meta & { game_id: string })[]) => {
           if (off) return;
           const g = Array.isArray(games) ? games.find((x) => x.game_id === id) : undefined;
-          if (g) {
-            setMeta(g);
-          } else if (++tries < 4) {
-            timer = setTimeout(poll, 2500);
-          } else {
-            setMetaTried(true);
-          }
+          if (g) setMeta(g);
+          else again();
         })
-        .catch(() => {
-          if (!off && ++tries < 4) timer = setTimeout(poll, 2500);
-          else if (!off) setMetaTried(true);
-        });
+        .catch(again);
     };
     poll();
     return () => {
@@ -92,19 +89,16 @@ export default function GamePage() {
 
   useEffect(() => {
     let cancelled = false;
-    let ws: WebSocket | null = null;
-    let retry = 0;
+    let spectator: { close: () => void } | null = null;
     let finished = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const handle = (ev: MessageEvent) => {
+    const handle = (data: string) => {
       let msg: any;
       try {
-        msg = JSON.parse(ev.data);
+        msg = JSON.parse(data);
       } catch {
         return;
       }
-      retry = 0; // a real frame proves the room is alive — reset the give-up counter
       try {
         switch (msg.type) {
           case "game_start":
@@ -145,33 +139,18 @@ export default function GamePage() {
       }
     };
 
-    const connect = () => {
-      if (cancelled || finished) return;
-      ws = new WebSocket(`${SERVER_WS}/ws/game/${id}`);
-      ws.onopen = () => {
-        if (!finished) setStatus("watching");
-      };
-      ws.onmessage = handle;
-      ws.onerror = () => setStatus("connection error");
-      ws.onclose = () => {
-        if (cancelled || finished) return;
-        // Give up after ~8 dead reconnects (e.g. the room was reaped) so a stale
-        // tab doesn't churn forever; `retry` resets to 0 on any received frame.
-        retry += 1;
-        if (retry > 8) {
-          setStatus("disconnected");
-          return;
-        }
-        setStatus("reconnecting…");
-        timer = setTimeout(connect, 500 * 2 ** Math.min(retry - 1, 5)); // backoff to ~16s
-      };
-    };
-    connect();
+    spectator = connectSpectator({
+      url: `${SERVER_WS}/ws/game/${id}`,
+      onFrame: handle,
+      onStatus: setStatus,
+      liveStatus: "watching",
+      isFinished: () => finished,
+      isCancelled: () => cancelled,
+    });
 
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
-      ws?.close();
+      spectator?.close();
     };
   }, [id]);
 
@@ -241,8 +220,8 @@ export default function GamePage() {
                     </>
                   )}
                 </>
-              ) : metaTried ? (
-                <>This game isn’t in the live list — it may have finished or not started yet.</>
+              ) : status === "finished" || status === "disconnected" ? (
+                <>This game isn’t live right now — it may have finished.</>
               ) : (
                 <>Loading game details…</>
               )}
