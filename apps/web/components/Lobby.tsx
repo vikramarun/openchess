@@ -225,9 +225,11 @@ export function Lobby() {
       });
       if (!r.ok)
         return setErr(
-          r.status === 424
-            ? "Your bot is offline — check the chess-client window."
-            : `Couldn't post the game (${r.status}).`,
+          r.status === 503
+            ? "The server is in maintenance — no new games can be started right now."
+            : r.status === 424
+              ? "Your bot is offline — check the chess-client window."
+              : `Couldn't post the game (${r.status}).`,
         );
       const j = await r.json();
       setPending({
@@ -263,13 +265,15 @@ export function Lobby() {
       });
       if (!r.ok)
         return setErr(
-          r.status === 502
-            ? "Couldn't lock stakes on-chain — check both players have deposited enough."
-            : r.status === 424
-              ? "Your bot is offline — check the chess-client window."
-              : r.status === 410
-                ? "That challenger's bot went offline — the offer is gone."
-                : `Couldn't join (${r.status}).`,
+          r.status === 503
+            ? "The server is in maintenance — no new games can be started right now."
+            : r.status === 502
+              ? "Couldn't lock stakes on-chain — check both players have deposited enough."
+              : r.status === 424
+                ? "Your bot is offline — check the chess-client window."
+                : r.status === 410
+                  ? "That challenger's bot went offline — the offer is gone."
+                  : `Couldn't join (${r.status}).`,
         );
       const j = await r.json();
       if (j.seat === "bot" || !j.token) {

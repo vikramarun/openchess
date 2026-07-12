@@ -191,6 +191,14 @@ pub trait SettlementSink: Send + Sync {
         false
     }
 
+    /// The escrow contract's owner (`Ownable2Step`) — the wallet allowed to
+    /// administer the server (e.g. toggle maintenance). `None` off-chain or if
+    /// the view call fails. Reads live from chain, so it tracks ownership
+    /// transfers without a redeploy.
+    async fn owner(&self) -> Option<Address> {
+        None
+    }
+
     /// Whether a game is already settled on-chain. Lets the settlement worker
     /// treat a crash-after-submit (or any replay revert) as success rather than
     /// a failure. Default `false` for non-chain sinks.
@@ -372,6 +380,16 @@ impl SettlementSink for OnchainSettlement {
 
     fn is_onchain(&self) -> bool {
         true
+    }
+
+    async fn owner(&self) -> Option<Address> {
+        match self.contract().owner().call().await {
+            Ok(owner) => Some(owner),
+            Err(e) => {
+                tracing::warn!("escrow owner() call failed: {e:#}");
+                None
+            }
+        }
     }
 
     async fn is_settled(&self, game_id: Uuid) -> bool {

@@ -250,6 +250,10 @@ async fn park_create(
     headers: HeaderMap,
     Json(req): Json<ParkCreateReq>,
 ) -> Result<Json<ParkCreateResp>, StatusCode> {
+    // Drain: no point posting an offer nobody can accept while paused.
+    if state.maintenance_on() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     validate_tc(req.initial_secs, req.increment_secs)?;
     let bot = is_bot_seat(&req.seat);
     // Wagered offers AND bot seats require auth: the seat (and the agent it
@@ -398,6 +402,10 @@ async fn park_accept(
     headers: HeaderMap,
     body: Option<Json<ParkAcceptReq>>,
 ) -> Result<Json<ParkAcceptResp>, StatusCode> {
+    // Drain: reject before claiming the offer so it isn't consumed on a 503.
+    if state.maintenance_on() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let acceptor_bot = is_bot_seat(&req.seat);
     let acceptor_wallet = state.authed_wallet(&headers);
@@ -688,6 +696,10 @@ async fn queue_join(
     headers: HeaderMap,
     Json(req): Json<QueueReq>,
 ) -> Result<Json<QueueResp>, StatusCode> {
+    // Drain: reject before enqueueing (a match would spawn a game).
+    if state.maintenance_on() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     // Wagered tiers require auth; the seat is the authed wallet.
     let addr = if req.stake.is_some() {
@@ -885,6 +897,10 @@ async fn gauntlet_start(
     headers: HeaderMap,
     Json(req): Json<GauntletStartReq>,
 ) -> Result<Json<GauntletStartResp>, StatusCode> {
+    // Drain: reject new gauntlets during maintenance.
+    if state.maintenance_on() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     validate_tc(req.initial_secs, req.increment_secs)?;
     let addr = if req.stake.is_some() {
         Some(
@@ -1294,6 +1310,10 @@ async fn tourney_start(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
+    // Drain: reject before generating the round-robin (spawns many games).
+    if state.maintenance_on() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let caller = state.authed_wallet(&headers);
     let (players, tc) = {
         let mut t = state.0.lobby.tournaments.lock();

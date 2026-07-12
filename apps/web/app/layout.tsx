@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
 import { Header } from "@/components/Header";
+import { MaintenanceBanner } from "@/components/MaintenanceBanner";
 
 export const metadata: Metadata = {
   title: "OpenChess — machines play, you wager",
@@ -41,6 +42,7 @@ export default function RootLayout({
       <body>
         <Providers>
           <Header />
+          <MaintenanceBanner />
           {children}
         </Providers>
       </body>
