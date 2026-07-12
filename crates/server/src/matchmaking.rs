@@ -26,6 +26,7 @@ use uuid::Uuid;
 use ledger::{merkle_proof, tournament_leaf, Address, U256};
 
 use crate::agents::AgentUnavailable;
+use crate::ratelimit::client_ip;
 use crate::{
     build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, SeatDelivery,
     SeatMeta, MAX_STAKE,
@@ -218,6 +219,10 @@ struct ParkOffer {
     poster_token: Option<String>,
     /// Capability to cancel this offer, returned only to its creator.
     cancel_key: String,
+    /// Who this offer counts against for the open-offer cap: the poster's
+    /// wallet (lowercased) when known, else `ip:<client-ip>` for anonymous
+    /// casual offers. Not exposed to clients.
+    owner_key: String,
     created_at: Instant,
 }
 
@@ -253,6 +258,11 @@ async fn park_create(
     // Drain: no point posting an offer nobody can accept while paused.
     state.reject_if_draining()?;
     validate_tc(req.initial_secs, req.increment_secs)?;
+    // Throttle offer creation per-IP (cheap to spam, seeds the public lobby).
+    let ip = client_ip(&headers);
+    if state.0.limits.offers.check(&ip).is_some() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let bot = is_bot_seat(&req.seat);
     // Wagered offers AND bot seats require auth: the seat (and the agent it
     // dispatches to) is always the authed wallet's. For casual offers the
@@ -282,26 +292,42 @@ async fn park_create(
         poster_engine = poster_engine.or(Some(meta.engine));
     }
 
+    // Cap simultaneously-open offers per owner (wallet if known, else IP) so a
+    // single actor can't flood the lobby with challenges.
+    let owner_key = poster_addr
+        .clone()
+        .unwrap_or_else(|| format!("ip:{ip}"));
     let id = Uuid::new_v4();
     let cancel_key = Uuid::new_v4().simple().to_string();
-    state.0.lobby.park.lock().insert(
-        id,
-        ParkOffer {
-            poster_addr,
-            poster_name,
-            poster_engine,
-            poster_seat_bot: bot,
-            poster_uci_options: clean_uci_options(req.uci_options),
-            stake: req.stake,
-            initial_secs: req.initial_secs,
-            increment_secs: req.increment_secs,
-            status: "open".into(),
-            game_id: None,
-            poster_token: None,
-            cancel_key: cancel_key.clone(),
-            created_at: Instant::now(),
-        },
-    );
+    {
+        let mut park = state.0.lobby.park.lock();
+        let open = park
+            .values()
+            .filter(|o| o.owner_key == owner_key && o.status != "matched")
+            .count();
+        if open >= state.0.limits.max_open_offers {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        park.insert(
+            id,
+            ParkOffer {
+                poster_addr,
+                poster_name,
+                poster_engine,
+                poster_seat_bot: bot,
+                poster_uci_options: clean_uci_options(req.uci_options),
+                stake: req.stake,
+                initial_secs: req.initial_secs,
+                increment_secs: req.increment_secs,
+                status: "open".into(),
+                game_id: None,
+                poster_token: None,
+                cancel_key: cancel_key.clone(),
+                owner_key,
+                created_at: Instant::now(),
+            },
+        );
+    }
     Ok(Json(ParkCreateResp {
         offer_id: id,
         cancel_key,
@@ -403,6 +429,10 @@ async fn park_accept(
     // Drain: reject before claiming the offer so it isn't consumed on a 503.
     state.reject_if_draining()?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    // Throttle accept attempts per-IP (same budget as offer creation).
+    if state.0.limits.offers.check(&client_ip(&headers)).is_some() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let acceptor_bot = is_bot_seat(&req.seat);
     let acceptor_wallet = state.authed_wallet(&headers);
 

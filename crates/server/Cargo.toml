@@ -22,6 +22,9 @@ rust_decimal.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 futures-util = "0.3"
+# Direct dep only for best-effort alert webhooks (crates/server/src/alert.rs);
+# rustls so it needs no system OpenSSL, matching byo-client's reqwest pin.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 parking_lot = "0.12"
 anyhow = "1"

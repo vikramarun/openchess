@@ -9,9 +9,11 @@
 
 mod admin;
 mod agents;
+mod alert;
 mod auth;
 mod matchmaking;
 mod players;
+mod ratelimit;
 mod room;
 mod ws;
 
@@ -72,6 +74,9 @@ pub struct Inner {
     pub auth: auth::Auth,
     /// Connected user-run engines (bots), keyed by owner wallet.
     pub agents: agents::Agents,
+    /// Per-IP / per-owner rate limits + WS connection caps (abuse guardrails
+    /// for a money-adjacent API). Single-node, like the rest of the live state.
+    pub limits: ratelimit::RateLimits,
     /// Rooms signal their game id here on finish so we can evict state.
     pub cleanup_tx: mpsc::Sender<GameId>,
     /// Rooms report game outcomes here for mode standings.
@@ -203,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
         lobby: Lobby::default(),
         auth: auth::Auth::default(),
         agents: agents::Agents::default(),
+        limits: ratelimit::RateLimits::from_env(),
         cleanup_tx,
         results_tx,
     }));
@@ -294,10 +300,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/config", get(config_info))
         .route("/games", post(create_game))
         .route("/games/live", get(live_games))
-        .merge(auth::routes())
+        // Throttle the auth routes per-IP: SIWE verify does signature recovery
+        // and nonce/link mint credentials, so they're the cheapest thing to
+        // abuse. (Applied only to these routes via route_layer.)
+        .merge(auth::routes().route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_auth,
+        )))
         .merge(admin::routes())
         .merge(matchmaking::routes())
-        .merge(players::routes())
+        // Throttle the public read routes per-IP: cheap per hit, but the
+        // leaderboard query is heavy, so cap how fast one IP can trigger it.
+        .merge(players::routes().route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_reads,
+        )))
         .merge(agents::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -349,6 +366,56 @@ fn env_flag(key: &str) -> bool {
         std::env::var(key).ok().as_deref(),
         Some("1") | Some("true") | Some("TRUE")
     )
+}
+
+/// Per-IP throttle middleware for the `/auth/*` routes (signature recovery +
+/// credential minting).
+async fn rate_limit_auth(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    throttle(&state.0.limits.auth, req, next).await
+}
+
+/// Per-IP throttle middleware for the public read routes (`/players/*`,
+/// `/leaderboard`) — bounds the rate an IP can trigger the heavy leaderboard
+/// query.
+async fn rate_limit_reads(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    throttle(&state.0.limits.reads, req, next).await
+}
+
+/// Charge one token against `bucket` for the request's client IP, returning 429
+/// (with `Retry-After`) when over budget. CORS preflight (`OPTIONS`) is not
+/// counted — it carries no work and browsers send one per request.
+async fn throttle(
+    bucket: &ratelimit::TokenBucket,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.method() == axum::http::Method::OPTIONS {
+        return next.run(req).await;
+    }
+    let ip = ratelimit::client_ip(req.headers());
+    if let Some(retry) = bucket.check(&ip) {
+        return too_many(retry);
+    }
+    next.run(req).await
+}
+
+/// A `429 Too Many Requests` response carrying a `Retry-After` hint (seconds).
+pub(crate) fn too_many(retry: std::time::Duration) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut resp = (StatusCode::TOO_MANY_REQUESTS, "rate limited\n").into_response();
+    let secs = retry.as_secs().max(1).to_string();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&secs) {
+        resp.headers_mut().insert("retry-after", v);
+    }
+    resp
 }
 
 /// Spawn a long-lived worker and restart it if it ever exits or panics, so a
@@ -513,6 +580,7 @@ async fn sweep_task(state: AppState) {
         tick.tick().await;
         state.0.auth.sweep_expired();
         state.0.lobby.sweep_expired();
+        state.0.limits.sweep();
         // Prune game->mode routing entries for games that no longer exist.
         let live: std::collections::HashSet<GameId> =
             state.0.rooms.lock().keys().copied().collect();
@@ -584,6 +652,11 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                             .finalize_settlement(row.id, row.game_id, "failed", Some(&msg))
                             .await;
                         tracing::error!(game_id = %row.game_id, attempts = row.attempts, "outbox: giving up: {msg}");
+                        alert::fire(format!(
+                            "🚨 OpenChess: settlement outbox GAVE UP on game {} after {} attempts \
+                             — the wager was not paid out on-chain. err: {msg}",
+                            row.game_id, row.attempts
+                        ));
                     } else {
                         // Transient: requeue for retry on a later tick.
                         let _ = db.requeue_settlement(row.id, Some(&msg)).await;
@@ -630,6 +703,11 @@ async fn tournament_settlement_worker(db: Arc<Db>, settlement: Arc<dyn Settlemen
                             .set_tournament_settlement_status(row.id, "failed", Some(&msg))
                             .await;
                         tracing::error!(tid = %row.tid, "tournament outbox: giving up: {msg}");
+                        alert::fire(format!(
+                            "🚨 OpenChess: tournament settlement outbox GAVE UP on tournament {} \
+                             after {} attempts — payouts were not made on-chain. err: {msg}",
+                            row.tid, row.attempts
+                        ));
                     } else {
                         let _ = db
                             .set_tournament_settlement_status(row.id, "pending", Some(&msg))
@@ -988,6 +1066,11 @@ impl AppState {
                     %game_id,
                     "escrow refund after aborted dispatch FAILED (funds recoverable via claimTimeout): {e:#}"
                 );
+                alert::fire(format!(
+                    "🚨 OpenChess: escrow refund FAILED for game {game_id} after an aborted \
+                     dispatch — both stakes are locked until the contract's 24h claimTimeout. \
+                     Investigate the oracle/RPC. err: {e:#}"
+                ));
             }
         }
         if let Some(db) = &self.0.db {
@@ -1137,6 +1220,7 @@ mod tests {
             lobby: Lobby::default(),
             auth: auth::Auth::default(),
             agents: agents::Agents::default(),
+            limits: ratelimit::RateLimits::from_env(),
             cleanup_tx,
             results_tx,
         }))

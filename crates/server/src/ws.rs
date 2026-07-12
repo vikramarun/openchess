@@ -3,6 +3,7 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientEnvelope, ClientMessage, Color, Envelope, GameId, ServerMessage};
@@ -22,8 +23,17 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     Path(game_id): Path<GameId>,
     Query(q): Query<WsQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // Abuse guardrails on a public endpoint (spectators need no auth): throttle
+    // upgrade churn per-IP, then cap concurrent sockets globally + per-IP so a
+    // flood of connections can't exhaust the node.
+    let guard = match state.0.limits.admit_ws(&headers, &state.0.limits.game_conns) {
+        Ok(g) => g,
+        Err(resp) => return resp,
+    };
+
     // Resolve role: a valid token bound to this game => player; else spectator.
     let seat = q
         .token
@@ -35,11 +45,14 @@ pub async fn ws_handler(
     // Bound message/frame size — clients only ever send small JSON envelopes.
     let ws = ws.max_message_size(16 * 1024).max_frame_size(16 * 1024);
     ws.on_upgrade(move |socket| async move {
+        // Hold the connection slot for the socket's whole lifetime.
+        let _guard = guard;
         match seat {
             Some(color) => handle_player(state, game_id, color, socket).await,
             None => handle_spectator(state, game_id, socket).await,
         }
     })
+    .into_response()
 }
 
 async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socket: WebSocket) {
@@ -175,7 +188,7 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
     };
     let (mut sink, mut stream) = socket.split();
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         let mut seq = 0u64;
         // Replay the game so far to this spectator: game_start + one
         // opponent_moved per historical move rebuilds the board to the current
@@ -229,10 +242,19 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
         let _ = sink.send(Message::Close(None)).await;
     });
 
-    // Drain (and ignore) inbound until the socket closes.
-    while let Some(Ok(m)) = stream.next().await {
-        if matches!(m, Message::Close(_)) {
-            break;
+    // Drain (and ignore) inbound until the socket closes OR the writer stops
+    // (room died, or a live-game send failed on a dead peer). Without watching
+    // the writer, a spectator whose peer vanished without a TCP FIN would leave
+    // this reader pending forever and hold its connection-cap slot indefinitely.
+    loop {
+        tokio::select! {
+            m = stream.next() => {
+                let Some(Ok(m)) = m else { break };
+                if matches!(m, Message::Close(_)) {
+                    break;
+                }
+            }
+            _ = &mut writer => break,
         }
     }
     writer.abort();

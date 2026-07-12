@@ -8,6 +8,7 @@ import { useAccount } from "wagmi";
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { SeatGame } from "@/components/SeatGame";
+import { shortAddress } from "@/lib/address";
 import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
@@ -22,7 +23,6 @@ function tryParse(s: string): bigint | null {
     return null;
   }
 }
-const short = (a?: string | null) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
 const TC_NAME: Record<string, string> = {
   "1+0": "Bullet",
   "3+0": "Blitz",
@@ -73,7 +73,7 @@ function browserSeat(): { name?: string; engine: string } {
 
 /** One seat's display: name if declared, else shortened wallet, else fallback. */
 const seatLabel = (name: string | null, addr: string | null, fallback: string) =>
-  name ?? (addr ? short(addr) : fallback);
+  name ?? shortAddress(addr, fallback);
 
 /** The casual-first play lobby: pick a time control to play instantly or open a
  *  challenge (your engine vs theirs), watch games in progress, or stake USDC. */

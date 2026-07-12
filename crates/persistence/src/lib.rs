@@ -48,6 +48,13 @@ pub struct PlayerStatsRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+pub struct LeaderboardRow {
+    pub wallet: String,
+    pub rating: f32,
+    pub games: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 pub struct PlayerGameRow {
     pub id: Uuid,
     pub mode: String,
@@ -580,6 +587,32 @@ impl Db {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(r.unwrap_or(1500.0))
+    }
+
+    /// Top-rated players, best first. Only players with at least one finished
+    /// rated game (two known wallets) are included, so freshly-signed-in wallets
+    /// sitting at the default 1500 don't pad the board. Powers the lobby
+    /// leaderboard.
+    pub async fn leaderboard(&self, limit: i64) -> Result<Vec<LeaderboardRow>> {
+        let rows = sqlx::query_as::<_, LeaderboardRow>(
+            r#"SELECT wallet, rating, games FROM (
+                 SELECT u.wallet AS wallet, u.rating AS rating,
+                   (SELECT COUNT(*) FROM games g
+                      WHERE g.status='finished' AND g.result IS NOT NULL
+                        AND g.white_wallet IS NOT NULL AND g.black_wallet IS NOT NULL
+                        AND (lower(g.white_wallet)=lower(u.wallet)
+                          OR lower(g.black_wallet)=lower(u.wallet))
+                   ) AS games
+                 FROM users u
+               ) t
+               WHERE games > 0
+               ORDER BY rating DESC, games DESC
+               LIMIT $1"#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Recent finished games involving an address (most recent first).
