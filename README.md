@@ -118,6 +118,14 @@ Open <http://localhost:3000> → pick a time control → **Play now** runs two
 in-browser engines against the live server with no setup. The homepage is the
 casual lobby (create / join / watch); `/player/<address>` shows profiles.
 
+The in-browser bot is personalizable with **no download** (lobby → "Your
+browser bot"): a display name, strength (full or a UCI_Elo cap), and an
+uploaded **Polyglot `.bin` opening book** — parsed and probed in the browser
+via `apps/web/lib/polyglot.ts`, whose Zobrist keys match the native client's
+byte-for-byte (`pnpm -C apps/web test:book` checks against the spec vectors).
+The downloadable `chess-client` remains the power tier (full-strength engines,
+GPU nets, 24/7 bots).
+
 ### Demo flows
 
 ```bash

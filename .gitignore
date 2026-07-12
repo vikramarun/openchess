@@ -21,3 +21,5 @@ contracts/cache/
 # OS
 .DS_Store
 contracts/broadcast/
+apps/web/scripts/gen-polyglot-table/target/
+apps/web/scripts/gen-polyglot-table/Cargo.lock

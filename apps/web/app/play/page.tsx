@@ -7,6 +7,7 @@ import { parseUci } from "chessops/util";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { ensureBookLoaded } from "@/lib/browserBot";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
@@ -70,6 +71,9 @@ export default function PlayPage() {
       setStatus("loading engines…");
       await Promise.all([white.whenReady(), black.whenReady()]);
       if (cancelled) return;
+      // Warm the uploaded book. Note: the book is a shared cache, so both seats
+      // follow it through the opening — "vs the house" diverges once out of book.
+      await ensureBookLoaded();
 
       setStatus("creating game…");
       const resp = await fetch(`${SERVER_HTTP}/games`, {

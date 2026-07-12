@@ -4,6 +4,7 @@
 import { Chess } from "chessops/chess";
 import { parseUci } from "chessops/util";
 
+import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
@@ -12,20 +13,27 @@ export type PlayHandlers = {
   onEvent?: (msg: any) => void;
 };
 
-/** A book move for this history, but only if it's actually legal in the
- *  reconstructed position — so a typo in the book can never send an illegal
- *  move (it just falls through to the engine). */
+/** True if `uci` is legal in `pos`. */
+function isLegalUci(pos: Chess, uci: string): boolean {
+  const m = parseUci(uci);
+  return !!m && pos.isLegal(m);
+}
+
+/** A book move for this history — the user's uploaded Polyglot book first,
+ *  then the built-in mainline set — returning the first LEGAL of the two, so a
+ *  bad/illegal user-book entry falls through to the built-in book (and then to
+ *  the engine) rather than suppressing it. */
 function legalBookMove(movesUci: string[]): string | null {
-  const candidate = bookMove(movesUci);
-  if (!candidate) return null;
   const pos = Chess.default();
   for (const u of movesUci) {
-    const m = parseUci(u);
-    if (!m || !pos.isLegal(m)) return null;
-    pos.play(m);
+    if (!isLegalUci(pos, u)) return null;
+    pos.play(parseUci(u)!);
   }
-  const cm = parseUci(candidate);
-  return cm && pos.isLegal(cm) ? candidate : null;
+  const maxPly = getBrowserBotConfig().bookMaxPly;
+  const user = probeUserBook(pos, movesUci.length, maxPly);
+  if (user && isLegalUci(pos, user)) return user;
+  const builtin = bookMove(movesUci);
+  return builtin && isLegalUci(pos, builtin) ? builtin : null;
 }
 
 /** Play one seat of a game in the browser, driving `engine`. Resolves when the
@@ -38,6 +46,9 @@ export function playSeat(
   handlers: PlayHandlers = {},
   cancelled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
+  // Warm the uploaded-book cache; resolves long before the first your_turn.
+  void ensureBookLoaded();
+
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
   const send = (msg: Record<string, unknown>) => {

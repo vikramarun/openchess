@@ -1,0 +1,14 @@
+# Standalone generator for apps/web/lib/polyglotTable.ts. The empty [workspace]
+# keeps it OUT of the repo's Cargo workspace (crates/*). Regenerate with:
+#   cargo run --manifest-path apps/web/scripts/gen-polyglot-table/Cargo.toml \
+#     > apps/web/lib/polyglotTable.ts
+[workspace]
+
+[package]
+name = "gen-polyglot-table"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+shakmaty = "0.27"

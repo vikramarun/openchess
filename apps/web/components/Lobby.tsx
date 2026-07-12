@@ -6,8 +6,10 @@ import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
+import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { SeatGame } from "@/components/SeatGame";
 import { BOT_OFFLINE, fetchBot, loadBotOptions, type BotStatus } from "@/lib/bot";
+import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken, fetchConfig, fmtUsdc, parseUsdc, type OnchainConfig } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
@@ -59,8 +61,15 @@ type Pending = {
   bot: boolean;
 };
 
-/** What the in-browser seat driver runs — declared to opponents (unverified). */
-const BROWSER_ENGINE = "Stockfish (browser)";
+/** Offer body for a browser-driven seat: the user's configured bot name +
+ *  engine label, declared to opponents (unverified). */
+function browserSeat(): { name?: string; engine: string } {
+  const cfg = getBrowserBotConfig();
+  return {
+    ...(cfg.name.trim() ? { name: cfg.name.trim() } : {}),
+    engine: browserEngineLabel(),
+  };
+}
 
 /** One seat's display: name if declared, else shortened wallet, else fallback. */
 const seatLabel = (name: string | null, addr: string | null, fallback: string) =>
@@ -211,9 +220,7 @@ export function Lobby() {
           stake: stakeBase,
           initial_secs: tc.initial,
           increment_secs: tc.inc,
-          ...(botPlays
-            ? { seat: "bot", uci_options: loadBotOptions() }
-            : { engine: BROWSER_ENGINE }),
+          ...(botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat()),
         }),
       });
       if (!r.ok)
@@ -251,9 +258,7 @@ export function Lobby() {
           ...(token && (wagered || botPlays) ? { authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(
-          botPlays
-            ? { seat: "bot", uci_options: loadBotOptions() }
-            : { engine: BROWSER_ENGINE },
+          botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
         ),
       });
       if (!r.ok)
@@ -505,6 +510,10 @@ export function Lobby() {
           </table>
         )}
       </div>
+
+      {/* Personalize the in-browser bot (name / opening book). Hidden
+          only while the native connected bot is the chosen seat driver. */}
+      {!botPlays && <BrowserBotPanel />}
 
       {/* Optional: deposit for staked play */}
       {wagerOn && config?.escrow && (
