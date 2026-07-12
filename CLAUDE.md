@@ -13,8 +13,9 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 ```bash
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
 (cd contracts && forge test)       # Foundry — 25 tests incl. a solvency invariant
+(cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 cargo run -p server                # game server on 127.0.0.1:8080
-(cd apps/web && pnpm install && pnpm dev)   # web on :3000
+(cd apps/web && pnpm dev)          # web on :3000
 ```
 - Contract ABIs are **vendored** in `crates/ledger/abi/`, so `cargo build` does
   **not** need a prior `forge build`. Re-vendor after editing the contract
@@ -32,7 +33,8 @@ crates/server        chess-server: axum HTTP + WS hub, per-game room actors, 3 m
 crates/ledger        on-chain settlement (alloy), EIP-712, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox
 contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
-apps/web             Next.js: lobby, in-browser Stockfish (WASM), wallet/SIWE, spectator, profiles
+apps/web             Next.js: lobby, in-browser Stockfish 18 (WASM/NNUE) + uploadable
+                     Polyglot book (lib/polyglot.ts), wallet/SIWE, bot control, spectator, profiles
 ```
 
 ## Architecture in three sentences
