@@ -62,6 +62,23 @@ export class BrowserEngine {
     return this.ready;
   }
 
+  /** Set a UCI option (fire-and-forget; engines ignore unknown options). */
+  setOption(name: string, value: string | number | boolean) {
+    this.send(`setoption name ${name} value ${value}`);
+  }
+
+  /** Apply the user's browser-bot settings (strength + hash). Call after
+   *  whenReady(); fire-and-forget per UCI semantics. */
+  applyConfig(cfg: { strength: "max" | number; hashMb: number }) {
+    this.setOption("Hash", cfg.hashMb);
+    if (cfg.strength === "max") {
+      this.setOption("UCI_LimitStrength", false);
+    } else {
+      this.setOption("UCI_LimitStrength", true);
+      this.setOption("UCI_Elo", cfg.strength);
+    }
+  }
+
   /** Set the position and `go …`, resolving with the engine's bestmove. */
   private async go(movesUci: string[], goCmd: string): Promise<string> {
     await this.ready;

@@ -7,6 +7,7 @@ import { parseUci } from "chessops/util";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { ensureBookLoaded, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
@@ -65,6 +66,9 @@ export function SeatGame({
       engine = new BrowserEngine();
       await engine.whenReady();
       if (cancelled) return;
+      // Personalize the seat: user's strength/hash settings + uploaded book.
+      engine.applyConfig(getBrowserBotConfig());
+      await ensureBookLoaded();
 
       spectator = new WebSocket(`${SERVER_WS}/ws/game/${gameId}`);
       spectator.onopen = () => setStatus("playing");

@@ -7,6 +7,7 @@ import { parseUci } from "chessops/util";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { ensureBookLoaded, getBrowserBotConfig } from "@/lib/browserBot";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
@@ -70,6 +71,10 @@ export default function PlayPage() {
       setStatus("loading engines…");
       await Promise.all([white.whenReady(), black.whenReady()]);
       if (cancelled) return;
+      // White is "your" bot vs the house: apply the user's settings + book to
+      // it; the house side (black) stays a stock engine.
+      white.applyConfig(getBrowserBotConfig());
+      await ensureBookLoaded();
 
       setStatus("creating game…");
       const resp = await fetch(`${SERVER_HTTP}/games`, {

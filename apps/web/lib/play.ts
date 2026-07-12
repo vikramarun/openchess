@@ -4,6 +4,7 @@
 import { Chess } from "chessops/chess";
 import { parseUci } from "chessops/util";
 
+import { ensureBookLoaded, probeUserBook } from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
@@ -12,18 +13,19 @@ export type PlayHandlers = {
   onEvent?: (msg: any) => void;
 };
 
-/** A book move for this history, but only if it's actually legal in the
- *  reconstructed position — so a typo in the book can never send an illegal
- *  move (it just falls through to the engine). */
+/** A book move for this history — the user's uploaded Polyglot book first,
+ *  then the built-in mainline set — but only if it's actually legal in the
+ *  reconstructed position, so a bad book can never send an illegal move (it
+ *  just falls through to the engine). */
 function legalBookMove(movesUci: string[]): string | null {
-  const candidate = bookMove(movesUci);
-  if (!candidate) return null;
   const pos = Chess.default();
   for (const u of movesUci) {
     const m = parseUci(u);
     if (!m || !pos.isLegal(m)) return null;
     pos.play(m);
   }
+  const candidate = probeUserBook(pos, movesUci.length) ?? bookMove(movesUci);
+  if (!candidate) return null;
   const cm = parseUci(candidate);
   return cm && pos.isLegal(cm) ? candidate : null;
 }
@@ -38,6 +40,9 @@ export function playSeat(
   handlers: PlayHandlers = {},
   cancelled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
+  // Warm the uploaded-book cache; resolves long before the first your_turn.
+  void ensureBookLoaded();
+
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
   const send = (msg: Record<string, unknown>) => {
