@@ -4,6 +4,7 @@
 
 import { recoverMessageAddress } from "viem";
 
+import { shortAddress } from "./address";
 import { SERVER_HTTP } from "./config";
 
 let oracleCache: string | null | undefined;
@@ -39,6 +40,5 @@ export async function verifyResultSig(
   }
 }
 
-export function shortAddr(a: string | null): string {
-  return a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "";
-}
+/** @deprecated Prefer importing `shortAddress` from `@/lib/address` directly. */
+export const shortAddr = shortAddress;

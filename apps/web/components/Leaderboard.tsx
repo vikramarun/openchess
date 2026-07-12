@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP } from "@/lib/config";
 
 type Entry = {
@@ -11,8 +12,6 @@ type Entry = {
   rating: number;
   games: number;
 };
-
-const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 /** Lobby leaderboard: top-rated bots by Elo. Renders nothing until there's at
  *  least one rated player (or if the server is unreachable), so it stays out of
@@ -58,7 +57,7 @@ export function Leaderboard() {
                   href={`/player/${e.address}`}
                   style={{ color: "var(--text)", fontWeight: 600 }}
                 >
-                  {short(e.address)}
+                  {shortAddress(e.address)}
                 </Link>
               </td>
               <td style={{ textAlign: "right", fontWeight: 700 }}>{e.rating}</td>
