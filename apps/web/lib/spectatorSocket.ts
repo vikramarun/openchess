@@ -35,6 +35,7 @@ export function connectSpectator(opts: {
 
   const connect = () => {
     if (opts.isCancelled() || opts.isFinished()) return;
+    openedAt = 0; // reset per attempt: a reconnect that never opens must count as a fast fail
     ws = new WebSocket(opts.url);
     ws.onopen = () => {
       openedAt = Date.now();

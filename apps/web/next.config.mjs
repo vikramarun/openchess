@@ -24,6 +24,11 @@ const connectSrc = [
   "https://*.walletconnect.org",
   "wss://*.walletconnect.com",
   "wss://*.walletconnect.org",
+  // Coinbase Wallet (a RainbowKit getDefaultConfig default connector): the
+  // WalletLink relay + SDK/Smart-Wallet APIs.
+  "https://www.walletlink.org",
+  "wss://www.walletlink.org",
+  "https://*.coinbase.com",
   // Next.js dev server (HMR) talks to its own origin over ws; 'self' covers it,
   // but some setups use a distinct ws port — allow localhost ws in dev only.
   ...(isProd ? [] : ["ws://localhost:*", "http://localhost:*"]),
@@ -50,7 +55,7 @@ const csp = [
   "img-src 'self' data: blob: https:", // ENS/wallet avatars (IPFS gateways, arbitrary https)
   "font-src 'self' data:",
   "worker-src 'self' blob:", // Stockfish web worker
-  "frame-src 'self' https://*.walletconnect.com https://*.walletconnect.org",
+  "frame-src 'self' https://*.walletconnect.com https://*.walletconnect.org https://keys.coinbase.com",
   `connect-src ${connectSrc}`,
 ].join("; ");
 
