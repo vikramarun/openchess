@@ -182,6 +182,17 @@ impl Room {
             // doesn't linger forever as a ghost in the lobby's "live" list.
             if !self.started && self.base.elapsed() > Duration::from_secs(60) {
                 tracing::info!(game_id = %self.game_id, "room reaped: never started");
+                // Report a draw so mode standings (esp. tournament rounds) keep
+                // progressing instead of stalling on a game that never began.
+                // Unlinked games (casual/park) ignore it; wagered escrow is
+                // untouched (only finish() settles on-chain).
+                let _ = self
+                    .results_tx
+                    .send(crate::GameOutcome {
+                        game_id: self.game_id,
+                        winner: None,
+                    })
+                    .await;
                 break;
             }
         }
