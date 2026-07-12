@@ -3,7 +3,7 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientEnvelope, ClientMessage, Color, Envelope, GameId, ServerMessage};
@@ -29,12 +29,9 @@ pub async fn ws_handler(
     // Abuse guardrails on a public endpoint (spectators need no auth): throttle
     // upgrade churn per-IP, then cap concurrent sockets globally + per-IP so a
     // flood of connections can't exhaust the node.
-    let ip = crate::ratelimit::client_ip(&headers);
-    if let Some(retry) = state.0.limits.ws.check(&ip) {
-        return crate::too_many(retry);
-    }
-    let Some(guard) = state.0.limits.game_conns.acquire(&ip) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let guard = match state.0.limits.admit_ws(&headers, &state.0.limits.game_conns) {
+        Ok(g) => g,
+        Err(resp) => return resp,
     };
 
     // Resolve role: a valid token bound to this game => player; else spectator.

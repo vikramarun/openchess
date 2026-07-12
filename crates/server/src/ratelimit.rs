@@ -175,28 +175,53 @@ impl RateLimits {
     /// header is client-forgeable, so pin header trust to the deployment.
     pub fn from_env() -> Self {
         Self {
-            auth: TokenBucket::new(env_u32("RL_AUTH_BURST", 40), env_f64("RL_AUTH_PER_SEC", 1.0)),
-            offers: TokenBucket::new(
-                env_u32("RL_OFFERS_BURST", 20),
-                env_f64("RL_OFFERS_PER_SEC", 1.0),
+            auth: TokenBucket::new(
+                env_parse("RL_AUTH_BURST", 40),
+                env_parse("RL_AUTH_PER_SEC", 1.0),
             ),
-            ws: TokenBucket::new(env_u32("RL_WS_BURST", 60), env_f64("RL_WS_PER_SEC", 2.0)),
+            offers: TokenBucket::new(
+                env_parse("RL_OFFERS_BURST", 20),
+                env_parse("RL_OFFERS_PER_SEC", 1.0),
+            ),
+            ws: TokenBucket::new(env_parse("RL_WS_BURST", 60), env_parse("RL_WS_PER_SEC", 2.0)),
             agent_conns: ConnGate::new(
-                env_usize("RL_AGENT_CONNS_MAX", 512),
-                env_usize("RL_AGENT_CONNS_PER_IP", 16),
+                env_parse("RL_AGENT_CONNS_MAX", 512),
+                env_parse("RL_AGENT_CONNS_PER_IP", 16),
             ),
             game_conns: ConnGate::new(
-                env_usize("RL_GAME_CONNS_MAX", 2048),
+                env_parse("RL_GAME_CONNS_MAX", 2048),
                 // Generous per-IP: a whole CGNAT/office of spectators shares one
                 // IP; the global cap protects the node.
-                env_usize("RL_GAME_CONNS_PER_IP", 128),
+                env_parse("RL_GAME_CONNS_PER_IP", 128),
             ),
             // Per wallet (or IP for anonymous casual offers). Comfortably above
             // the house bot's one-open-offer-per-time-control
             // (scripts/house-bot.sh defaults to 4 TCs under one wallet); bump
             // RL_MAX_OPEN_OFFERS if you run more.
-            max_open_offers: env_usize("RL_MAX_OPEN_OFFERS", 8),
+            max_open_offers: env_parse("RL_MAX_OPEN_OFFERS", 8),
         }
+    }
+
+    /// Admit a WebSocket upgrade from `headers`: throttle upgrade churn per-IP,
+    /// then take a `gate` slot. On success the returned [`ConnGuard`] must be
+    /// held for the socket's whole lifetime. On failure the `Err` is a
+    /// ready-to-return response — 429 with a `Retry-After`, or 503 at capacity.
+    /// One code path for both `/ws/game` and `/ws/agent`.
+    // Err is an axum Response (returned by value) — idiomatic for a reject path,
+    // and this only runs on a WS upgrade, so its size is irrelevant.
+    #[allow(clippy::result_large_err)]
+    pub fn admit_ws(
+        &self,
+        headers: &HeaderMap,
+        gate: &ConnGate,
+    ) -> Result<ConnGuard, axum::response::Response> {
+        use axum::response::IntoResponse;
+        let ip = client_ip(headers);
+        if let Some(retry) = self.ws.check(&ip) {
+            return Err(crate::too_many(retry));
+        }
+        gate.acquire(&ip)
+            .ok_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response())
     }
 
     /// Prune idle buckets (called from the periodic sweep task).
@@ -239,14 +264,13 @@ pub fn client_ip(headers: &HeaderMap) -> String {
     "unknown".to_string()
 }
 
-fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+/// Read an env var into any `FromStr` type, falling back to `default` when it's
+/// unset or unparseable (the target type is inferred from `default`).
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
