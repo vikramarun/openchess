@@ -29,7 +29,8 @@ crates/protocol      shared serde wire types (server + client)
 crates/game-engine   authoritative board/clock/result (shakmaty) — the referee
 crates/byo-client    native client: UCI driver, selfplay/play/gauntlet, `connect` bot agent
                      (web-driven seats or --auto), Polyglot book, SIWE/link-code auth, login
-crates/server        chess-server: axum HTTP + WS hub, per-game room actors, 3 modes, SIWE
+crates/server        chess-server: axum HTTP + WS hub, per-game room actors, 3 modes, SIWE,
+                     bot-agent registry, leaderboard, per-IP rate limiting (ratelimit.rs)
 crates/ledger        on-chain settlement (alloy), EIP-712, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox
 contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
@@ -47,10 +48,15 @@ outbox settles it on `ChessEscrow`; funds live in the contract, never a platform
 wallet.
 
 ## Constraints that WILL bite you
-- **Single-node only.** Rooms, lobby, launch tokens, and SIWE sessions are all
-  in-process memory (`main.rs` AppState, `matchmaking.rs` Lobby, `auth.rs`). Run
+- **Single-node only.** Rooms, lobby, launch tokens, SIWE sessions, the bot-agent
+  registry, and the rate-limit buckets are all in-process memory (`main.rs`
+  AppState, `matchmaking.rs` Lobby, `auth.rs`, `agents.rs`, `ratelimit.rs`). Run
   exactly one Fly machine (`--ha=false` + `fly scale count 1`). Making it
   multi-node is the next task — see [HANDOFF.md](HANDOFF.md).
+- **Rate limiting is per-IP, keyed on `Fly-Client-IP`.** Behind a different
+  proxy the fallback header is client-forgeable, so pin header trust to the
+  deploy. Limits are env-tunable (`RL_*`); a new HTTP route is unthrottled
+  unless you add it to a throttled router (`ratelimit.rs`, `main.rs`).
 - **The oracle pays gas.** The server sends `openGame`/`settleGame` from
   `ORACLE_KEY`; that address needs Base ETH or wagered games fail closed.
 - **Money paths fail closed.** No wager is accepted unless on-chain settlement is

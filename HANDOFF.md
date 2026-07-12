@@ -70,6 +70,13 @@ docs.
   `git tag v0.1.0 && git push origin v0.1.0`. `scripts/house-bot.sh` runs one
   casual autopilot per lobby time control under an UNFUNDED wallet so the
   park is never empty — run it 24/7 somewhere cheap.
+- **Bot leaderboard:** the lobby shows a ranked board of top players by Elo
+  (`GET /leaderboard` → `crates/server/src/players.rs` + `crates/persistence`,
+  `apps/web/components/Leaderboard.tsx`). Wallets with ≥1 finished rated game;
+  one overall Elo for now (per-time-control is a follow-up).
+- **Rate limiting / abuse guardrails:** per-IP throttles + connection caps on
+  the money-adjacent API (`crates/server/src/ratelimit.rs`) — see the hardening
+  note below for the full shape.
 - **Guardrails for the unaudited launch:** server `MAX_STAKE` capped at **25
   USDC** (`crates/server/src/main.rs`), 1% rake, 24h settle timeout.
 - **Tests:** 39 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
@@ -78,8 +85,9 @@ docs.
 
 ## ⚠️ Not yet done — the gap between "merged" and "shareable"
 
-The BYO-multiplayer feature set (PRs #2–#4) is **complete and on `main`, but not
-all of it is deployed**, and one hardening task still gates a public launch:
+The BYO-multiplayer feature set (PRs #2–#4), rate limiting, and the bot
+leaderboard (PRs #6–#7) are **complete and on `main`, but not all of it is
+deployed**, and one hardening task still gates a public launch:
 
 1. **Cut the first release + deploy the browser-bot changes.** No `v*` tag
    exists yet, so the `/connect` download buttons currently 404
@@ -100,7 +108,12 @@ all of it is deployed**, and one hardening task still gates a public launch:
    `Fly-Client-IP`. Also: best-effort **alerting** (`crates/server/src/alert.rs`)
    POSTs to `ALERT_WEBHOOK_URL` (unset ⇒ no-op) on the two money-critical failure
    logs (escrow-refund-after-abort, settlement outbox give-ups) so stuck funds
-   get noticed.
+   get noticed. The public read routes (`/players/*`, `/leaderboard`) get a
+   `reads` throttle too. **Query follow-up:** the leaderboard query is
+   O(users×games) (a correlated per-user `COUNT` with `lower()` on unindexed
+   wallet columns, `LIMIT` applied after counting) — fine at launch scale, but
+   rewrite it as a `GROUP BY` join + an index on the wallet columns before the
+   user base grows.
 3. **Deploy survivability (now the top hardening task).** Every
    `deploy-server.sh` kills live games (rooms are in-memory; wagered games die
    into the 24h `claimTimeout`). The pragmatic slice is **room rehydration**
@@ -148,10 +161,10 @@ all in `crates/server` + a Redis dependency.
 
 ## Feature opportunities (the multiplayer loop is complete; these make it sticky)
 
-- **Bot leaderboard / ratings surfaced in the lobby** — "battle your bots" has
-  no scoreboard yet, so there's little reason to keep a bot online or improve
-  it. Ratings already exist per wallet (`/players/{address}`); surfacing a
-  ranked list (ideally per-time-control) is the highest-leverage next feature.
+- **Bot leaderboard — DONE (PR #7):** top players by Elo surfaced in the lobby
+  (`GET /leaderboard` + `Leaderboard.tsx`). Still one overall Elo; the natural
+  next step is **per-time-control Elo** (below), plus the query optimization
+  noted in item #2.
 - **Bot seats for Gauntlet + Tournament** — bot seats are park-only today, but
   `SeatDelivery::{Browser,Agent}` in `start_game` already generalizes the
   claim/dispatch/rollback, so wiring gauntlet `queue_join` and `tourney_start`
