@@ -83,6 +83,14 @@ pub struct TournamentGameRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+pub struct ClaimableTournamentRow {
+    pub id: Uuid,
+    pub name: String,
+    pub buy_in: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 pub struct TournamentOutboxRow {
     pub id: Uuid,
     pub tid: Uuid,
@@ -364,9 +372,11 @@ impl Db {
 
     // -- tournament durable state -----------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_tournament(
         &self,
         id: Uuid,
+        name: &str,
         buy_in: Option<&str>,
         initial_secs: i64,
         increment_secs: i64,
@@ -374,11 +384,12 @@ impl Db {
         players: &serde_json::Value,
     ) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO tournaments (id, buy_in, initial_secs, increment_secs, status, players)
-               VALUES ($1,$2,$3,$4,$5,$6)
-               ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, players=EXCLUDED.players"#,
+            r#"INSERT INTO tournaments (id, name, buy_in, initial_secs, increment_secs, status, players)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, players=EXCLUDED.players"#,
         )
         .bind(id)
+        .bind(name)
         .bind(buy_in)
         .bind(initial_secs)
         .bind(increment_secs)
@@ -387,6 +398,23 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Buy-in tournaments the wallet entered that have reached a finished state
+    /// (a payout or refund may be collectable on-chain). DB-sourced so it
+    /// survives the restart that wipes the in-memory tournaments map. `address`
+    /// must be lowercased (entrants are stored lowercased).
+    pub async fn claimable_tournaments(&self, address: &str) -> Result<Vec<ClaimableTournamentRow>> {
+        let rows = sqlx::query_as::<_, ClaimableTournamentRow>(
+            r#"SELECT id, name, buy_in, status FROM tournaments
+               WHERE status IN ('complete','settled','abandoned')
+                 AND buy_in IS NOT NULL
+                 AND players @> to_jsonb($1::text)"#,
+        )
+        .bind(address)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     pub async fn set_tournament_status(&self, id: Uuid, status: &str) -> Result<()> {

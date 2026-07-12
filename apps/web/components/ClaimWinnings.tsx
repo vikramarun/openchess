@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { TournamentClaim } from "@/components/TournamentClaim";
-import { fetchTournaments } from "@/lib/tournaments";
+import { fetchClaimableTournaments } from "@/lib/tournaments";
 
 type Candidate = { id: string; name: string; status: string };
 
@@ -25,30 +25,22 @@ export function ClaimWinnings({ escrow, chainId }: { escrow: `0x${string}`; chai
   }, []);
 
   useEffect(() => {
+    // Reset the resolved map on every account change so a prior wallet's
+    // claimable state can't keep the header visible for the new one.
+    setResolved({});
     if (!isConnected || !address) {
       setItems([]);
-      setResolved({});
       return;
     }
     let live = true;
-    const me = address.toLowerCase();
     (async () => {
       try {
-        const details = await fetchTournaments();
-        if (!live) return;
-        // Buy-in tournaments the wallet entered that have reached a state where a
-        // payout or refund is possible; TournamentClaim decides per one whether
-        // there's actually anything to collect.
-        setItems(
-          details
-            .filter(
-              (t) =>
-                t.buy_in &&
-                (t.status === "settled" || t.status === "abandoned") &&
-                (t.players ?? []).some((p) => p.toLowerCase() === me),
-            )
-            .map((t) => ({ id: t.id, name: t.name, status: t.status })),
-        );
+        // Server-filtered to this wallet's finished buy-in tournaments;
+        // TournamentClaim decides per one whether there's anything to collect.
+        const rows = await fetchClaimableTournaments(address);
+        if (live) {
+          setItems(rows.map((t) => ({ id: t.tournament_id, name: t.name, status: t.status })));
+        }
       } catch {
         if (live) setItems([]);
       }

@@ -108,6 +108,23 @@ export function fmtUsdc(base: bigint | string | number | undefined | null): stri
   }
 }
 
+/** Signed USDC display for net figures ("+1.50" / "-1.50" / "0.00") from base
+ *  units, without float math (truncates to cents). */
+export function fmtUsdcSigned(base: bigint | string | number | undefined | null): string {
+  if (base === undefined || base === null) return "—";
+  let v: bigint;
+  try {
+    v = BigInt(base);
+  } catch {
+    return "—";
+  }
+  const neg = v < 0n;
+  const abs = neg ? -v : v;
+  const cents = (abs % 1_000_000n) / 10_000n;
+  const sign = neg ? "-" : v > 0n ? "+" : "";
+  return `${sign}${abs / 1_000_000n}.${cents.toString().padStart(2, "0")}`;
+}
+
 /** Parse a human USDC amount ("1.5") to base units. Throws on bad input. */
 export function parseUsdc(human: string): bigint {
   return parseUnits(human.trim(), USDC_DECIMALS);

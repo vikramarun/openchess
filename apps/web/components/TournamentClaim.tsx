@@ -20,7 +20,6 @@ export function TournamentClaim({
   chainId: expected,
   label,
   onResolved,
-  onClaimed,
 }: {
   tid: string;
   status: string;
@@ -28,14 +27,15 @@ export function TournamentClaim({
   chainId: number;
   /** Optional tournament name shown above the action (for the bankroll list). */
   label?: string;
-  /** Reports whether this tournament actually renders an action/state, so a
+  /** Reports whether this tournament actually renders a claimable action, so a
    *  parent list can hide its header when nothing is claimable. */
   onResolved?: (hasAction: boolean) => void;
-  onClaimed?: () => void;
 }) {
   const { address, isConnected } = useAccount();
   const ensureChain = useEnsureChain();
-  const publicClient = usePublicClient();
+  // Pin the receipt-reading client to the settlement chain: after ensureChain
+  // switches, the connected chain's client would otherwise be stale/undefined.
+  const publicClient = usePublicClient({ chainId: expected });
   const { writeContractAsync } = useWriteContract();
 
   const [busy, setBusy] = useState(false);
@@ -107,21 +107,30 @@ export function TournamentClaim({
   const now = Math.floor(Date.now() / 1000);
   const refundReady =
     !settled && settleTimeout != null && now > openedAt + settleTimeout && !hasClaimed;
-  // Whether this tournament will render an action/state (vs null), reported up
-  // so a "Tournament winnings" list can hide its header when nothing applies.
-  const hasAction =
-    enabled &&
-    exists &&
-    hasEntered &&
-    (hasClaimed ||
-      (rootSet && !!proof) ||
-      refundReady ||
-      (status === "abandoned" && !settled && settleTimeout != null));
+
+  // Single source of truth for what this tournament shows — both the rendered
+  // node and the parent's header gate derive from it (no duplicated conditions).
+  const kind: "claimed" | "claim" | "refund" | "pending" | null =
+    !enabled || !exists || !hasEntered
+      ? null
+      : hasClaimed
+        ? "claimed"
+        : rootSet && proof
+          ? "claim"
+          : refundReady
+            ? "refund"
+            : status === "abandoned" && !settled && settleTimeout != null
+              ? "pending"
+              : null;
+
+  // Already-claimed is informational only, so it doesn't count toward showing
+  // the parent's "Tournament winnings" header.
+  const hasAction = kind != null && kind !== "claimed";
   useEffect(() => {
     onResolved?.(hasAction);
   }, [hasAction, onResolved]);
 
-  if (!enabled || !exists || !hasEntered) return null;
+  if (kind == null) return null;
 
   const run = async (fn: () => Promise<`0x${string}`>) => {
     setError(null);
@@ -132,7 +141,6 @@ export function TournamentClaim({
       await publicClient!.waitForTransactionReceipt({ hash });
       refetchTourn();
       refetchClaimed();
-      onClaimed?.();
     } catch (e: any) {
       setError(e?.shortMessage ?? e?.message ?? "transaction failed");
     } finally {
@@ -165,32 +173,31 @@ export function TournamentClaim({
 
   const errLine = error ? <span style={{ color: "#e06c6c", fontSize: 12 }}>{error}</span> : null;
 
-  // The single action/state for this tournament, or null when there's nothing
-  // to show (non-winner, already credited to bankroll, etc.).
-  let node: React.ReactNode = null;
-  if (hasClaimed) {
+  // The single action/state for this tournament, built from `kind` above.
+  let node: React.ReactNode;
+  if (kind === "claimed") {
     node = (
       <span className="muted" style={{ fontSize: 13 }}>
         {rootSet ? "Payout claimed ✓" : "Refund claimed ✓"}
       </span>
     );
-  } else if (rootSet && proof) {
-    // Winner of a root-settled field → Merkle claim.
+  } else if (kind === "claim") {
+    // Winner of a root-settled field → Merkle claim (proof is set when kind==="claim").
     node = (
       <button className="primary" onClick={doClaim} disabled={busy}>
-        {busy ? "Claiming…" : `Claim ${fmtUsdc(proof.amount)} USDC`}
+        {busy ? "Claiming…" : `Claim ${fmtUsdc(proof!.amount)} USDC`}
       </button>
     );
-  } else if (refundReady) {
+  } else if (kind === "refund") {
     // Never settled past the timeout → reclaim the buy-in.
     node = (
       <button className="ghost" onClick={doRefund} disabled={busy}>
         {busy ? "Refunding…" : `Claim refund · ${fmtUsdc(buyIn)} USDC`}
       </button>
     );
-  } else if (status === "abandoned" && !settled && settleTimeout != null) {
-    // Abandoned but the refund window hasn't opened yet — tell the entrant when.
-    const left = openedAt + settleTimeout - now;
+  } else {
+    // pending: abandoned but the refund window hasn't opened yet — say when.
+    const left = openedAt + settleTimeout! - now;
     const dur =
       left <= 0
         ? "soon"
@@ -206,7 +213,6 @@ export function TournamentClaim({
     );
   }
 
-  if (!node) return null;
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
       {label && (

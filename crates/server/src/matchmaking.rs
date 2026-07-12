@@ -171,6 +171,7 @@ pub fn routes() -> Router<AppState> {
             "/tournaments/{id}/claim/{address}",
             get(tourney_claim_proof),
         )
+        .route("/tournaments/claimable/{address}", get(tourney_claimable))
 }
 
 fn di() -> u64 {
@@ -1284,8 +1285,8 @@ async fn tourney_create(
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
     }
 
-    let (buy_in, initial_secs, increment_secs) =
-        (req.buy_in.clone(), req.initial_secs, req.increment_secs);
+    let (name, buy_in, initial_secs, increment_secs) =
+        (req.name.clone(), req.buy_in.clone(), req.initial_secs, req.increment_secs);
     state.0.lobby.tournaments.lock().insert(
         id,
         Tournament {
@@ -1311,6 +1312,7 @@ async fn tourney_create(
         let _ = db
             .upsert_tournament(
                 id,
+                &name,
                 buy_in.as_deref(),
                 initial_secs as i64,
                 increment_secs as i64,
@@ -1329,6 +1331,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) {
         let ts = state.0.lobby.tournaments.lock();
         ts.get(&tid).map(|t| {
             (
+                t.name.clone(),
                 t.buy_in.clone(),
                 t.initial_secs as i64,
                 t.increment_secs as i64,
@@ -1337,9 +1340,9 @@ async fn persist_tournament(state: &AppState, tid: Uuid) {
             )
         })
     };
-    if let Some((buy_in, init, inc, status, players)) = snap {
+    if let Some((name, buy_in, init, inc, status, players)) = snap {
         let _ = db
-            .upsert_tournament(tid, buy_in.as_deref(), init, inc, &status, &players)
+            .upsert_tournament(tid, &name, buy_in.as_deref(), init, inc, &status, &players)
             .await;
     }
 }
@@ -2076,6 +2079,40 @@ async fn tourney_claim_proof(
         amount: amount.to_string(),
         proof: proof.iter().map(|p| format!("{p:#x}")).collect(),
     }))
+}
+
+#[derive(Serialize)]
+struct ClaimableView {
+    tournament_id: Uuid,
+    name: String,
+    buy_in: Option<String>,
+    status: String,
+}
+
+/// DB-sourced list of the connected wallet's finished buy-in tournaments, so the
+/// bankroll claim UI can surface payouts/refunds even after a restart wipes the
+/// in-memory tournaments map. Read-only + best-effort: empty when there's no DB.
+async fn tourney_claimable(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Json<Vec<ClaimableView>> {
+    let Some(db) = &state.0.db else {
+        return Json(Vec::new());
+    };
+    let rows = db
+        .claimable_tournaments(&address.to_lowercase())
+        .await
+        .unwrap_or_default();
+    Json(
+        rows.into_iter()
+            .map(|r| ClaimableView {
+                tournament_id: r.id,
+                name: r.name,
+                buy_in: r.buy_in,
+                status: r.status,
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

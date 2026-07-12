@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP } from "@/lib/config";
+import { fmtUsdcSigned } from "@/lib/escrow";
 
 type Profile = {
   address: string;
@@ -24,12 +25,6 @@ type GameItem = {
   stake: string | null;
   moves: number;
   finished_at: string | null;
-};
-
-const usdc = (base?: string | null) => {
-  if (!base) return "—";
-  const n = Number(base) / 1e6;
-  return `${n > 0 ? "+" : ""}${n.toFixed(2)}`;
 };
 
 function outcome(g: GameItem, me: string): "win" | "loss" | "draw" | "-" {
@@ -116,7 +111,7 @@ export function ProfileStats({ address }: { address: string }) {
           <div className="l">W / L / D</div>
         </div>
         <div className="stat">
-          <div className={`v ${netClass}`}>{p ? usdc(p.net) : "…"}</div>
+          <div className={`v ${netClass}`}>{p ? fmtUsdcSigned(p.net) : "…"}</div>
           <div className="l">Net winnings (USDC)</div>
         </div>
       </div>
@@ -153,7 +148,7 @@ export function ProfileStats({ address }: { address: string }) {
                       </span>{" "}
                       <span className="muted">{g.reason}</span>
                     </td>
-                    <td>{g.stake ? usdc(g.stake).replace("+", "") : "—"}</td>
+                    <td>{g.stake ? fmtUsdcSigned(g.stake).replace("+", "") : "—"}</td>
                     <td>{g.moves}</td>
                     <td className="muted">
                       {g.finished_at ? new Date(g.finished_at).toLocaleDateString() : "—"}

@@ -24,7 +24,9 @@ export function BankrollPanel({
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const ensureChain = useEnsureChain();
-  const publicClient = usePublicClient();
+  // Pin the receipt-reading client to the escrow chain: after ensureChain
+  // switches, the connected chain's client would otherwise be stale/undefined.
+  const publicClient = usePublicClient({ chainId: expected });
   const { writeContractAsync } = useWriteContract();
 
   const [amount, setAmount] = useState("");
