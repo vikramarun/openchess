@@ -552,6 +552,10 @@ impl Room {
         let rated = ply >= 2;
         // Cryptographic commitment to the full game (move log via PGN).
         let result_hash = sha256_hex(&pgn);
+        // Oracle-sign it now (before persisting) so the signature is stored with
+        // the result and the permanent replay can verify it — the same signature
+        // is sent in the GameOver frame below (sign once).
+        let server_sig = self.settlement.sign_result(&result_hash).await;
         let (result_str, reason_str) = result_strings(&result);
         let wagered = self.stake.is_some();
         let winner_addr: Option<String> = self.stake.and_then(|stake| match result.winner {
@@ -570,6 +574,7 @@ impl Room {
                         result_str,
                         reason_str,
                         &result_hash,
+                        server_sig.as_deref(),
                         &pgn,
                         winner_addr.as_deref(),
                         wagered,
@@ -620,9 +625,8 @@ impl Room {
             })
             .await;
 
-        // Oracle-sign the result commitment so clients can verify it.
-        let server_sig = self.settlement.sign_result(&result_hash).await;
-
+        // Same oracle signature computed above (signed once) so clients can
+        // verify the result commitment live.
         self.send_all(ServerMessage::GameOver {
             game_id: self.game_id,
             result,

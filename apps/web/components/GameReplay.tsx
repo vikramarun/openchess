@@ -13,6 +13,7 @@ import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { fmtUsdc } from "@/lib/escrow";
 import type { GameDetail } from "@/lib/gameApi";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
+import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 /** Best display name for a seat: short wallet, else "Engine" (casual). */
 function seatName(addr: string | null): string {
@@ -46,6 +47,23 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
   const total = detail.moves.length;
   const [ply, setPly] = useState(total); // start at the final position
   const at = Math.min(Math.max(ply, 0), total);
+
+  // Verify the oracle signature over the result commitment, so the permanent
+  // replay shows the same "provably fair" badge the live/seat views show.
+  const [verified, setVerified] = useState<Verification | null>(null);
+  useEffect(() => {
+    let off = false;
+    if (detail.result_hash && detail.result_sig) {
+      verifyResultSig(detail.result_hash, detail.result_sig).then((v) => {
+        if (!off) setVerified(v);
+      });
+    } else {
+      setVerified(null);
+    }
+    return () => {
+      off = true;
+    };
+  }, [detail.result_hash, detail.result_sig]);
 
   // Keyboard navigation.
   useEffect(() => {
@@ -184,6 +202,9 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
               <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
                 {settleLine.text}
               </div>
+            )}
+            {verified?.signed && (
+              <div className="verified">✓ Verified — signed by oracle {shortAddr(verified.oracle)}</div>
             )}
           </div>
 

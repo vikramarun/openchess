@@ -45,6 +45,9 @@ struct GameDetailView {
     result: Option<String>,
     reason: Option<String>,
     result_hash: Option<String>,
+    /// Oracle signature over `result_hash` (EIP-191 personal_sign), so a replay
+    /// can show the same "signed by oracle" verification as the live view.
+    result_sig: Option<String>,
     /// none | pending | settled | failed.
     settlement_status: String,
     initial_secs: u64,
@@ -82,6 +85,7 @@ async fn game_detail(
         result: g.result,
         reason: g.result_reason,
         result_hash: g.result_hash,
+        result_sig: g.result_sig,
         settlement_status: g.settlement_status,
         initial_secs: (g.time_initial_ms / 1000).max(0) as u64,
         increment_secs: (g.time_increment_ms / 1000).max(0) as u64,

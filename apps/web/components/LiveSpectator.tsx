@@ -1,11 +1,7 @@
 "use client";
 
-import { Chess } from "chessops/chess";
-import { INITIAL_FEN, makeFen } from "chessops/fen";
-import { makeSanAndPlay } from "chessops/san";
-import { parseUci } from "chessops/util";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { PlayerBar } from "@/components/PlayerBar";
@@ -15,10 +11,9 @@ import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc } from "@/lib/escrow";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
-import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
+import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
+import { shortAddr } from "@/lib/verify";
 
-type Clock = { white_ms: number; black_ms: number; increment_ms: number };
-type Result = { winner: "white" | "black" | null; reason: string };
 type Meta = {
   white: string | null;
   black: string | null;
@@ -42,17 +37,9 @@ function seatName(name: string | null, addr: string | null): string {
  *  banner offers a move-by-move Review (a reload re-enters `/game/[id]` in replay
  *  mode, now that the game is finished). */
 export function LiveSpectator({ id }: { id: string }) {
-  const [fen, setFen] = useState(INITIAL_FEN);
-  const [moves, setMoves] = useState<string[]>([]);
-  const [lastUci, setLastUci] = useState<string | null>(null);
-  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
-  const [clock, setClock] = useState<Clock | null>(null);
-  const [result, setResult] = useState<Result | null>(null);
-  const [verified, setVerified] = useState<Verification | null>(null);
+  const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
   const [status, setStatus] = useState("connecting…");
   const [meta, setMeta] = useState<Meta | null>(null);
-
-  const pos = useRef(Chess.default());
 
   // Fetch the live-game metadata so the spectator sees who's playing, the stake,
   // and the time control — not just a bare game id. A game only appears in
@@ -88,70 +75,24 @@ export function LiveSpectator({ id }: { id: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    let spectator: { close: () => void } | null = null;
     let finished = false;
-
-    const handle = (data: string) => {
-      let msg: any;
-      try {
-        msg = JSON.parse(data);
-      } catch {
-        return;
-      }
-      try {
-        switch (msg.type) {
-          case "game_start":
-            pos.current = Chess.default();
-            setFen(INITIAL_FEN);
-            setMoves([]);
-            setLastUci(null);
-            setInCheck(null);
-            setResult(null);
-            if (msg.clock) setClock(msg.clock);
-            break;
-          case "opponent_moved": {
-            const move = parseUci(msg.uci);
-            // Only apply a move that is legal in the current position — a stale
-            // or malformed server message can't corrupt the board or throw.
-            if (move && pos.current.isLegal(move)) {
-              const san = makeSanAndPlay(pos.current, move);
-              setFen(makeFen(pos.current.toSetup()));
-              setMoves((m) => [...m, san]);
-              setLastUci(msg.uci);
-              setInCheck(pos.current.isCheck() ? pos.current.turn : null);
-            }
-            if (msg.clock) setClock(msg.clock);
-            break;
-          }
-          case "clock_sync":
-            if (msg.clock) setClock(msg.clock);
-            break;
-          case "game_over":
-            finished = true; // game ended — stop reconnecting to a soon-reaped room
-            setResult(msg.result);
-            setStatus("finished");
-            verifyResultSig(msg.result_hash, msg.server_sig).then(setVerified);
-            break;
-        }
-      } catch {
-        // never let one bad message kill the stream
-      }
-    };
-
-    spectator = connectSpectator({
+    const spectator = connectSpectator({
       url: `${SERVER_WS}/ws/game/${id}`,
-      onFrame: handle,
+      onFrame: (data) =>
+        applyFrame(data, () => {
+          finished = true; // game ended — stop reconnecting to a soon-reaped room
+          setStatus("finished");
+        }),
       onStatus: setStatus,
       liveStatus: "watching",
       isFinished: () => finished,
       isCancelled: () => cancelled,
     });
-
     return () => {
       cancelled = true;
-      spectator?.close();
+      spectator.close();
     };
-  }, [id]);
+  }, [id, applyFrame]);
 
   const winnerText = result
     ? result.winner

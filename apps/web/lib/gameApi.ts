@@ -21,6 +21,7 @@ export type GameDetail = {
   result: string | null; // "white" | "black" | "draw"
   reason: string | null;
   result_hash: string | null;
+  result_sig: string | null; // oracle signature over result_hash (for replay verification)
   settlement_status: string; // none | pending | settled | failed
   initial_secs: number;
   increment_secs: number;
