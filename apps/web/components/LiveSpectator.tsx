@@ -220,7 +220,14 @@ export function LiveSpectator({ id }: { id: string }) {
                   )}
                 </>
               ) : status === "finished" || status === "disconnected" ? (
-                <>This game isn’t live right now — it may have finished.</>
+                <>
+                  This game isn’t live right now — it may have finished.
+                  <div style={{ marginTop: 8 }}>
+                    <button className="ghost" onClick={() => window.location.reload()}>
+                      Load replay
+                    </button>
+                  </div>
+                </>
               ) : (
                 <>Loading game details…</>
               )}

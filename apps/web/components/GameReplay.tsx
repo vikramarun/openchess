@@ -32,9 +32,12 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
     const checks: ("white" | "black" | null)[] = [null];
     for (const m of detail.moves) {
       const mv = parseUci(m.uci);
-      if (mv && pos.isLegal(mv)) pos.play(mv);
+      const applied = !!mv && pos.isLegal(mv);
+      if (applied) pos.play(mv);
       fens.push(makeFen(pos.toSetup()));
-      lastMoves.push(lastMoveFromUci(m.uci));
+      // Only highlight a move we actually applied — never point at an unplayed
+      // one (defensive; real games always parse+apply, as the live views prove).
+      lastMoves.push(applied ? lastMoveFromUci(m.uci) : null);
       checks.push(pos.isCheck() ? pos.turn : null);
     }
     return { fens, lastMoves, checks };
@@ -70,8 +73,14 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
       ? { white_ms: detail.initial_secs * 1000, black_ms: detail.initial_secs * 1000 }
       : { white_ms: detail.moves[at - 1].white_ms, black_ms: detail.moves[at - 1].black_ms };
 
-  const resultText =
-    detail.result === "draw"
+  // An aborted game never really started (e.g. escrow open or seat dispatch
+  // failed); it carries an internal reason code, not a chess reason, and its
+  // stake was refunded directly (never through the settlement outbox), so its
+  // settlement_status stays 'pending' — don't render it as a normal result.
+  const aborted = detail.status === "aborted";
+  const resultText = aborted
+    ? "Game didn’t start"
+    : detail.result === "draw"
       ? "Draw"
       : detail.result === "white"
         ? "White wins"
@@ -81,6 +90,11 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
   const tc = tcLabel(detail.initial_secs, detail.increment_secs);
 
   const settleLine = (() => {
+    if (aborted) {
+      // No on-chain settlement happens for an aborted game; any locked stake is
+      // refunded on abort. Don't show the misleading "Settling on-chain…".
+      return detail.stake ? { cls: "", text: "The game didn’t start — your stake was refunded." } : null;
+    }
     if (!detail.stake) return null;
     switch (detail.settlement_status) {
       case "settled":
@@ -163,7 +177,9 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
 
           <div className={`result-banner ${settleLine?.cls ?? ""}`}>
             {resultText}
-            {detail.reason && <span className="muted"> · {detail.reason}</span>}
+            {/* chess reasons (checkmate, resignation…) are human-readable; an
+                aborted game's reason is an internal code, so don't surface it. */}
+            {!aborted && detail.reason && <span className="muted"> · {detail.reason}</span>}
             {settleLine && (
               <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
                 {settleLine.text}

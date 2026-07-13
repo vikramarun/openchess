@@ -28,12 +28,16 @@ export type GameDetail = {
   moves: GameMove[];
 };
 
-/** Fetch full game detail; returns null on 404 / network error. */
+/** Fetch full game detail; returns null on 404 / network error / bad shape. */
 export async function fetchGame(id: string): Promise<GameDetail | null> {
   try {
     const r = await fetch(`${SERVER_HTTP}/games/${encodeURIComponent(id)}`);
     if (!r.ok) return null;
-    return (await r.json()) as GameDetail;
+    const d = await r.json();
+    // Validate the shape the replay depends on rather than trusting the body —
+    // a 200 with an unexpected payload must not crash the board.
+    if (!d || typeof d.status !== "string" || !Array.isArray(d.moves)) return null;
+    return d as GameDetail;
   } catch {
     return null;
   }
