@@ -1,9 +1,5 @@
 "use client";
 
-import { Chess } from "chessops/chess";
-import { INITIAL_FEN, makeFen } from "chessops/fen";
-import { makeSanAndPlay } from "chessops/san";
-import { parseUci } from "chessops/util";
 import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
@@ -14,11 +10,12 @@ import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
-import { fmtUsdc, payoutForStake } from "@/lib/escrow";
-import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
+import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
+import { fetchGame } from "@/lib/gameApi";
+import { useOnchainConfig } from "@/lib/useOnchainConfig";
+import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
+import { shortAddr } from "@/lib/verify";
 
-type Clock = { white_ms: number; black_ms: number };
-type Result = { winner: "white" | "black" | null; reason: string };
 type Opponent = { name: string; declared_engine: string | null };
 
 /** Play ONE seat of a server game in the browser (the opponent runs theirs).
@@ -42,16 +39,10 @@ export function SeatGame({
   onResult?: (winner: "white" | "black" | null) => void;
   subtitle?: string;
 }) {
-  const [fen, setFen] = useState(INITIAL_FEN);
-  const [moves, setMoves] = useState<string[]>([]);
-  const [lastUci, setLastUci] = useState<string | null>(null);
-  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
-  const [clock, setClock] = useState<Clock | null>(null);
-  const [result, setResult] = useState<Result | null>(null);
+  const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
   const [opponent, setOpponent] = useState<Opponent | null>(null);
-  const [verified, setVerified] = useState<Verification | null>(null);
   const [status, setStatus] = useState("loading engine…");
-  const pos = useRef(Chess.default());
+  const [settleStatus, setSettleStatus] = useState<string | null>(null);
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
 
@@ -63,51 +54,6 @@ export function SeatGame({
     let seat: { close: () => void } | null = null;
     let finished = false;
 
-    const onSpecFrame = (data: string) => {
-      let m: any;
-      try {
-        m = JSON.parse(data);
-      } catch {
-        return;
-      }
-      try {
-        switch (m.type) {
-          case "game_start":
-            pos.current = Chess.default();
-            setFen(INITIAL_FEN);
-            setMoves([]);
-            setLastUci(null);
-            setInCheck(null);
-            if (m.clock) setClock(m.clock);
-            break;
-          case "opponent_moved": {
-            const mv = parseUci(m.uci);
-            if (mv && pos.current.isLegal(mv)) {
-              const san = makeSanAndPlay(pos.current, mv);
-              setFen(makeFen(pos.current.toSetup()));
-              setMoves((x) => [...x, san]);
-              setLastUci(m.uci);
-              setInCheck(pos.current.isCheck() ? pos.current.turn : null);
-            }
-            if (m.clock) setClock(m.clock);
-            break;
-          }
-          case "clock_sync":
-            if (m.clock) setClock(m.clock);
-            break;
-          case "game_over":
-            finished = true; // stop reconnecting — the game is over
-            setResult(m.result);
-            setStatus("finished");
-            verifyResultSig(m.result_hash, m.server_sig).then(setVerified);
-            onResultRef.current?.(m.result?.winner ?? null);
-            break;
-        }
-      } catch {
-        /* ignore one bad frame */
-      }
-    };
-
     const run = async () => {
       engine = new BrowserEngine();
       await engine.whenReady();
@@ -115,12 +61,18 @@ export function SeatGame({
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
 
-      // The spectator socket renders the live board; it reconnects with backoff
-      // so a dropped connection mid-wager shows "reconnecting…" and recovers
-      // rather than freezing the board while money is on the line.
+      // The spectator socket renders the live board (shared reducer); it
+      // reconnects with backoff so a dropped connection mid-wager shows
+      // "reconnecting…" and recovers rather than freezing the board while money
+      // is on the line.
       spectator = connectSpectator({
         url: `${SERVER_WS}/ws/game/${gameId}`,
-        onFrame: onSpecFrame,
+        onFrame: (data) =>
+          applyFrame(data, (winner) => {
+            finished = true; // stop reconnecting — the game is over
+            setStatus("finished");
+            onResultRef.current?.(winner);
+          }),
         onStatus: setStatus,
         liveStatus: "playing",
         isFinished: () => finished,
@@ -153,7 +105,32 @@ export function SeatGame({
       seat?.close();
       engine?.dispose();
     };
-  }, [gameId, token]);
+  }, [gameId, token, applyFrame]);
+
+  // Once a wagered game ends, poll the game's settlement status so the banner can
+  // confirm "Settled ✓" (or surface a failure) instead of leaving the user
+  // staring at "settling…". Bounded; the durable outbox usually settles within a
+  // few seconds.
+  useEffect(() => {
+    if (!result || !stake) return;
+    let off = false;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () => {
+      fetchGame(gameId).then((d) => {
+        if (off) return;
+        const s = d?.settlement_status ?? null;
+        if (s) setSettleStatus(s);
+        if (s === "settled" || s === "failed") return; // terminal
+        if (++tries < 20) timer = setTimeout(poll, 3000); // ~60s
+      });
+    };
+    poll();
+    return () => {
+      off = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [result, stake, gameId]);
 
   const winnerText = result
     ? result.winner
@@ -162,6 +139,14 @@ export function SeatGame({
     : null;
   const youWon = result && result.winner === color;
   const youLost = result && result.winner && result.winner !== color;
+
+  const { config } = useOnchainConfig();
+  const escrowUrl = config?.escrow ? contractUrl(config.chainId, config.escrow) : null;
+  const settledText = youWon
+    ? `you won +${fmtUsdc(profitForStake(stake ?? 0))} USDC`
+    : youLost
+      ? `you lost ${fmtUsdc(stake)} USDC`
+      : "draw — your stake was returned";
 
   const oppColor = color === "white" ? "black" : "white";
   const live = !result && status === "playing";
@@ -207,12 +192,12 @@ export function SeatGame({
           {stake && (
             <div className="stake-callout" style={{ marginTop: 10 }}>
               <div>
-                Stake <b>{fmtUsdc(stake)} USDC</b> · win nets{" "}
-                <b>{fmtUsdc(payoutForStake(stake))} USDC</b>
+                Stake <b>{fmtUsdc(stake)} USDC</b> · win{" "}
+                <b>+{fmtUsdc(profitForStake(stake))} USDC</b>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                Winner takes both stakes, less a 1% fee on the winnings; a draw returns your stake.
-                Non-custodial — settled on-chain.
+                Win to take your opponent’s stake, less a 1% fee; a draw or no-show returns your
+                stake. Non-custodial — settled on-chain.
               </div>
             </div>
           )}
@@ -225,8 +210,26 @@ export function SeatGame({
           <div className={`result-banner ${youWon ? "won" : youLost ? "lost" : ""}`}>
             {youWon ? "You win" : youLost ? "You lose" : winnerText} · {result.reason}
             {stake && (
-              <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-                Settling on-chain — your bankroll updates once the oracle posts the result.
+              <div style={{ fontSize: 13, marginTop: 6 }}>
+                {settleStatus === "settled" ? (
+                  <span style={{ color: youWon ? "var(--accent)" : "var(--text)" }}>
+                    Settled on-chain ✓ — {settledText}
+                  </span>
+                ) : settleStatus === "failed" ? (
+                  <span className="muted">
+                    Settlement delayed — your funds are safe and recoverable on-chain after the
+                    settle window.{" "}
+                    {escrowUrl && (
+                      <a href={escrowUrl} target="_blank" rel="noopener noreferrer">
+                        View escrow ↗
+                      </a>
+                    )}
+                  </span>
+                ) : (
+                  <span className="muted">
+                    Settling on-chain — your bankroll updates once the oracle posts the result.
+                  </span>
+                )}
               </div>
             )}
             {verified?.signed && (

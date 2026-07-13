@@ -98,26 +98,40 @@ export function clearAuth() {
   notifyAuthChanged();
 }
 
+/** Block explorer per chain, so links point at the chain the escrow lives on. */
+const EXPLORER: Record<number, string> = {
+  8453: "https://basescan.org",
+  84532: "https://sepolia.basescan.org",
+};
+
+/** Block-explorer URL for a contract address on the given chain, or null for an
+ *  unknown chain. */
+export function contractUrl(chainId: number, address: string): string | null {
+  const base = EXPLORER[chainId];
+  return base ? `${base}/address/${address}` : null;
+}
+
 /** The escrow's rake, in basis points, mirroring the deployed ChessEscrow's
  *  `feeBps` (currently 1%). The contract snapshots the fee per game at open; keep
  *  this in sync with the live deploy so the payout the UI quotes matches
  *  settlement. Used only for display — the contract is authoritative. */
 export const FEE_BPS = 100n;
 
-/** What the winner of a matched wager nets, in base units. Mirrors
- *  ChessEscrow.settleGame exactly: the rake is charged on ONE stake
- *  (`rake = stake * feeBps / 10000`), and the winner receives both stakes minus
- *  that rake (`2*stake - rake`) — their own stake back plus `stake - rake` from
- *  the loser. A draw returns each side's own stake. All bigint math, never float. */
-export function payoutForStake(stake: bigint | string | number): bigint {
+/** The winner's net PROFIT of a matched wager, in base units — the honest "you
+ *  win X" figure. Mirrors ChessEscrow.settleGame: the winner's own stake is
+ *  returned, so their new money is the opponent's stake minus the rake charged on
+ *  one stake (`stake - stake*feeBps/10000`). A loss is `-stake`; a draw is 0.
+ *  (The gross bankroll credit is `2*stake - rake`, but that double-counts the
+ *  returned stake, so it overstates winnings ~2x — use profit for display.)
+ *  All bigint math, never float. */
+export function profitForStake(stake: bigint | string | number): bigint {
   let s: bigint;
   try {
     s = BigInt(stake);
   } catch {
     return 0n;
   }
-  const rake = (s * FEE_BPS) / 10_000n; // on a single stake, per the contract
-  return s * 2n - rake;
+  return s - (s * FEE_BPS) / 10_000n;
 }
 
 /** USDC display string (base units → "1.50"). */

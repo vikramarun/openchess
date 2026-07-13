@@ -108,6 +108,36 @@ pub struct GameRow {
     pub pgn: Option<String>,
 }
 
+/// Full detail for a single game — powers the public game view (replay of a
+/// finished game + settlement status for a wagered one).
+#[derive(Debug, sqlx::FromRow)]
+pub struct GameDetailRow {
+    pub id: Uuid,
+    pub mode: String,
+    pub status: String,
+    pub white_wallet: Option<String>,
+    pub black_wallet: Option<String>,
+    pub stake: Option<Decimal>,
+    pub result: Option<String>,
+    pub result_reason: Option<String>,
+    pub result_hash: Option<String>,
+    pub result_sig: Option<String>,
+    pub settlement_status: String,
+    pub time_initial_ms: i64,
+    pub time_increment_ms: i64,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One played move (for replaying a finished game move-by-move).
+#[derive(Debug, sqlx::FromRow)]
+pub struct MoveRow {
+    pub ply: i32,
+    pub uci: String,
+    pub san: String,
+    pub white_ms: i64,
+    pub black_ms: i64,
+}
+
 impl Db {
     pub async fn connect(url: &str) -> Result<Db> {
         let pool = PgPoolOptions::new()
@@ -244,6 +274,7 @@ impl Db {
         result: &str,
         reason: &str,
         result_hash: &str,
+        result_sig: Option<&str>,
         pgn: &str,
         winner_addr: Option<&str>,
         wagered: bool,
@@ -259,13 +290,14 @@ impl Db {
         let res = sqlx::query(
             r#"UPDATE games
                SET status='finished', result=$2, result_reason=$3,
-                   result_hash=$4, pgn=$5, finished_at=now()
+                   result_hash=$4, result_sig=$5, pgn=$6, finished_at=now()
                WHERE id=$1 AND status NOT IN ('finished','aborted')"#,
         )
         .bind(game_id)
         .bind(result)
         .bind(reason)
         .bind(result_hash)
+        .bind(result_sig)
         .bind(pgn)
         .execute(&mut *tx)
         .await?;
@@ -475,6 +507,31 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Full detail for one game (public game view: replay + settlement status).
+    pub async fn game_detail(&self, game_id: Uuid) -> Result<Option<GameDetailRow>> {
+        let row = sqlx::query_as::<_, GameDetailRow>(
+            r#"SELECT id, mode, status, white_wallet, black_wallet, stake, result,
+                      result_reason, result_hash, result_sig, settlement_status,
+                      time_initial_ms, time_increment_ms, finished_at
+               FROM games WHERE id=$1"#,
+        )
+        .bind(game_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// A game's moves in play order, for move-by-move replay.
+    pub async fn game_moves(&self, game_id: Uuid) -> Result<Vec<MoveRow>> {
+        let rows = sqlx::query_as::<_, MoveRow>(
+            "SELECT ply, uci, san, white_ms, black_ms FROM moves WHERE game_id=$1 ORDER BY ply",
+        )
+        .bind(game_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Mark a game aborted (e.g. escrow failed to open — it never really started).
@@ -736,7 +793,7 @@ mod tests {
         db.set_game_active(id).await?;
         db.append_move(id, 1, "e2e4", "e4", 60000, 60000).await?;
         db.append_move(id, 2, "e7e5", "e5", 60000, 60000).await?;
-        db.finish_and_enqueue(id, "white", "checkmate", "deadbeef", "1. e4 e5", None, false)
+        db.finish_and_enqueue(id, "white", "checkmate", "deadbeef", None, "1. e4 e5", None, false)
             .await?;
 
         let g = db.get_game(id).await?.expect("game exists");
@@ -784,7 +841,7 @@ mod tests {
                 )
                 .await?;
                 db.set_game_active(id).await?;
-                db.finish_and_enqueue(id, result, "checkmate", "hash", "1. e4 e5", None, false)
+                db.finish_and_enqueue(id, result, "checkmate", "hash", None, "1. e4 e5", None, false)
                     .await?;
                 db.update_ratings(id).await?;
                 Ok::<_, anyhow::Error>(())
