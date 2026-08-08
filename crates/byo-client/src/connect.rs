@@ -311,7 +311,7 @@ async fn run_autopilot(
 
         // Transient server/network errors must not kill the autopilot (an
         // exit strands the posted offer for its 1h TTL) — log and retry.
-        let seat = match find_and_accept(client, http, opts, session, engine_name).await {
+        let seat = match find_and_accept(client, http, opts, session, engine_name, &posted).await {
             Ok(Some(seat)) => Some(seat),
             Ok(None) => {
                 match post_and_wait(client, http, opts, session, engine_name, &posted).await {
@@ -383,7 +383,7 @@ fn auth_rb(rb: reqwest::RequestBuilder, session: &Session) -> reqwest::RequestBu
 
 /// An open offer is compatible when its stake and time control match ours and
 /// it wasn't posted by us.
-fn compatible(o: &Value, opts: &ConnectOpts, my_addr: &str) -> bool {
+fn compatible(o: &Value, opts: &ConnectOpts, my_addr: &str, my_offer: Option<&str>) -> bool {
     let stake_matches = match (&opts.stake, o["stake"].as_str()) {
         (None, None) => true,
         (Some(want), Some(have)) => want == have,
@@ -391,11 +391,23 @@ fn compatible(o: &Value, opts: &ConnectOpts, my_addr: &str) -> bool {
     };
     let tc_matches = o["initial_secs"].as_u64() == Some(opts.initial_secs)
         && o["increment_secs"].as_u64() == Some(opts.increment_secs);
-    let not_mine = match o["poster_addr"].as_str() {
+    // The wallet check only helps when the server publishes a poster: it is
+    // null on casual offers, where this deliberately fails OPEN so an
+    // unauthenticated poster is still matchable.
+    let not_my_wallet = match o["poster_addr"].as_str() {
         Some(poster) => !poster.eq_ignore_ascii_case(my_addr),
         None => true,
     };
-    stake_matches && tc_matches && not_mine
+    // ...which is why the offer id is the check that actually stops us taking
+    // our OWN challenge. Failing open above meant an autopilot re-scanning
+    // after a game found the offer it had just posted, joined it, and got the
+    // game rejected for same-wallet seats — then reposted, forever. The park
+    // looked empty because the bot kept eating its own challenge.
+    let not_my_own_post = match (my_offer, o["offer_id"].as_str()) {
+        (Some(mine), Some(id)) => mine != id,
+        _ => true,
+    };
+    stake_matches && tc_matches && not_my_wallet && not_my_own_post
 }
 
 /// Scan the park for a compatible open challenge and try to take it. Returns
@@ -406,6 +418,7 @@ async fn find_and_accept(
     opts: &ConnectOpts,
     session: &Session,
     engine_name: &str,
+    posted: &PostedOffer,
 ) -> Result<Option<(String, String, &'static str)>> {
     let offers: Vec<Value> = client
         .get(format!("{http}/park/offers"))
@@ -414,9 +427,12 @@ async fn find_and_accept(
         .error_for_status()?
         .json()
         .await?;
+    // Snapshot (don't hold the lock across the scan) the challenge we still
+    // have standing, so we never take our own.
+    let my_offer = posted.lock().unwrap().as_ref().map(|(id, _)| id.clone());
     let Some(offer) = offers
         .iter()
-        .find(|o| compatible(o, opts, &session.address))
+        .find(|o| compatible(o, opts, &session.address, my_offer.as_deref()))
     else {
         return Ok(None);
     };
@@ -530,10 +546,11 @@ async fn post_and_wait(
             Ok(r) => r.json().await.unwrap_or_default(),
             Err(_) => continue,
         };
-        let foreign = offers.iter().find(|c| {
-            c["offer_id"].as_str() != Some(offer_id.as_str())
-                && compatible(c, opts, &session.address)
-        });
+        // `compatible` now owns the "not our own challenge" check, so the id
+        // guard that used to live here isn't duplicated.
+        let foreign = offers
+            .iter()
+            .find(|c| compatible(c, opts, &session.address, Some(offer_id.as_str())));
         let Some(foreign) = foreign else { continue };
 
         // Withdraw ours first so we never hold two boards at once. A 409 means
@@ -549,5 +566,84 @@ async fn post_and_wait(
         let foreign_id = foreign["offer_id"].as_str().unwrap_or_default().to_string();
         println!("switching to a newly posted challenge…");
         return accept_offer(client, http, &foreign_id, opts, session, engine_name).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn opts() -> ConnectOpts {
+        ConnectOpts {
+            http_server: "http://localhost:8080".into(),
+            name: None,
+            engine_path: "stockfish".into(),
+            engine_args: vec![],
+            book_path: None,
+            book_max_ply: 0,
+            uci_options: vec![],
+            auth_token: None,
+            code: None,
+            auto: true,
+            stake: None,
+            initial_secs: 180,
+            increment_secs: 0,
+            games: 0,
+        }
+    }
+
+    /// A casual offer carries no `poster_addr` — the shape the house bot posts,
+    /// and the reason the wallet check alone can't tell ours from a stranger's.
+    fn casual_offer(id: &str) -> Value {
+        json!({
+            "offer_id": id,
+            "poster_addr": Value::Null,
+            "poster_name": "House Bot",
+            "stake": Value::Null,
+            "initial_secs": 180,
+            "increment_secs": 0,
+        })
+    }
+
+    #[test]
+    fn does_not_take_its_own_casual_challenge() {
+        // Regression: the autopilot re-scans the park after each game. It used
+        // to find the challenge it had just posted (poster_addr null → the
+        // wallet check fails open), join it, and have the game rejected for
+        // same-wallet seats — then repost, forever, leaving the park empty.
+        assert!(!compatible(
+            &casual_offer("mine"),
+            &opts(),
+            "0xabc",
+            Some("mine")
+        ));
+    }
+
+    #[test]
+    fn still_takes_a_strangers_casual_challenge() {
+        // Negative control: the id guard must not make casual offers
+        // unmatchable, or the autopilot would never pair with a real visitor.
+        assert!(compatible(
+            &casual_offer("theirs"),
+            &opts(),
+            "0xabc",
+            Some("mine")
+        ));
+    }
+
+    #[test]
+    fn still_skips_a_foreign_offer_at_another_time_control() {
+        let mut o = casual_offer("theirs");
+        o["initial_secs"] = json!(600);
+        assert!(!compatible(&o, &opts(), "0xabc", Some("mine")));
+    }
+
+    #[test]
+    fn skips_our_own_wallet_when_the_server_does_publish_it() {
+        // The wallet check still earns its keep on authed/staked offers.
+        let mut o = casual_offer("theirs");
+        o["poster_addr"] = json!("0xABC");
+        assert!(!compatible(&o, &opts(), "0xabc", Some("mine")));
     }
 }
