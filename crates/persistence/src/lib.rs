@@ -89,6 +89,13 @@ pub struct ClaimableTournamentRow {
     pub status: String,
 }
 
+/// A wagered game whose escrow this server never settled.
+#[derive(Debug, sqlx::FromRow)]
+pub struct UnsettledGameRow {
+    pub id: Uuid,
+    pub stake: Decimal,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct TournamentOutboxRow {
     pub id: Uuid,
@@ -428,6 +435,31 @@ impl Db {
                WHERE status IN ('complete','settled','abandoned')
                  AND buy_in IS NOT NULL
                  AND players @> to_jsonb($1::text)"#,
+        )
+        .bind(address)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Wagered games this wallet held a seat in whose escrow was never settled.
+    ///
+    /// The contract's `claimTimeout` refunds both stakes once `settleTimeout`
+    /// has passed with no settlement, but nothing ever surfaced *which* games
+    /// qualified — recovery meant hand-writing a contract call. This is only a
+    /// candidate list: the chain is the authority on whether the window is
+    /// open (and on whether someone already claimed), so the UI checks each one.
+    ///
+    /// Matches on the on-chain seat columns (`*_addr`), not the auth wallet
+    /// columns — those are the addresses the escrow actually pays.
+    pub async fn unsettled_wagered_games(&self, address: &str) -> Result<Vec<UnsettledGameRow>> {
+        let rows = sqlx::query_as::<_, UnsettledGameRow>(
+            r#"SELECT id, stake FROM games
+               WHERE stake IS NOT NULL
+                 AND settlement_status <> 'settled'
+                 AND (lower(white_addr) = $1 OR lower(black_addr) = $1)
+               ORDER BY created_at DESC
+               LIMIT 50"#,
         )
         .bind(address)
         .fetch_all(&self.pool)

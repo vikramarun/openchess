@@ -22,6 +22,8 @@ pub fn routes() -> Router<AppState> {
         // Lives here (not in matchmaking) so it inherits the read rate-limit
         // layer — it's the one tournament route that hits Postgres.
         .route("/tournaments/claimable/{address}", get(tourney_claimable))
+        // Same rationale: DB-backed, so it belongs behind the read throttle.
+        .route("/games/unsettled/{address}", get(games_unsettled))
 }
 
 #[derive(Serialize)]
@@ -108,6 +110,41 @@ struct ClaimableView {
     tournament_id: Uuid,
     name: String,
     status: String,
+}
+
+#[derive(Serialize)]
+struct UnsettledGameView {
+    game_id: Uuid,
+    /// USDC base units, as a string — money never round-trips through a float.
+    stake: String,
+}
+
+/// Wagered games of this wallet whose escrow we never settled, so the bankroll
+/// UI can offer the contract's `claimTimeout` refund instead of leaving the
+/// stake recoverable only by a hand-written contract call.
+///
+/// Candidates only: the chain decides whether the timeout window is actually
+/// open and whether someone already claimed, and the UI checks per game.
+/// Read-only + best-effort — empty without a DB, like its tournament sibling.
+async fn games_unsettled(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Json<Vec<UnsettledGameView>> {
+    let Some(db) = state.0.db.as_ref() else {
+        return Json(Vec::new());
+    };
+    let rows = db
+        .unsettled_wagered_games(&address.to_lowercase())
+        .await
+        .unwrap_or_default();
+    Json(
+        rows.into_iter()
+            .map(|r| UnsettledGameView {
+                game_id: r.id,
+                stake: r.stake.normalize().to_string(),
+            })
+            .collect(),
+    )
 }
 
 /// DB-sourced list of the connected wallet's finished buy-in tournaments, so the

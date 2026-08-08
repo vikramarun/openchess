@@ -25,6 +25,11 @@ export const ESCROW_ABI = [
   { type: "function", name: "tournaments", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [{ name: "buyIn", type: "uint256" }, { name: "pool", type: "uint256" }, { name: "claimedAmount", type: "uint256" }, { name: "entrants", type: "uint32" }, { name: "openedAt", type: "uint64" }, { name: "settled", type: "bool" }, { name: "payoutRoot", type: "bytes32" }, { name: "exists", type: "bool" }] },
   { type: "function", name: "tournamentClaimed", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
   { type: "function", name: "tournamentEntered", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
+  // Per-game escrow record + the timeout refund. `claimTimeout` is permissionless
+  // by design: anyone may trigger it once the window opens, and it always pays
+  // both seats back, so a stuck stake is recoverable even if one side vanishes.
+  { type: "function", name: "games", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [{ name: "white", type: "address" }, { name: "black", type: "address" }, { name: "stake", type: "uint256" }, { name: "feeBps", type: "uint16" }, { name: "openedAt", type: "uint64" }, { name: "settled", type: "bool" }, { name: "exists", type: "bool" }] },
+  { type: "function", name: "claimTimeout", stateMutability: "nonpayable", inputs: [{ name: "gameId", type: "bytes32" }], outputs: [] },
   { type: "function", name: "settleTimeout", stateMutability: "view", inputs: [], outputs: [{ type: "uint64" }] },
 ] as const;
 
@@ -168,6 +173,11 @@ export function parseUsdc(human: string): bigint {
 
 /** UUID → on-chain tournament id: the 16 UUID bytes left-aligned in a bytes32
  *  (right-padded with zeros), matching the server's `game_id_to_bytes32`. */
+/** Game ids use the same encoding as tournament ids — the UUID's 16 bytes,
+ *  right-padded with zeros. Mirrors `ledger::game_id_to_bytes32`; aliased
+ *  rather than duplicated so the two can't drift. */
+export const gameIdToBytes32 = (uuid: string) => tidToBytes32(uuid);
+
 export function tidToBytes32(uuid: string): `0x${string}` {
   const hex = uuid.replace(/-/g, "").toLowerCase();
   return `0x${hex}${"0".repeat(32)}` as `0x${string}`;
