@@ -173,15 +173,14 @@ export function parseUsdc(human: string): bigint {
 
 /** UUID → on-chain tournament id: the 16 UUID bytes left-aligned in a bytes32
  *  (right-padded with zeros), matching the server's `game_id_to_bytes32`. */
-/** Game ids use the same encoding as tournament ids — the UUID's 16 bytes,
- *  right-padded with zeros. Mirrors `ledger::game_id_to_bytes32`; aliased
- *  rather than duplicated so the two can't drift. */
-export const gameIdToBytes32 = (uuid: string) => tidToBytes32(uuid);
-
 export function tidToBytes32(uuid: string): `0x${string}` {
   const hex = uuid.replace(/-/g, "").toLowerCase();
   return `0x${hex}${"0".repeat(32)}` as `0x${string}`;
 }
+
+/** Game ids share that encoding — aliased rather than duplicated so the two
+ *  can't drift apart. */
+export const gameIdToBytes32 = tidToBytes32;
 
 /** A winner's Merkle claim: the signed payout amount + its proof path. */
 export type ClaimProof = { amount: bigint; proof: `0x${string}`[] };

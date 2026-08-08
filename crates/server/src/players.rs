@@ -115,8 +115,6 @@ struct ClaimableView {
 #[derive(Serialize)]
 struct UnsettledGameView {
     game_id: Uuid,
-    /// USDC base units, as a string — money never round-trips through a float.
-    stake: String,
 }
 
 /// Wagered games of this wallet whose escrow we never settled, so the bankroll
@@ -139,10 +137,7 @@ async fn games_unsettled(
         .unwrap_or_default();
     Json(
         rows.into_iter()
-            .map(|r| UnsettledGameView {
-                game_id: r.id,
-                stake: r.stake.normalize().to_string(),
-            })
+            .map(|r| UnsettledGameView { game_id: r.id })
             .collect(),
     )
 }

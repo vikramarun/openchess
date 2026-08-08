@@ -89,11 +89,12 @@ pub struct ClaimableTournamentRow {
     pub status: String,
 }
 
-/// A wagered game whose escrow this server never settled.
+/// A wagered game whose escrow this server never settled. Id only: the amount
+/// shown to the player comes from the chain, which is the authority on what is
+/// actually refundable.
 #[derive(Debug, sqlx::FromRow)]
 pub struct UnsettledGameRow {
     pub id: Uuid,
-    pub stake: Decimal,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -454,10 +455,18 @@ impl Db {
     /// columns — those are the addresses the escrow actually pays.
     pub async fn unsettled_wagered_games(&self, address: &str) -> Result<Vec<UnsettledGameRow>> {
         let rows = sqlx::query_as::<_, UnsettledGameRow>(
-            r#"SELECT id, stake FROM games
+            // A game still in progress is not "unsettled" — its stake is
+            // locked because it is being played. Surfacing those told a player
+            // mid-game that their live stake was pending a refund. Finished and
+            // aborted games qualify immediately; an `active` one only once it
+            // is far past any real game (MAX_INITIAL_SECS is 3h), which is how
+            // a game whose room died is still caught.
+            r#"SELECT id FROM games
                WHERE stake IS NOT NULL
                  AND settlement_status <> 'settled'
                  AND (lower(white_addr) = $1 OR lower(black_addr) = $1)
+                 AND (status IN ('finished','aborted')
+                      OR created_at < now() - interval '6 hours')
                ORDER BY created_at DESC
                LIMIT 50"#,
         )

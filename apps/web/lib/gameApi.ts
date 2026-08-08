@@ -51,7 +51,7 @@ export function isFinished(status: string): boolean {
 /** Wagered games of `address` whose escrow the server never settled — the
  *  candidates for the contract's `claimTimeout` refund. Server-filtered to the
  *  wallet; the chain decides whether any of them is actually claimable yet. */
-export type UnsettledGame = { game_id: string; stake: string };
+export type UnsettledGame = { game_id: string };
 
 export async function fetchUnsettledGames(address: string): Promise<UnsettledGame[]> {
   const r = await fetch(`${SERVER_HTTP}/games/unsettled/${address}`);
