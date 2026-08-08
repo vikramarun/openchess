@@ -642,6 +642,9 @@ pre {
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.3px;
   color: var(--text-strong);
+  /* The label can straddle the fill edge at a near-decided eval — the halo
+     keeps it readable against whichever side it lands on. */
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.9);
   pointer-events: none;
 }
 .eval-bar.flipped .eval-num {
@@ -650,6 +653,7 @@ pre {
 }
 .eval-num.on-white {
   color: #2b2a27;
+  text-shadow: 0 0 3px rgba(255, 255, 255, 0.9);
 }
 .eval-num.thinking {
   opacity: 0.6;

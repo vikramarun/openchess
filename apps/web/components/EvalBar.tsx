@@ -19,9 +19,12 @@ export function EvalBar({
   const pct = whiteBarPct(score);
   const label = formatEval(score);
   const flipped = orientation === "black";
-  // The label sits at white's end of the bar; it's legible on the white fill
-  // once the fill reaches it, and on the dark track otherwise.
-  const onWhite = pct >= 12;
+  // The label sits in the last ~15px at white's end, which even a small board
+  // covers by ~5% of bar height — so it has to flip to dark text well before
+  // the fill is a visible fraction of the bar, or a lost position renders the
+  // number light-on-white. Right at the boundary the label straddles both, and
+  // the text-shadow in globals.css keeps it readable either way.
+  const onWhite = pct >= 4;
 
   return (
     <div
