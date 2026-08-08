@@ -15,6 +15,7 @@ mod matchmaking;
 mod players;
 mod ratelimit;
 mod room;
+mod singlenode;
 mod ws;
 
 use std::collections::HashMap;
@@ -271,6 +272,10 @@ async fn main() -> anyhow::Result<()> {
         let st = state.clone();
         supervise("sweep", move || sweep_task(st.clone()));
     }
+    // Backstop for the one misconfiguration this server can't survive: a second
+    // machine. deploy-server.sh asserts the count, but only for deploys that go
+    // through it — a bare `fly deploy` re-adds the HA machine and never does.
+    supervise("single-node-watch", singlenode::watch);
     // Update mode standings (gauntlet/tournament) as games finish.
     tokio::spawn(matchmaking::results_task(state.clone(), results_rx));
     // Recover tournaments interrupted by a restart: settle completed ones by
