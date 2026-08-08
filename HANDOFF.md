@@ -96,11 +96,28 @@ leaderboard (PRs #6–#7), and owner-triggered maintenance/drain mode (PR #8) ar
 **complete and on `main`, but not all of it is deployed**. The hardening tasks
 are done; the remaining gap is mostly ops:
 
-1. **Deploy the release to web + start a house bot.** `v0.1.0` is **cut** — the
-   Release workflow builds the prebuilt `chess-client` binaries the `/connect`
-   page links to. Remaining ops: **redeploy `openchess.ai` on Vercel** (it serves
-   the pre-SF18 build until then), and run `scripts/house-bot.sh` so first
-   visitors always have an opponent.
+1. **Publish the release + start a house bot.** Vercel is **done** —
+   `openchess.ai` serves the SF18 build. Two things are still open, and both are
+   why a new visitor currently hits a dead end:
+
+   - **No GitHub Release exists, so every `/connect` download button 404s.** The
+     `v0.1.0` tag was pushed, but its Release run **queued 24h and was
+     cancelled**: the `macos-13` Intel build job never got a runner (GitHub
+     retired that image), and `publish` needs every build job, so nothing was
+     ever published. **Fixed** in `.github/workflows/release.yml` — the Intel
+     binary now cross-compiles on the Apple Silicon runner (verified locally:
+     produces a `Mach-O 64-bit executable x86_64` reporting the right
+     `--version`). To actually publish, re-point the tag at `main` and push it:
+     `git tag -f v0.1.0 && git push -f origin v0.1.0`. Nothing was ever released
+     under that tag, so re-pointing it rewrites nothing anyone has downloaded.
+     Watch it with `gh run watch` and confirm with `gh release list`.
+   - **The house bot runs nowhere, so the lobby is empty** (`/park/offers` and
+     `/games/live` both return `[]`). `scripts/house-bot.sh` was complete but had
+     no home; it now deploys as its **own Fly app** via `Dockerfile.housebot` +
+     `fly.housebot.toml` (stockfish + `chess-client` in one image, one autopilot
+     per lobby time control). Deploy commands are in the header of
+     `fly.housebot.toml`. The house wallet must be a **fresh, UNFUNDED** key —
+     house games are casual, so it only ever signs SIWE.
 2. **Rate limiting / abuse guardrails — DONE** (`crates/server/src/ratelimit.rs`).
    In-process, single-node (moves behind Redis with the rest of the state when
    multi-node lands). Per-IP token-bucket throttles on `/auth/*` (middleware),

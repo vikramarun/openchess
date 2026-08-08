@@ -1,0 +1,40 @@
+# Fly config for the OpenChess **house bot** — a separate app from the game
+# server (fly.toml). It keeps the park populated so the lobby is never empty.
+#
+#   fly launch --no-deploy --copy-config --config fly.housebot.toml --ha=false
+#   fly secrets set -a openchess-housebot OPENCHESS_WALLET_KEY=0x...  # UNFUNDED!
+#   fly deploy --config fly.housebot.toml --ha=false
+#   fly scale count 1 -a openchess-housebot
+#
+# Run exactly ONE machine. The script already runs one autopilot per time
+# control; a second machine would post a duplicate challenge per tile under the
+# same wallet, so the lobby fills with house-vs-house offers.
+#
+# The wallet must hold NO funds. House games are casual (no stake) — the key
+# only signs SIWE to give the bot a stable identity.
+
+app = "openchess-housebot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.housebot"
+
+[env]
+  SERVER = "https://openchess.fly.dev"
+  ENGINE = "/usr/games/stockfish"
+  NAME = "House Bot"
+  # Stockfish "Skill Level" 0..20. Deliberately beatable: a newcomer's first
+  # bot should win sometimes, or the park is a wall instead of an on-ramp.
+  SKILL = "8"
+  # Matches the lobby's 1+0 / 3+0 / 5+0 / 10+0 tiles.
+  TCS = "60:0 180:0 300:0 600:0"
+
+# No [http_service]: this app listens on nothing, it dials out. That also means
+# no health check — Fly restarts the machine if the process exits, and the
+# script's own backoff loop handles a single autopilot dying.
+[[vm]]
+  # Two shared vCPUs, not one: four autopilots idle at ~0% while waiting for an
+  # acceptance, but a 1+0 bullet game needs real CPU the moment one lands, and a
+  # house bot that flags on time is worse than no house bot at all.
+  size = "shared-cpu-2x"
+  memory = "1gb"

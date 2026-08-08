@@ -33,7 +33,15 @@ jobs:
           - os: macos-14 # Apple Silicon
             target: aarch64-apple-darwin
             artifact: chess-client-macos-arm64
-          - os: macos-13 # Intel
+          # The Intel binary CROSS-COMPILES on the Apple Silicon runner. It used
+          # to build on `macos-13`, but GitHub retired that image: the v0.1.0 tag
+          # queued 24h waiting for a runner that no longer exists, got cancelled,
+          # and took the whole release with it (`publish` needs every build job,
+          # so no GitHub Release was ever created and the /connect download
+          # buttons 404'd). Cross-compiling has no such dependency — the macOS
+          # SDK carries both arches. Verified: the produced binary is
+          # `Mach-O 64-bit executable x86_64` and reports the right --version.
+          - os: macos-14 # Apple Silicon, targeting Intel
             target: x86_64-apple-darwin
             artifact: chess-client-macos-x64
           # ubuntu-22.04 keeps the glibc floor low for older distros.
