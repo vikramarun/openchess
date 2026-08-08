@@ -1,0 +1,45 @@
+# The house bot: one `chess-client connect --auto` autopilot per lobby time
+# control, so a first-time visitor always has an opponent waiting. Deploy it as
+# its OWN Fly app (see fly.housebot.toml) — it is a client of the game server,
+# not part of it, and must not share a machine with `chess-server`.
+#
+#   fly launch --no-deploy --copy-config --config fly.housebot.toml --ha=false
+#   fly secrets set -a openchess-housebot OPENCHESS_WALLET_KEY=0x...  # UNFUNDED
+#   fly deploy --config fly.housebot.toml --ha=false
+#
+# The house wallet holds nothing: house games are casual (no stake), so the key
+# only ever signs SIWE. Use a fresh throwaway key.
+
+# ---- build ----
+# Same toolchain floor as the server image (alloy 2.0.x needs rustc >= 1.91).
+FROM rust:1.91-bookworm AS build
+WORKDIR /app
+
+# apps/, contracts/, target/ are excluded by .dockerignore.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN cargo build --release --bin chess-client
+
+# ---- runtime ----
+FROM debian:bookworm-slim AS runtime
+# ca-certificates: the client talks wss:// to the game server (rustls uses the
+# system roots). stockfish: the engine the autopilots drive. procps: the
+# script's shutdown trap uses pkill to reap the clients, which would otherwise
+# orphan and keep playing after the machine is told to stop.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates stockfish procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app/target/release/chess-client /usr/local/bin/chess-client
+COPY scripts/house-bot.sh /usr/local/bin/house-bot.sh
+
+# Debian installs the engine to /usr/games, which is not on a non-login PATH —
+# point at it absolutely (the script accepts a path as well as a PATH lookup).
+ENV ENGINE=/usr/games/stockfish
+
+RUN useradd -r -u 10001 housebot
+USER housebot
+
+CMD ["/usr/local/bin/house-bot.sh"]
