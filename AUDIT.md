@@ -317,5 +317,8 @@ across 128k random calls; plus a **conservation fuzz** test and a
   accounting/solvency; Merkle-claim double-spend guards; fail-closed settlement
   worker; parameterized SQL (no injection).
 
-Remaining (tracked, not security-blocking): Merkle-claim and refund browser UIs,
-and Swiss/knockout tournament pairing (only round-robin is implemented).
+Remaining (tracked, not security-blocking): Swiss/knockout tournament pairing
+(only round-robin is implemented, though the UI advertises both). The
+Merkle-claim and refund browser UIs have since shipped —
+`apps/web/components/TournamentClaim.tsx` calls both `claimTournament` and
+`claimRefund`, surfaced next to the bankroll by `ClaimWinnings.tsx`.
