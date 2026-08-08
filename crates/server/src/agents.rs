@@ -254,7 +254,7 @@ async fn handle_agent(state: AppState, socket: WebSocket) {
                                 1,
                                 0,
                                 ServerToAgent::Error {
-                                    code: "unauthorized".into(),
+                                    code: protocol::ERR_UNAUTHORIZED.into(),
                                     message: "invalid or expired session token".into(),
                                 },
                             );
