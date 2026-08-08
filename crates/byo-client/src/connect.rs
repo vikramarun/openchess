@@ -154,11 +154,21 @@ fn is_unauthorized(e: &anyhow::Error) -> bool {
 /// server (reconnect and carry on) from a rejected credential (re-authenticate
 /// first) — the two look identical at the socket layer, and treating the second
 /// as the first reconnects with the same dead token forever.
+#[derive(Debug, PartialEq, Eq)]
 enum AgentExit {
     /// Socket closed — a server deploy/restart, or a clean shutdown.
     Closed,
     /// The server rejected our session token.
     Unauthorized,
+}
+
+/// Map a server `Error.code` to a session outcome.
+///
+/// Extracted so the test exercises the decision `agent_session` actually makes.
+/// Asserting on an inline re-implementation of this comparison would pass even
+/// if the branch below were deleted — which is the bug, not the fix.
+fn exit_for_error_code(code: &str) -> Option<AgentExit> {
+    (code == protocol::ERR_UNAUTHORIZED).then_some(AgentExit::Unauthorized)
 }
 
 async fn run_agent(
@@ -337,8 +347,8 @@ async fn agent_session(
                 eprintln!("server: [{code}] {message}");
                 // Only this code is actionable — everything else is a log
                 // line. Reconnecting on a dead credential just repeats it.
-                if code == protocol::ERR_UNAUTHORIZED {
-                    return Ok(AgentExit::Unauthorized);
+                if let Some(exit) = exit_for_error_code(&code) {
+                    return Ok(exit);
                 }
             }
         }
@@ -776,10 +786,15 @@ mod agent_tests {
     /// noise; treating none that way is the bug being fixed.
     #[test]
     fn only_the_unauthorized_code_triggers_reauth() {
-        let reauths = |code: &str| code == protocol::ERR_UNAUTHORIZED;
-        assert!(reauths(protocol::ERR_UNAUTHORIZED));
+        assert_eq!(
+            exit_for_error_code(protocol::ERR_UNAUTHORIZED),
+            Some(AgentExit::Unauthorized)
+        );
+        // Case-sensitive on purpose: the server sends the shared constant
+        // verbatim, and a near-miss must not be treated as a credential
+        // failure — that would re-auth on ordinary protocol noise.
         for other in ["busy", "bad_request", "not_found", "Unauthorized", ""] {
-            assert!(!reauths(other), "{other} must not trigger re-auth");
+            assert_eq!(exit_for_error_code(other), None, "{other} must not re-auth");
         }
     }
 }
