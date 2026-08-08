@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
+import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { authToken } from "@/lib/escrow";
 import { useMaintenance } from "@/lib/maintenance";
@@ -40,19 +41,18 @@ function MaintenanceBannerInner() {
     setBusy(true);
     setErr(null);
     try {
-      const r = await fetch(`${SERVER_HTTP}/admin/maintenance`, {
+      const r = await authedFetch(`${SERVER_HTTP}/admin/maintenance`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${authToken() ?? ""}`,
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ on }),
       });
       if (!r.ok) {
         setErr(
-          r.status === 403
-            ? "Not authorized — sign in with the owner wallet."
-            : `Failed (${r.status}).`,
+          r.status === 401
+            ? SESSION_EXPIRED
+            : r.status === 403
+              ? "Not authorized — sign in with the owner wallet."
+              : `Failed (${r.status}).`,
         );
         return;
       }

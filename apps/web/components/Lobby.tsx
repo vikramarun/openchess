@@ -9,6 +9,7 @@ import { SeatGame } from "@/components/SeatGame";
 import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
+import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
@@ -122,9 +123,7 @@ export function Lobby() {
     let alive = true;
     const tick = async () => {
       try {
-        const r = await fetch(`${SERVER_HTTP}/park/offers/${pending.offerId}`, {
-          headers: token ? { authorization: `Bearer ${token}` } : {},
-        });
+        const r = await authedFetch(`${SERVER_HTTP}/park/offers/${pending.offerId}`);
         if (!r.ok || !alive) return;
         const j = await r.json();
         if (j.status === "matched" && j.game_id) {
@@ -184,12 +183,9 @@ export function Lobby() {
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
     setCreating(true);
     try {
-      const r = await fetch(`${SERVER_HTTP}/park/offers`, {
+      const r = await authedFetch(`${SERVER_HTTP}/park/offers`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           stake: stakeBase,
           initial_secs: tc.initial,
@@ -199,11 +195,13 @@ export function Lobby() {
       });
       if (!r.ok)
         return setErr(
-          r.status === 503
-            ? "The server is in maintenance — no new games can be started right now."
-            : r.status === 424
-              ? "Your bot is offline — check the chess-client window."
-              : `Couldn't post the game (${r.status}).`,
+          r.status === 401
+            ? SESSION_EXPIRED
+            : r.status === 503
+              ? "The server is in maintenance — no new games can be started right now."
+              : r.status === 424
+                ? "Your bot is offline — check the chess-client window."
+                : `Couldn't post the game (${r.status}).`,
         );
       const j = await r.json();
       setPending({
@@ -227,12 +225,9 @@ export function Lobby() {
     if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
     try {
-      const r = await fetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
+      const r = await authedFetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(token && (wagered || botPlays) ? { authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(
           botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
         ),

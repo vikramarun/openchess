@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start -p 3000",
     "test:book": "tsx scripts/polyglot.test.ts",
-    "test:eval": "tsx scripts/eval.test.ts"
+    "test:eval": "tsx scripts/eval.test.ts",
+    "test:auth": "tsx scripts/authedFetch.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.1.7",

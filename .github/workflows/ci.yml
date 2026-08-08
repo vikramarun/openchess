@@ -43,7 +43,15 @@ jobs:
       - name: Cargo test (workspace)
         run: cargo test --workspace
 
-      - name: Web build
+      - name: Web build + tests
         run: |
           corepack enable
-          cd apps/web && pnpm install --frozen-lockfile=false && pnpm build
+          cd apps/web && pnpm install --frozen-lockfile=false
+          # These suites existed but nothing ran them, so a regression in the
+          # polyglot keys, the eval bar, or session handling would only have
+          # shown up in a browser. Before the build: they are seconds, and a
+          # failure here is a clearer signal than a build error.
+          pnpm test:book
+          pnpm test:eval
+          pnpm test:auth
+          pnpm build

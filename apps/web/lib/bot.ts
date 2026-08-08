@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from "react";
 
+import { authedFetch } from "./authedFetch";
 import { SERVER_HTTP } from "./config";
 
 export type UciOptionInfo = {
@@ -33,9 +34,10 @@ export const BOT_OFFLINE: BotStatus = {
 /** Poll the signed-in user's own bot status. */
 export async function fetchBot(token: string): Promise<BotStatus> {
   try {
-    const r = await fetch(`${SERVER_HTTP}/agent`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
+    // token arg kept for call-site compatibility; authedFetch reads the store
+    // so an expired session is dropped here too instead of polling forever.
+    void token;
+    const r = await authedFetch(`${SERVER_HTTP}/agent`);
     if (!r.ok) return BOT_OFFLINE;
     return (await r.json()) as BotStatus;
   } catch {
