@@ -333,7 +333,11 @@ async fn park_create(
                 .ok_or(StatusCode::UNAUTHORIZED)?,
         )
     } else {
-        state.authed_wallet(&headers)
+        // Strict: a *present but stale* bearer must 401 rather than post an
+        // anonymous offer, or the invariant above ("an authed poster must
+        // never appear anonymous") quietly breaks and self-match guards that
+        // key on `poster_addr` fail open. No header at all is still fine.
+        state.authed_wallet_strict(&headers)?
     };
 
     let mut poster_name = req.name.as_deref().and_then(sanitize_label);

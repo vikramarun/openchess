@@ -54,14 +54,7 @@ pub async fn run_connect(opts: ConnectOpts) -> Result<()> {
 
     // A bot is always wallet-bound: its games count toward a profile and may
     // carry stakes, so anonymous bots don't exist.
-    let session = resolve_session(&client, &http, opts.auth_token.clone(), opts.code.clone())
-        .await?
-        .ok_or_else(|| {
-            anyhow!(
-                "connecting a bot requires your wallet: pass --code (from the web app's \
-                 Connect page), --auth-token, or set OPENCHESS_WALLET_KEY"
-            )
-        })?;
+    let session = sign_in(&client, &http, &opts).await?;
     println!("signed in as {}", session.address);
 
     // Probe the engine once: verify it runs, and collect its identity and UCI
@@ -87,10 +80,61 @@ pub async fn run_connect(opts: ConnectOpts) -> Result<()> {
     };
 
     if opts.auto {
-        run_autopilot(&client, &http, &opts, &session, &engine_name, book).await
+        run_autopilot(&client, &http, &opts, session, &engine_name, book).await
     } else {
         run_agent(&http, &opts, &session, &engine_name, engine_options, book).await
     }
+}
+
+/// Sign in, retrying a failure a few times before giving up.
+///
+/// A transient sign-in failure used to kill the process. Under a supervisor
+/// (`scripts/house-bot.sh` runs four of these side by side) that is worse than
+/// it sounds: the replacement process posts a *fresh* challenge while the dead
+/// one's challenge stays in the park for its full TTL, since only the SIGTERM
+/// path withdraws offers and a crash never reaches it. The park fills with
+/// ghost offers from the same wallet, which the autopilots then match against
+/// each other. Retrying in place keeps one identity and one standing offer.
+///
+/// Bounded rather than infinite: a wrong key or a domain mismatch fails the
+/// same way every time, and exiting lets the supervisor surface it.
+async fn sign_in(client: &reqwest::Client, http: &str, opts: &ConnectOpts) -> Result<Session> {
+    const ATTEMPTS: u32 = 5;
+    let mut backoff = 2u64;
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 1..=ATTEMPTS {
+        match resolve_session(client, http, opts.auth_token.clone(), opts.code.clone()).await {
+            // No credential configured at all is a usage error, not a
+            // transient one — retrying can't conjure a wallet.
+            Ok(None) => {
+                return Err(anyhow!(
+                    "connecting a bot requires your wallet: pass --code (from the web app's \
+                     Connect page), --auth-token, or set OPENCHESS_WALLET_KEY"
+                ))
+            }
+            Ok(Some(s)) => return Ok(s),
+            Err(e) => {
+                if attempt < ATTEMPTS {
+                    eprintln!("sign-in failed ({e:#}); retrying in {backoff}s");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(30);
+                }
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap().context("sign-in failed after retries"))
+}
+
+/// Did this failure come back as HTTP 401? A session lives in the server's
+/// memory, so any restart there voids it while this process is still holding
+/// it — worth re-authenticating for rather than retrying the same dead token.
+fn is_unauthorized(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .and_then(|re| re.status())
+            .is_some_and(|s| s == reqwest::StatusCode::UNAUTHORIZED)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -267,10 +311,13 @@ async fn run_autopilot(
     client: &reqwest::Client,
     http: &str,
     opts: &ConnectOpts,
-    session: &Session,
+    session: Session,
     engine_name: &str,
     book: Option<Arc<OpeningBook>>,
 ) -> Result<()> {
+    // Owned + mutable: the server keeps sessions in memory, so a restart there
+    // voids ours mid-run and we re-authenticate in place rather than dying.
+    let mut session = session;
     let ws = ws_base(http);
     if opts.stake.is_some() {
         println!(
@@ -311,18 +358,35 @@ async fn run_autopilot(
 
         // Transient server/network errors must not kill the autopilot (an
         // exit strands the posted offer for its 1h TTL) — log and retry.
-        let seat = match find_and_accept(client, http, opts, session, engine_name, &posted).await {
-            Ok(Some(seat)) => Some(seat),
-            Ok(None) => {
-                match post_and_wait(client, http, opts, session, engine_name, &posted).await {
-                    Ok(seat) => seat,
+        let attempt =
+            match find_and_accept(client, http, opts, &session, engine_name, &posted).await {
+                Ok(Some(seat)) => Ok(Some(seat)),
+                Ok(None) => post_and_wait(client, http, opts, &session, engine_name, &posted).await,
+                Err(e) => Err(e),
+            };
+        let seat = match attempt {
+            Ok(seat) => seat,
+            // A 401 means our session is gone (the server holds them in
+            // memory, so its restart voids ours). Retrying the same dead token
+            // would spin forever, so mint a new one and rescan. Without this
+            // the server's strict-auth rejection would just stall the bot.
+            Err(e) if is_unauthorized(&e) => {
+                eprintln!("session rejected; re-authenticating…");
+                match sign_in(client, http, opts).await {
+                    Ok(s) => {
+                        println!("signed in as {}", s.address);
+                        session = s;
+                    }
+                    // Can't re-auth (a --code is single-use, so this is
+                    // terminal for that flow) — back off and let the loop or
+                    // the supervisor decide.
                     Err(e) => {
-                        eprintln!("matchmaking error: {e:#}; retrying in {backoff}s");
+                        eprintln!("re-authentication failed: {e:#}; retrying in {backoff}s");
                         tokio::time::sleep(Duration::from_secs(backoff)).await;
                         backoff = (backoff * 2).min(60);
-                        continue;
                     }
                 }
+                continue;
             }
             Err(e) => {
                 eprintln!("matchmaking error: {e:#}; retrying in {backoff}s");
