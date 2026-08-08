@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { loadBotOptions, saveBotOptions, useBotStatus } from "@/lib/bot";
+import { authedFetch } from "@/lib/authedFetch";
 import { GITHUB_REPO, SERVER_HTTP } from "@/lib/config";
 import { useAuthToken } from "@/lib/useAuthToken";
 
@@ -67,10 +68,7 @@ export function ConnectEngine() {
     if (!token || code) return;
     (async () => {
       try {
-        const r = await fetch(`${SERVER_HTTP}/auth/link`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}` },
-        });
+        const r = await authedFetch(`${SERVER_HTTP}/auth/link`, { method: "POST" });
         if (!r.ok) return setCodeErr("Couldn't create a pairing code — try signing in again.");
         setCode((await r.json()).code);
       } catch {
