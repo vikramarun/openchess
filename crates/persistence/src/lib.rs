@@ -89,6 +89,14 @@ pub struct ClaimableTournamentRow {
     pub status: String,
 }
 
+/// A wagered game whose escrow this server never settled. Id only: the amount
+/// shown to the player comes from the chain, which is the authority on what is
+/// actually refundable.
+#[derive(Debug, sqlx::FromRow)]
+pub struct UnsettledGameRow {
+    pub id: Uuid,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct TournamentOutboxRow {
     pub id: Uuid,
@@ -428,6 +436,39 @@ impl Db {
                WHERE status IN ('complete','settled','abandoned')
                  AND buy_in IS NOT NULL
                  AND players @> to_jsonb($1::text)"#,
+        )
+        .bind(address)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Wagered games this wallet held a seat in whose escrow was never settled.
+    ///
+    /// The contract's `claimTimeout` refunds both stakes once `settleTimeout`
+    /// has passed with no settlement, but nothing ever surfaced *which* games
+    /// qualified — recovery meant hand-writing a contract call. This is only a
+    /// candidate list: the chain is the authority on whether the window is
+    /// open (and on whether someone already claimed), so the UI checks each one.
+    ///
+    /// Matches on the on-chain seat columns (`*_addr`), not the auth wallet
+    /// columns — those are the addresses the escrow actually pays.
+    pub async fn unsettled_wagered_games(&self, address: &str) -> Result<Vec<UnsettledGameRow>> {
+        let rows = sqlx::query_as::<_, UnsettledGameRow>(
+            // A game still in progress is not "unsettled" — its stake is
+            // locked because it is being played. Surfacing those told a player
+            // mid-game that their live stake was pending a refund. Finished and
+            // aborted games qualify immediately; an `active` one only once it
+            // is far past any real game (MAX_INITIAL_SECS is 3h), which is how
+            // a game whose room died is still caught.
+            r#"SELECT id FROM games
+               WHERE stake IS NOT NULL
+                 AND settlement_status <> 'settled'
+                 AND (lower(white_addr) = $1 OR lower(black_addr) = $1)
+                 AND (status IN ('finished','aborted')
+                      OR created_at < now() - interval '6 hours')
+               ORDER BY created_at DESC
+               LIMIT 50"#,
         )
         .bind(address)
         .fetch_all(&self.pool)
