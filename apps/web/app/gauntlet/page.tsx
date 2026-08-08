@@ -427,7 +427,7 @@ function GauntletClient() {
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
         <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
           Prefer the native client? <code>chess-client gauntlet --count 20 --stake 1000000</code>.
-          Watch engines free in <Link href="/play">Quick Play</Link>.
+          Watch engines free in <Link href="/play">Test Engine</Link>.
         </p>
       </div>
     </>

@@ -17,12 +17,12 @@ mod net;
 use std::time::Instant;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use game_engine::{Game, Status};
 use protocol::TimeControl;
 
 use crate::engine::UciEngine;
-use crate::net::{play, PlayOpts};
+use crate::net::{play, PlayOpts, TimePolicy, DEFAULT_MOVE_OVERHEAD_MS};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +33,31 @@ use crate::net::{play, PlayOpts};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Clock budgeting, shared by every subcommand that plays over the network.
+#[derive(Args, Clone, Copy)]
+struct TimeArgs {
+    /// Milliseconds reserved per move for the round trip to the server. The
+    /// server charges wall-clock, so an engine budgeting purely from `wtime`
+    /// (Stockfish reserves 10ms by default) loses the difference every move.
+    #[arg(long, default_value_t = DEFAULT_MOVE_OVERHEAD_MS)]
+    move_overhead_ms: u64,
+    /// Ceiling on a single search, in milliseconds. Off by default; worth
+    /// setting for a long-running bot, since sudden-death time management will
+    /// happily spend tens of seconds on one opening move and then rush the
+    /// rest of the game.
+    #[arg(long)]
+    max_move_ms: Option<u64>,
+}
+
+impl From<TimeArgs> for TimePolicy {
+    fn from(a: TimeArgs) -> Self {
+        TimePolicy {
+            move_overhead_ms: a.move_overhead_ms,
+            max_move_ms: a.max_move_ms,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -81,6 +106,8 @@ enum Command {
         /// Stop using the book after this many plies.
         #[arg(long, default_value_t = 16)]
         book_max_ply: u32,
+        #[command(flatten)]
+        time: TimeArgs,
     },
     /// Gauntlet: keep playing back-to-back games at a fixed tier until stopped.
     Gauntlet {
@@ -108,6 +135,8 @@ enum Command {
         /// SIWE session token (Bearer), required for a staked gauntlet.
         #[arg(long)]
         auth_token: Option<String>,
+        #[command(flatten)]
+        time: TimeArgs,
     },
     /// Put your engine online as a bot bound to your wallet. By default you
     /// then drive it from the website (start/join games there — the seat is
@@ -157,6 +186,8 @@ enum Command {
         /// Autopilot: stop after this many games (0 = play until Ctrl-C).
         #[arg(long, default_value_t = 0)]
         games: u32,
+        #[command(flatten)]
+        time: TimeArgs,
     },
     /// Print a SIWE session token for this wallet (for scripting). Uses
     /// OPENCHESS_WALLET_KEY or claims a --code from the web app.
@@ -217,6 +248,7 @@ async fn main() -> Result<()> {
             engine_args,
             book,
             book_max_ply,
+            time,
         } => {
             let book = match book {
                 Some(p) => Some(std::sync::Arc::new(crate::book::OpeningBook::open(
@@ -233,6 +265,7 @@ async fn main() -> Result<()> {
                 engine_args,
                 book,
                 uci_options: Vec::new(),
+                time: time.into(),
             })
             .await
         }
@@ -247,6 +280,7 @@ async fn main() -> Result<()> {
             book,
             book_max_ply,
             auth_token,
+            time,
         } => {
             gauntlet::run_gauntlet(gauntlet::GauntletOpts {
                 http_server: server,
@@ -259,6 +293,7 @@ async fn main() -> Result<()> {
                 book_path: book,
                 book_max_ply,
                 auth_token,
+                time: time.into(),
             })
             .await
         }
@@ -277,6 +312,7 @@ async fn main() -> Result<()> {
             initial_secs,
             increment_secs,
             games,
+            time,
         } => {
             connect::run_connect(connect::ConnectOpts {
                 http_server: server,
@@ -286,6 +322,7 @@ async fn main() -> Result<()> {
                 book_path: book,
                 book_max_ply,
                 uci_options,
+                time: time.into(),
                 auth_token,
                 code,
                 auto,

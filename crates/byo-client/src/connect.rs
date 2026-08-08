@@ -24,7 +24,7 @@ use crate::auth::{resolve_session, Session};
 use crate::book::OpeningBook;
 use crate::engine::UciEngine;
 use crate::gauntlet::ws_base;
-use crate::net::{play, PlayOpts};
+use crate::net::{play, PlayOpts, TimePolicy};
 
 pub struct ConnectOpts {
     pub http_server: String,
@@ -36,6 +36,8 @@ pub struct ConnectOpts {
     pub book_max_ply: u32,
     /// UCI options set from the CLI, applied to every game.
     pub uci_options: Vec<(String, String)>,
+    /// Per-move clock budgeting, applied to every game.
+    pub time: TimePolicy,
     pub auth_token: Option<String>,
     pub code: Option<String>,
     /// Autopilot: match unattended instead of being driven from the web.
@@ -327,6 +329,7 @@ async fn agent_session(
                     engine_args: opts.engine_args.clone(),
                     book: book.clone(),
                     uci_options: options,
+                    time: opts.time,
                 })
                 .await
                 {
@@ -466,6 +469,7 @@ async fn run_autopilot(
             engine_args: opts.engine_args.clone(),
             book: book.clone(),
             uci_options: opts.uci_options.clone(),
+            time: opts.time,
         })
         .await
         {
@@ -704,6 +708,7 @@ mod tests {
             book_path: None,
             book_max_ply: 0,
             uci_options: vec![],
+            time: Default::default(),
             auth_token: None,
             code: None,
             auto: true,

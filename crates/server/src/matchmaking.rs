@@ -274,6 +274,12 @@ struct ParkOffer {
     status: String, // open | matching | matched
     game_id: Option<GameId>,
     poster_token: Option<String>,
+    /// Who took the offer, recorded at match time. The acceptor learns the
+    /// poster's identity from the offer row, but the poster only ever learns
+    /// theirs from `GameStart` — which the server withholds until BOTH seats
+    /// have readied, too late for a client that wants to name the opponent in
+    /// a pre-game confirmation.
+    opponent: Option<protocol::OpponentInfo>,
     /// Capability to cancel this offer, returned only to its creator.
     cancel_key: String,
     /// Who this offer counts against for the open-offer cap: the poster's
@@ -385,6 +391,7 @@ async fn park_create(
                 poster_token: None,
                 cancel_key: cancel_key.clone(),
                 owner_key,
+                opponent: None,
                 created_at: Instant::now(),
             },
         );
@@ -468,6 +475,10 @@ struct ParkAcceptResp {
     /// "bot" | "browser" — which client got the acceptor's seat.
     seat: String,
     spectate_path: String,
+    /// The poster's display identity, resolved server-side (declared name,
+    /// else shortened wallet, else "anonymous") so the acceptor doesn't have
+    /// to re-derive the fallback from the offer row.
+    opponent: protocol::OpponentInfo,
 }
 
 #[derive(Deserialize, Default)]
@@ -667,6 +678,8 @@ async fn park_accept(
         offer.game_id = Some(resp.game_id);
         // A bot-held seat's token stays server-side — the agent has it.
         offer.poster_token = (!poster_bot).then(|| resp.white_token.clone());
+        // The acceptor always takes black, so index 1 is who the poster drew.
+        offer.opponent = Some(resp.players[1].clone());
     }
     Ok(Json(ParkAcceptResp {
         game_id: resp.game_id,
@@ -674,6 +687,8 @@ async fn park_accept(
         color: "black".into(),
         seat: if acceptor_bot { "bot" } else { "browser" }.into(),
         spectate_path: resp.spectate_path,
+        // The poster always takes white, so index 0 is who the acceptor drew.
+        opponent: resp.players[0].clone(),
     }))
 }
 
@@ -686,6 +701,11 @@ struct ParkGetResp {
     /// "bot" when the poster's seat was dispatched to their agent (the browser
     /// should spectate instead of driving the seat).
     seat: Option<String>,
+    /// Who took the offer, once matched. Same identity the room will show, so
+    /// the poster can name its opponent in a pre-game confirmation instead of
+    /// waiting for `GameStart` (which the server holds until both sides ready).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opponent: Option<protocol::OpponentInfo>,
 }
 
 async fn park_get(
@@ -718,6 +738,9 @@ async fn park_get(
                     .then(|| "white".into())
                     .filter(|_| authorized),
                 seat: Some(if o.poster_seat_bot { "bot" } else { "browser" }.into()),
+                // Same gate as the token: a stranger polling the id learns
+                // nothing about who is playing.
+                opponent: o.opponent.clone().filter(|_| authorized),
             })
         }
         None => Json(ParkGetResp {
@@ -726,6 +749,7 @@ async fn park_get(
             token: None,
             color: None,
             seat: None,
+            opponent: None,
         }),
     }
 }

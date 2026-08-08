@@ -847,6 +847,12 @@ pub struct CreateGameResp {
     pub white_token: String,
     pub black_token: String,
     pub spectate_path: String,
+    /// [white, black] display identity, resolved exactly as the room will show
+    /// it. Internal handoff to matchmaking, which tells each side who it drew
+    /// before the game starts — `GameStart` carries the same thing but only
+    /// once both seats have readied. Not part of the `/games` response body.
+    #[serde(skip)]
+    pub players: [protocol::OpponentInfo; 2],
 }
 
 /// `/games` creates an **unwagered (casual)** game with two open seats. Wagered
@@ -1023,7 +1029,7 @@ impl AppState {
             tc,
             self.0.settlement.clone(),
             stake_info,
-            players,
+            players.clone(),
             self.0.db.clone(),
             self.0.cleanup_tx.clone(),
             self.0.results_tx.clone(),
@@ -1102,6 +1108,7 @@ impl AppState {
             white_token,
             black_token,
             spectate_path: format!("/ws/game/{game_id}"),
+            players,
         })
     }
 

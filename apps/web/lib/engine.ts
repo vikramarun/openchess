@@ -13,6 +13,9 @@ const ENGINE_URL = "/stockfish-18-lite-single.js";
 /** Transposition-table size (MB). Modest fixed default — bigger helps slightly
  *  at longer time controls; two engines run at once on the self-play page. */
 const HASH_MB = 64;
+/** Clock reserved per move for the round trip to the server (ms). Matches the
+ *  native client's default (crates/byo-client `DEFAULT_MOVE_OVERHEAD_MS`). */
+const MOVE_OVERHEAD_MS = 250;
 
 /** One `info` line from a search, as the engine reports it: the score is from
  *  the SIDE TO MOVE's perspective (UCI convention) — flip it for a white-relative
@@ -137,6 +140,11 @@ export class BrowserEngine {
     await this.waitFor((l) => l.includes("uciok"), 120_000);
     this.send("setoption name MultiPV value 1");
     this.send(`setoption name Hash value ${HASH_MB}`);
+    // The server charges wall-clock from `your_turn` to the move landing, so a
+    // seat pays for the websocket round trip and for whatever the browser was
+    // doing between postMessage calls. Stockfish reserves 10ms by default —
+    // fine against a local opponent, a steady leak against a remote referee.
+    this.send(`setoption name Move Overhead value ${MOVE_OVERHEAD_MS}`);
     this.send("isready");
     await this.waitFor((l) => l.includes("readyok"));
   }

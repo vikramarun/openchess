@@ -483,6 +483,99 @@ a:hover {
   padding: 4px;
 }
 
+/* ---------- pre-game confirmation (StakeConfirm) ---------- */
+.confirm-modal {
+  max-width: 400px;
+}
+.confirm-hero {
+  font-size: 40px;
+  line-height: 1;
+  text-align: center;
+  margin-bottom: -4px;
+}
+.confirm-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.confirm-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+/* The label column keeps the values aligned down the list. */
+.confirm-facts > div > .muted:first-child {
+  flex: 0 0 74px;
+  font-size: 13px;
+}
+.confirm-facts b {
+  color: var(--text-strong);
+}
+.confirm-stake {
+  margin-top: 0;
+  text-align: center;
+  border-left-width: 3px;
+}
+.confirm-stake-amount {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 3px;
+}
+.confirm-auto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 0;
+}
+.confirm-auto input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.confirm-countdown {
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.confirm-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 0 4px;
+  color: var(--text-strong);
+  font-weight: 600;
+}
+.confirm-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: confirm-spin 0.8s linear infinite;
+}
+@keyframes confirm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .confirm-spinner {
+    animation: none;
+  }
+}
+
 /* lobby header row: title left, "play now" on the right */
 .lobby-head {
   display: flex;

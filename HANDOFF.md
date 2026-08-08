@@ -127,6 +127,31 @@ docs.
 - **Stuck stakes are recoverable in-app** — `claimTimeout` has a browser UI
   (`GameRefund.tsx`). The web half is live via Vercel; its discovery endpoint
   *(needs deploy)*, so the panel simply stays hidden until the server ships.
+- **The house bot no longer burns its clock in the opening** *(needs a house-bot
+  deploy: `fly deploy --config fly.housebot.toml --ha=false`)*. Measured against
+  the real server, an uncapped Stockfish 17 spent **20.5s on move 1** of a 10+0
+  game and 8s on move 2, then rushed the endgame and flagged — which is exactly
+  what it looked like from the outside. `house-bot.sh` now passes
+  `--max-move-ms` (`initial/80`: 0.75s at 1+0 … 7.5s at 10+0) and
+  `--move-overhead-ms 250`. Nothing is lost: at `Skill Level=8` Stockfish fixes
+  its move at depth 9 and discards every deeper iteration, and the cap still
+  reaches depth ~21. The browser engine got the `Move Overhead` half of the same
+  fix (`apps/web/lib/engine.ts`); it is **not** capped, so a browser seat playing
+  for money still searches at full strength.
+- **Games start on a two-sided handshake** *(needs deploy for the opponent name
+  only)*. A browser seat in the lobby now holds its `ready` frame until the
+  player confirms a popup showing the stake, the clock and who they drew
+  (`StakeConfirm.tsx`); since the server already waits for both seats, that
+  makes it mutual. "Auto-accept" (localStorage `openchess.autoAccept`) opts out
+  entirely. Gauntlet and tournament seats skip it — a prompt per pairing would
+  be a treadmill. The server side is only the opponent's identity on
+  `POST /park/offers/{id}/accept` and `GET /park/offers/{id}`; without it the
+  popup just says "your opponent".
+- **Rabby is in the wallet shortlist.** RainbowKit's default "Popular" group
+  doesn't include it, so a Rabby user saw an install wall with the extension
+  already installed (`apps/web/lib/wagmi.ts` now spells the group out).
+- **"Quick Play" is now "Test Engine"** — the tab, the page heading, and the
+  cross-links from gauntlet/tournament.
 - **Sessions expire gracefully** *(PR #27, not yet merged)* — a stale token is
   dropped client-side (`apps/web/lib/authedFetch.ts`) instead of dead-ending on a
   401. Without it, every returning user hits an unrecoverable error the day after

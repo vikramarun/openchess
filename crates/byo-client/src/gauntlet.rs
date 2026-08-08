@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use crate::book::OpeningBook;
-use crate::net::{play, PlayOpts};
+use crate::net::{play, PlayOpts, TimePolicy};
 
 pub struct GauntletOpts {
     pub http_server: String,
@@ -22,6 +22,8 @@ pub struct GauntletOpts {
     pub book_path: Option<String>,
     pub book_max_ply: u32,
     pub auth_token: Option<String>,
+    /// Per-move clock budgeting, applied to every game in the session.
+    pub time: TimePolicy,
 }
 
 pub(crate) fn ws_base(http: &str) -> String {
@@ -125,6 +127,7 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
             engine_args: opts.engine_args.clone(),
             book: book.clone(),
             uci_options: Vec::new(),
+            time: opts.time,
         })
         .await?;
 

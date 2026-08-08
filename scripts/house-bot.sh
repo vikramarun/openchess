@@ -19,6 +19,10 @@
 #                         beatable so newcomers' bots get wins sometimes
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
+#   MOVE_BUDGET           default 80 — plan each game as this many moves; the
+#                         per-move search ceiling is initial/MOVE_BUDGET
+#   MOVE_OVERHEAD_MS      default 250 — clock reserved per move for the round
+#                         trip to the server
 #   CLIENT                default: chess-client from PATH, else the repo's
 #                         release build
 set -euo pipefail
@@ -28,6 +32,8 @@ ENGINE="${ENGINE:-stockfish}"
 NAME="${NAME:-House Bot}"
 SKILL="${SKILL:-8}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
+MOVE_BUDGET="${MOVE_BUDGET:-80}"
+MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
 
 if [[ -z "${OPENCHESS_WALLET_KEY:-}" ]]; then
   echo "OPENCHESS_WALLET_KEY is required (a fresh, UNFUNDED key)." >&2
@@ -60,6 +66,11 @@ for tc in $TCS; do
   fi
 done
 
+if [[ ! "$MOVE_BUDGET" =~ ^[0-9]+$ ]] || ((MOVE_BUDGET == 0)); then
+  echo "MOVE_BUDGET must be a positive integer (moves to plan each game for)." >&2
+  exit 1
+fi
+
 echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS"
 
 # One autopilot per time control. Same wallet across instances is fine: the
@@ -67,6 +78,14 @@ echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS"
 # wallet's offers, and different time controls never match each other anyway.
 run_tc() {
   local initial="$1" increment="$2" delay=10
+  # Ceiling on a single search. Left to itself, Stockfish's sudden-death
+  # allocation spends ~62s on move 1 of a 10+0 game (and ~5s on move 1 of 3+0),
+  # then plays the rest in a hurry — the house bot looked frozen in the opening
+  # and flagged in the endgame. Nothing is lost by capping it here: at Skill
+  # Level 8 the engine locks its move in at depth 9 and every deeper iteration
+  # is discarded, and the cap still leaves it reaching depth ~20.
+  local max_move_ms=$(( initial * 1000 / MOVE_BUDGET ))
+  ((max_move_ms < 300)) && max_move_ms=300
   while true; do
     # The client's own output already names the game/opponent; the autopilot
     # retries transient errors internally, so an exit here is unusual.
@@ -75,6 +94,8 @@ run_tc() {
       --engine "$ENGINE" \
       --name "$NAME" \
       --uci-option "Skill Level=$SKILL" \
+      --max-move-ms "$max_move_ms" \
+      --move-overhead-ms "$MOVE_OVERHEAD_MS" \
       --initial-secs "$initial" --increment-secs "$increment" || true
     echo "[${initial}+${increment}] autopilot exited; restarting in ${delay}s"
     sleep "$delay"

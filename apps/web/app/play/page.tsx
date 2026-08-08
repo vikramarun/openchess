@@ -191,7 +191,7 @@ export default function PlayPage() {
         <div className="sidebar">
           <div className="panel">
             <div style={{ fontWeight: 700, color: "var(--text-strong)", marginBottom: 4 }}>
-              Quick Play
+              Test Engine
             </div>
             <div className="muted" style={{ fontSize: 14 }}>
               Two Stockfish engines playing in your browser — your CPU, not our servers.

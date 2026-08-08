@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { PlayerBar } from "@/components/PlayerBar";
+import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
+import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
 import { ensureBookLoaded } from "@/lib/browserBot";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { SERVER_WS } from "@/lib/config";
@@ -29,6 +31,10 @@ export function SeatGame({
   onDone,
   onResult,
   subtitle,
+  confirmStakes = false,
+  opponentPreview = null,
+  initialSecs,
+  incrementSecs,
 }: {
   gameId: string;
   token: string;
@@ -38,13 +44,37 @@ export function SeatGame({
   /** Fires once when the game ends — used by gauntlet/tournament to advance. */
   onResult?: (winner: "white" | "black" | null) => void;
   subtitle?: string;
+  /** Ask the player to confirm the stakes before this seat readies. Off for
+   *  the modes that dispatch games in batches (gauntlet, tournament rounds),
+   *  where a prompt per pairing would be a treadmill. */
+  confirmStakes?: boolean;
+  /** Who the matchmaker paired us with, for the confirmation prompt. The
+   *  socket only names the opponent in `game_start`, which the server holds
+   *  back until both seats ready — i.e. until after this prompt is answered. */
+  opponentPreview?: ConfirmOpponent;
+  initialSecs?: number | null;
+  incrementSecs?: number | null;
 }) {
   const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
   const [opponent, setOpponent] = useState<Opponent | null>(null);
   const [status, setStatus] = useState("loading engine…");
   const [settleStatus, setSettleStatus] = useState<string | null>(null);
+  // The seat's `ready` frame, parked until the player answers the prompt. The
+  // resolver lives in a ref (settling a promise isn't render-safe state) while
+  // the flag that shows the dialog is ordinary state.
+  const confirmResolve = useRef<((ok: boolean) => void) | null>(null);
+  const [prompting, setPrompting] = useState(false);
+  const [awaitingOpponent, setAwaitingOpponent] = useState(false);
+  const [declined, setDeclined] = useState(false);
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
+
+  /** Answer the parked prompt. Idempotent — the second call is a no-op. */
+  const settleConfirm = useCallback((ok: boolean) => {
+    confirmResolve.current?.(ok);
+    confirmResolve.current = null;
+    setPrompting(false);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,8 +118,21 @@ export function SeatGame({
         400,
         {
           onEvent: (m) => {
-            if (m?.type === "game_start" && m.opponent) setOpponent(m.opponent);
+            if (m?.type === "game_start") {
+              setAwaitingOpponent(false); // they readied too — we're live
+              if (m.opponent) setOpponent(m.opponent);
+            }
           },
+          // Resolved by the modal below. Skipped entirely when the player has
+          // opted out, so auto-accept costs nothing on the hot path.
+          confirmStart:
+            confirmStakes && !autoAcceptEnabled()
+              ? () =>
+                  new Promise<boolean>((resolve) => {
+                    confirmResolve.current = resolve;
+                    setPrompting(true);
+                  })
+              : undefined,
         },
         cancelledFn,
       );
@@ -105,7 +148,16 @@ export function SeatGame({
       seat?.close();
       engine?.dispose();
     };
-  }, [gameId, token, applyFrame]);
+  }, [gameId, token, applyFrame, confirmStakes]);
+
+  // A game can end before the prompt is answered — the server reaps a room
+  // whose seats never both readied. Take the prompt down rather than leave a
+  // dialog offering to start a game that no longer exists.
+  useEffect(() => {
+    if (!result) return;
+    setAwaitingOpponent(false);
+    settleConfirm(false);
+  }, [result, settleConfirm]);
 
   // Once a wagered game ends, poll the game's settlement status so the banner can
   // confirm "Settled ✓" (or surface a failure) instead of leaving the user
@@ -158,8 +210,31 @@ export function SeatGame({
   const oppCaptured = color === "white" ? mat.blackCaptured : mat.whiteCaptured;
   const myEdge = color === "white" ? mat.advantage : -mat.advantage;
 
+  const acceptConfirm = (autoFuture: boolean) => {
+    if (autoFuture) setAutoAccept(true);
+    settleConfirm(true);
+    setAwaitingOpponent(true);
+  };
+  const declineConfirm = () => {
+    settleConfirm(false);
+    setAwaitingOpponent(false);
+    setDeclined(true);
+  };
+
   return (
     <div className="game-wrap">
+      {(prompting || awaitingOpponent) && !result && (
+        <StakeConfirm
+          opponent={opponent ?? opponentPreview}
+          color={color}
+          stake={stake}
+          initialSecs={initialSecs}
+          incrementSecs={incrementSecs}
+          waiting={awaitingOpponent}
+          onAccept={acceptConfirm}
+          onDecline={declineConfirm}
+        />
+      )}
       <div className="board-col">
         <PlayerBar
           color={oppColor}
@@ -205,6 +280,17 @@ export function SeatGame({
             Status: {status}
           </div>
         </div>
+
+        {declined && !result && (
+          <div className="result-banner">
+            You passed on this one.
+            <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+              Stay on this page for a moment while the game is called off
+              {stake ? " and your stake comes back" : ""}. Leaving now hands your opponent a
+              forfeit{stake ? " — and the stake with it" : ""}.
+            </div>
+          </div>
+        )}
 
         {result && (
           <div className={`result-banner ${youWon ? "won" : youLost ? "lost" : ""}`}>
@@ -259,6 +345,11 @@ export function SeatGame({
           </div>
         </div>
 
+        {/* No early exit after declining, staked or not: leaving closes the
+            socket, and the server only voids a game whose seats are both still
+            attached — otherwise the opponent takes a forfeit win (and the
+            stake). Waiting the room out costs under a minute and keeps
+            "declined" from being recorded as a loss. */}
         {result && onDone && (
           <button className="primary" onClick={onDone}>
             Back to lobby

@@ -442,7 +442,7 @@ function TournamentClient() {
         <b style={{ color: "var(--text-strong)" }}>Tournaments</b>
         {tourneys.length === 0 ? (
           <div className="muted" style={{ marginTop: 8 }}>
-            None yet — create one above. Watch engines free in <Link href="/play">Quick Play</Link>.
+            None yet — create one above. Watch engines free in <Link href="/play">Test Engine</Link>.
           </div>
         ) : (
           <div className="tourney-list">

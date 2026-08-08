@@ -88,6 +88,24 @@ wallet.
   `deploy-server.sh` asserts the count and `singlenode.rs` pages on a sibling —
   but a bare `fly deploy` still re-adds it. Symptom to recognise: polling one
   endpoint returns two stable, alternating answers.
+- **Declining a game must not close the socket.** The lobby now gates a browser
+  seat's `ready` frame on a confirmation popup (`StakeConfirm.tsx` →
+  `playSeat({ confirmStart })`), which works because the server starts a game
+  only once BOTH seats ready. The catch is in how an unstarted room is reaped:
+  a seat that is still *attached* but never readied resolves as an abort (draw,
+  stake refunded), while a seat that is *gone* hands the opponent a forfeit win
+  and the whole stake (`room.rs reap_forfeit_winner`). So the decline path holds
+  the socket open and waits out the reap — closing it would confiscate the
+  stake of the player who chose not to play.
+- **A UCI engine will spend a fifth of a rapid clock on move 1.** Sudden-death
+  time management lets one unstable root eat several times the target: measured
+  against the real server, Stockfish 17 spent 20.5s on move 1 of a 10+0 game,
+  then hurried the rest and flagged. Long-running bots pass
+  `--max-move-ms` (`house-bot.sh` derives it as `initial/MOVE_BUDGET`), which
+  rides along as a `movetime` ceiling on the normal clock-based `go` — the
+  engine still shortens its own searches in time trouble. Both clients also set
+  `Move Overhead` (250ms), since the server charges wall-clock including the
+  round trip and the engine default of 10ms assumes a local opponent.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr` — which silently disabled the client's self-match

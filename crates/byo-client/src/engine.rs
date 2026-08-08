@@ -92,6 +92,13 @@ impl UciEngine {
             .await
     }
 
+    /// Did the engine advertise this option in its handshake? Option names are
+    /// case-sensitive in the UCI spec, but engines disagree in practice, so
+    /// compare loosely — a missed match would silently drop the setting.
+    pub fn supports_option(&self, name: &str) -> bool {
+        self.options.iter().any(|o| o.name.eq_ignore_ascii_case(name))
+    }
+
     /// Block until the engine reports `readyok`.
     pub async fn is_ready(&mut self) -> Result<()> {
         self.send("isready").await?;
@@ -110,6 +117,11 @@ impl UciEngine {
 
     /// Ask for the best move given the full UCI move history and clock state.
     /// Returns the chosen move in UCI long-algebraic notation.
+    ///
+    /// `cap_ms` adds a `movetime` ceiling on top of the clock. UCI allows both:
+    /// the engine still manages its own clock (and still moves fast when short
+    /// on time), it just may not exceed the cap on any single search. Left-hand
+    /// engines that ignore `movetime` simply behave as before.
     pub async fn best_move_with_clock(
         &mut self,
         moves_uci: &[String],
@@ -117,12 +129,14 @@ impl UciEngine {
         black_ms: u64,
         winc_ms: u64,
         binc_ms: u64,
+        cap_ms: Option<u64>,
     ) -> Result<String> {
         self.set_position(moves_uci).await?;
-        self.send(&format!(
-            "go wtime {white_ms} btime {black_ms} winc {winc_ms} binc {binc_ms}"
-        ))
-        .await?;
+        let mut go = format!("go wtime {white_ms} btime {black_ms} winc {winc_ms} binc {binc_ms}");
+        if let Some(cap) = cap_ms {
+            go.push_str(&format!(" movetime {cap}"));
+        }
+        self.send(&go).await?;
         self.read_best_move().await
     }
 
