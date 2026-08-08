@@ -18,6 +18,10 @@
 //! machine at `<app>.internal`, so a plain DNS lookup counts our siblings. No
 //! API token to provision, rotate, or leak.
 //!
+//! Scope: Fly's DNS lists only *running* machines, so a stopped extra machine
+//! is invisible here — `deploy-server.sh` counts those, and the two checks are
+//! complementary rather than redundant.
+//!
 //! **Deliberately not fail-closed.** Refusing to serve would be worse than the
 //! condition: a platform-wide restart would have every machine see its peers
 //! and take the whole site down, and a transient DNS answer could do the same.
