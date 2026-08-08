@@ -30,3 +30,8 @@ parking_lot = "0.12"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Test-only: `SettlementSink` is an `#[async_trait]` trait, so a test stub
+# implementing it needs the same attribute to desugar identically.
+async-trait = "0.1"
