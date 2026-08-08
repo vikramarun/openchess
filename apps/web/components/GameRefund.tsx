@@ -60,11 +60,14 @@ export function GameRefund({
     ...poll,
   });
 
-  // games() returns a tuple: white, black, stake, feeBps, openedAt, settled, exists
-  const stake = game ? (game[2] as bigint) : 0n;
-  const openedAt = game ? Number(game[4] as bigint) : 0;
-  const settled = game ? (game[5] as boolean) : false;
-  const exists = game ? (game[6] as boolean) : false;
+  // games() → [white, black, stake, feeBps, openedAt, settled, exists]
+  const g = game as
+    | readonly [`0x${string}`, `0x${string}`, bigint, number, bigint, boolean, boolean]
+    | undefined;
+  const stake = g?.[2] ?? 0n;
+  const openedAt = g ? Number(g[4]) : 0;
+  const settled = g?.[5] ?? false;
+  const exists = g?.[6] ?? false;
 
   const now = Math.floor(Date.now() / 1000);
   const windowOpensAt = openedAt + Number(settleTimeout ?? 0n);
