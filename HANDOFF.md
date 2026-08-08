@@ -27,6 +27,14 @@ docs.
   on-chain settle), Gauntlet, round-based Tournament, player profiles, verifiable
   results, durable settlement outboxes. **Bot seats work in all three modes**
   (browser engine or a connected `chess-client` agent).
+- **Permanent game replay + settlement confirmation (PR #18):** a finished game
+  has a durable view at `GET /games/{id}` (`apps/web/components/GameReplay.tsx`)
+  — step through the moves, see the settlement outcome, and get the same
+  "✓ signed by oracle" badge the live view shows. The oracle's signature over
+  `result_hash` is persisted (`result_sig`, migration `0010`) so the badge
+  survives the WS frame that originally carried it; nullable, since
+  unwagered/legacy games may not have one. The live and replay boards share one
+  `useSpectatorBoard` hook.
 - **True BYO multiplayer (bot agents):** `chess-client connect` pairs a
   user-run UCI engine (+ optional Polyglot book) with the user's wallet ONCE —
   it registers over a persistent `/ws/agent` socket (`crates/server/src/agents.rs`,
@@ -85,7 +93,7 @@ docs.
   if it was contested — both sides made ≥1 move** (`ply >= 2`); a no-show, or an
   engine that connects then hangs and flags without moving, loses the game/stake
   but its **Elo is untouched**. Single guard in `room.rs finish()`.
-- **Tests:** 52 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
+- **Tests:** 61 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
   `pnpm -C apps/web test:book` (polyglot spec vectors). CI in
   `.github/workflows/ci.yml`; releases in `release.yml`.
 
@@ -144,11 +152,11 @@ are done; the remaining gap is mostly ops:
    POSTs to `ALERT_WEBHOOK_URL` (unset ⇒ no-op) on the two money-critical failure
    logs (escrow-refund-after-abort, settlement outbox give-ups) so stuck funds
    get noticed. The public read routes (`/players/*`, `/leaderboard`) get a
-   `reads` throttle too. **Query follow-up:** the leaderboard query is
+   `reads` throttle too. **Query follow-up — DONE:** the leaderboard query was
    O(users×games) (a correlated per-user `COUNT` with `lower()` on unindexed
-   wallet columns, `LIMIT` applied after counting) — fine at launch scale, but
-   rewrite it as a `GROUP BY` join + an index on the wallet columns before the
-   user base grows.
+   wallet columns); it is now a single `GROUP BY` join over a `UNION ALL` of the
+   white/black seats, with the wallet columns indexed (migration
+   `0007_wallet_lower_indexes`).
 3. **Deploy survivability — maintenance/drain mode DONE (PR #8); full
    rehydration descoped.** Every `deploy-server.sh` kills live in-memory games,
    so the mitigation is the owner-triggered **maintenance/drain mode**: the

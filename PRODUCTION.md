@@ -15,7 +15,7 @@ honest checklist.
 
 ## What's already done for you (hardening)
 
-- **Contract** (`ChessEscrow.sol`, 22 Foundry tests): non-custodial bankroll +
+- **Contract** (`ChessEscrow.sol`, 25 Foundry tests): non-custodial bankroll +
   per-game escrow + tournament pool (direct + Merkle-claim), `Ownable2Step`,
   `Pausable`, EIP-712 results with `deadline` + fork-safe domain separator,
   SafeERC20-lite + deposit-by-delta, fee snapshot at open, replay guards,
@@ -76,8 +76,14 @@ honest checklist.
 - [ ] Set `REQUIRE_ONCHAIN=1` so a misconfigured node refuses to boot.
 
 ### 4. Observability
-- [ ] Put `/ready` (DB check) in the load-balancer health check; keep `/health`
-  for liveness.
+- [ ] Put `/ready` in the load-balancer health check; keep `/health` for
+  liveness. **Caveat — `/ready` cannot detect a *missing* database.** It pings
+  the DB only `if let Some(db)` (`main.rs` `ready()`), so a server booted with
+  no `DATABASE_URL` reports `200 ready` while running with no persistence and
+  **no settlement outbox worker** (started only when a DB exists). Set
+  `REQUIRE_ONCHAIN=1` — that is the check that actually fails closed on an
+  unset `DATABASE_URL` — and treat a `503` from `/leaderboard` as the real
+  signal that the DB is absent.
 - [~] **Alert on settlement failures and outbox depth/age.** `ALERT_WEBHOOK_URL`
   (unset ⇒ no-op) now fires a best-effort webhook on the two money-critical
   give-ups (escrow-refund-after-abort, settlement-outbox exhausted). Still add

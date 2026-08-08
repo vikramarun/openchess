@@ -444,12 +444,35 @@ where
     });
 }
 
-/// Readiness: distinct from liveness `/health` — checks the DB is reachable so a
-/// node that lost Postgres is pulled from the load balancer.
+/// Readiness: distinct from liveness `/health` — answers "should this node take
+/// traffic", so it must fail whenever the node is running but cannot honor its
+/// durability guarantee.
 async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode> {
-    if let Some(db) = &state.0.db {
-        if db.ping().await.is_err() {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
+    match &state.0.db {
+        // Configured: pull the node from the load balancer if Postgres is gone.
+        Some(db) => {
+            if db.ping().await.is_err() {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+        // No database at all. Fine for a casual-only node — nothing is at stake
+        // and in-memory state is the whole design. NOT fine once on-chain
+        // settlement is live: the settlement outbox workers are only spawned
+        // when a DB exists, so such a node accepts real wagers and settles them
+        // "best-effort inline" (see `room.rs finish()`) with no retry — one
+        // transient RPC failure strands the stake until the contract's
+        // claimTimeout. This branch used to fall through to `ready`, which is
+        // exactly how a production node ran without Postgres unnoticed: every
+        // health check was green while the durability guarantee was absent.
+        None => {
+            if state.0.settlement.is_onchain() {
+                tracing::error!(
+                    "not ready: on-chain settlement is configured but DATABASE_URL is unset — \
+                     no settlement outbox, so wagers would settle with no retry. Attach Postgres \
+                     (and set REQUIRE_ONCHAIN=1 to fail the boot instead of serving)."
+                );
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
         }
     }
     Ok("ready")
@@ -1244,13 +1267,23 @@ mod tests {
 
     /// Minimal in-memory state (no DB, log-only settlement) for guard tests.
     fn test_state(maintenance: bool, admin_wallet: Option<&str>) -> AppState {
+        test_state_with_settlement(maintenance, admin_wallet, Arc::new(ledger::LogSettlement))
+    }
+
+    /// As `test_state`, but with the settlement sink chosen by the caller — the
+    /// readiness guard keys off whether money is live, not just off the DB.
+    fn test_state_with_settlement(
+        maintenance: bool,
+        admin_wallet: Option<&str>,
+        settlement: Arc<dyn ledger::SettlementSink>,
+    ) -> AppState {
         let (cleanup_tx, _cleanup_rx) = mpsc::channel::<GameId>(8);
         let (results_tx, _results_rx) = mpsc::channel::<GameOutcome>(8);
         AppState(Arc::new(Inner {
             rooms: Mutex::new(HashMap::new()),
             live_games: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
-            settlement: Arc::new(ledger::LogSettlement),
+            settlement,
             db: None,
             maintenance: AtomicBool::new(maintenance),
             admin_wallet: Mutex::new(admin_wallet.map(|w| w.to_lowercase())),
@@ -1273,6 +1306,51 @@ mod tests {
         initial_ms: 60_000,
         increment_ms: 0,
     };
+
+    /// Claims to settle on-chain without touching a chain, so the readiness
+    /// test can cover the dangerous combination: money live, durability absent.
+    struct OnchainStub;
+
+    #[async_trait::async_trait]
+    impl ledger::SettlementSink for OnchainStub {
+        async fn open_escrow(
+            &self,
+            _game_id: Uuid,
+            _white: Address,
+            _black: Address,
+            _stake: U256,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn report_result(
+            &self,
+            _game_id: Uuid,
+            _winner: Option<Address>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn is_onchain(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_wagering_is_live_but_there_is_no_db() {
+        // The state production actually ran in: wager_enabled, no Postgres, so
+        // no settlement outbox worker. This must NOT report ready.
+        let state = test_state_with_settlement(false, None, Arc::new(OnchainStub));
+        let result = ready(State(state)).await;
+        assert_eq!(result.err(), Some(StatusCode::SERVICE_UNAVAILABLE));
+    }
+
+    #[tokio::test]
+    async fn ready_ok_for_a_casual_only_node_without_a_db() {
+        // Negative control: a DB-less node is legitimate when nothing is at
+        // stake (local dev, casual-only deploys) — the guard keys off money
+        // being live, not off the DB alone, so this must still be ready.
+        let state = test_state(false, None);
+        assert!(ready(State(state)).await.is_ok());
+    }
 
     #[tokio::test]
     async fn maintenance_blocks_new_games() {
