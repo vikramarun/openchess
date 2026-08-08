@@ -36,10 +36,16 @@ primary_region = "iad"
   # Chain used for SIWE + escrow. Only matters once you enable wagering — flip to
   # "84532" when you wager on Base Sepolia. (8453 = Base mainnet.)
   SIWE_CHAIN_ID = "8453"
-  # REQUIRE_ONCHAIN is intentionally OFF while testing (casual play only). Turn it
-  # on ("1") only once DATABASE_URL + RPC_URL + ESCROW_ADDR + ORACLE_KEY are all
-  # set — it fails the boot otherwise (see main.rs REQUIRE_ONCHAIN).
-  # REQUIRE_ONCHAIN = "1"
+  # Refuse to boot unless DATABASE_URL + RPC_URL + ESCROW_ADDR + ORACLE_KEY and
+  # SIWE_DOMAIN/WEB_ORIGIN are all set (see main.rs REQUIRE_ONCHAIN). Enabled
+  # because the failure it prevents already happened: the server ran for a
+  # while with no DATABASE_URL, which meant no persistence and — because the
+  # settlement outbox workers only spawn when a DB exists — no durable
+  # settlement, while still accepting real wagers. Nothing surfaced it, since
+  # /health and /ready both reported OK.
+  #
+  # Turn this OFF only for a deliberately casual-only node (no wagering).
+  REQUIRE_ONCHAIN = "1"
 
 # Secrets (NOT in this file — set via `fly secrets set` / `fly postgres attach`):
 #   DATABASE_URL   (from `fly postgres attach`)
