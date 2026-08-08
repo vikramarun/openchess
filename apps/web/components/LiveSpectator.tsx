@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { EvalToggle } from "@/components/EvalBar";
+import { MoveList, MoveNav } from "@/components/MoveNav";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { shortAddress } from "@/lib/address";
@@ -11,6 +13,8 @@ import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc } from "@/lib/escrow";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
+import { useEval, useEvalPref } from "@/lib/useEval";
+import { usePlyNav } from "@/lib/usePlyNav";
 import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
 import { shortAddr } from "@/lib/verify";
 
@@ -33,13 +37,22 @@ function seatName(name: string | null, addr: string | null): string {
   return "Engine";
 }
 
-/** Watch an in-progress game over a read-only spectator socket. When it ends the
- *  banner offers a move-by-move Review (a reload re-enters `/game/[id]` in replay
- *  mode, now that the game is finished). */
+/** Watch an in-progress game over a read-only spectator socket. The board is
+ *  navigable while the game runs — stepping back doesn't stop the stream, and
+ *  the "Live" pill returns to the newest position. When it ends the banner
+ *  offers a move-by-move Review (a reload re-enters `/game/[id]` in replay mode,
+ *  now that the game is finished). */
 export function LiveSpectator({ id }: { id: string }) {
-  const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
+  const { fen, moves, frames, clock, result, verified, applyFrame } = useSpectatorBoard();
   const [status, setStatus] = useState("connecting…");
   const [meta, setMeta] = useState<Meta | null>(null);
+
+  // Navigate the game while it is still being played; `nav.live` means we're
+  // showing the newest position (so clocks and the turn indicator are current).
+  const nav = usePlyNav(frames.length - 1);
+  const view = frames[nav.at];
+  const [evalOn, setEvalOn] = useEvalPref();
+  const engineEval = useEval(view.fen, evalOn);
 
   // Fetch the live-game metadata so the spectator sees who's playing, the stake,
   // and the time control — not just a bare game id. A game only appears in
@@ -101,8 +114,12 @@ export function LiveSpectator({ id }: { id: string }) {
     : null;
 
   const live = !result && status === "watching";
+  // The name-plates describe the LIVE game — clock and whose turn it is — and
+  // stay put while you scrub; only the board, material and eval follow the ply
+  // you're looking at. (This is also why there's no per-ply clock here: the
+  // live stream doesn't carry clock history. See BoardFrame.)
   const turn = sideToMoveFromFen(fen);
-  const mat = material(fen);
+  const mat = material(view.fen);
   const tc = meta ? tcLabel(meta.initial_secs, meta.increment_secs) : null;
 
   return (
@@ -123,7 +140,14 @@ export function LiveSpectator({ id }: { id: string }) {
             captured={mat.blackCaptured}
             edge={-mat.advantage}
           />
-          <Chessboard fen={fen} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+          <Chessboard
+            fen={view.fen}
+            lastMove={lastMoveFromUci(view.lastUci)}
+            check={view.check}
+            showEval={evalOn && !engineEval.failed}
+            evalScore={engineEval.score}
+            evalThinking={engineEval.thinking}
+          />
           <PlayerBar
             color="white"
             name={meta ? seatName(meta.white_name, meta.white) : "White"}
@@ -133,6 +157,18 @@ export function LiveSpectator({ id }: { id: string }) {
             captured={mat.whiteCaptured}
             edge={mat.advantage}
           />
+          {nav.total > 0 && (
+            <MoveNav
+              at={nav.at}
+              total={nav.total}
+              mode={result ? "replay" : "live"}
+              live={nav.live}
+              onFirst={nav.first}
+              onPrev={nav.prev}
+              onNext={nav.next}
+              onLast={nav.last}
+            />
+          )}
         </div>
 
         <div className="sidebar">
@@ -173,6 +209,12 @@ export function LiveSpectator({ id }: { id: string }) {
                 <>Loading game details…</>
               )}
             </div>
+            <EvalToggle
+              on={evalOn}
+              onChange={setEvalOn}
+              loading={engineEval.loading}
+              failed={engineEval.failed}
+            />
           </div>
 
           {result && (
@@ -196,21 +238,9 @@ export function LiveSpectator({ id }: { id: string }) {
 
           <div className="panel">
             <div className="muted" style={{ marginBottom: 8 }}>
-              Moves
+              Moves {!nav.live && <span className="behind">· viewing move {nav.at}</span>}
             </div>
-            <div className="moves">
-              {moves.length === 0 && <span className="muted">waiting…</span>}
-              {moves.map((san, i) =>
-                i % 2 === 0 ? (
-                  <span key={i}>
-                    <span className="num">{i / 2 + 1}.</span>
-                    {san}{" "}
-                  </span>
-                ) : (
-                  <span key={i}>{san} </span>
-                )
-              )}
-            </div>
+            <MoveList sans={moves} at={nav.at} onSelect={nav.go} emptyText="waiting…" />
           </div>
         </div>
       </div>

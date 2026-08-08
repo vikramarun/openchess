@@ -7,12 +7,16 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { EvalToggle } from "@/components/EvalBar";
+import { MoveList, MoveNav } from "@/components/MoveNav";
 import { PlayerBar } from "@/components/PlayerBar";
 import { shortAddress } from "@/lib/address";
-import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { lastMoveFromUci, material } from "@/lib/board";
 import { fmtUsdc } from "@/lib/escrow";
 import type { GameDetail } from "@/lib/gameApi";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
+import { useEval, useEvalPref } from "@/lib/useEval";
+import { usePlyNav } from "@/lib/usePlyNav";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
 /** Best display name for a seat: short wallet, else "Engine" (casual). */
@@ -45,8 +49,14 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
   }, [detail]);
 
   const total = detail.moves.length;
-  const [ply, setPly] = useState(total); // start at the final position
-  const at = Math.min(Math.max(ply, 0), total);
+  // Shared with the live spectator, so navigation behaves identically in both
+  // (including ←/→/Home/End). A finished game starts at the final position.
+  const nav = usePlyNav(total);
+  const at = nav.at;
+
+  const [evalOn, setEvalOn] = useEvalPref();
+  const fen = frames.fens[at];
+  const engineEval = useEval(fen, evalOn);
 
   // Verify the oracle signature over the result commitment, so the permanent
   // replay shows the same "provably fair" badge the live/seat views show.
@@ -65,25 +75,6 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
     };
   }, [detail.result_hash, detail.result_sig]);
 
-  // Keyboard navigation.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Don't hijack keys while the user is typing in a field.
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if (e.key === "ArrowLeft") setPly((p) => Math.max(0, p - 1));
-      else if (e.key === "ArrowRight") setPly((p) => Math.min(total, p + 1));
-      else if (e.key === "Home") setPly(0);
-      else if (e.key === "End") setPly(total);
-      else return;
-      e.preventDefault();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [total]);
-
-  const fen = frames.fens[at];
-  const turn = sideToMoveFromFen(fen);
   const mat = material(fen);
   // Clocks: the initial time before move 1, else the clock after the played move.
   const clock =
@@ -142,7 +133,14 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
             captured={mat.blackCaptured}
             edge={-mat.advantage}
           />
-          <Chessboard fen={fen} lastMove={frames.lastMoves[at]} check={frames.checks[at]} />
+          <Chessboard
+            fen={fen}
+            lastMove={frames.lastMoves[at]}
+            check={frames.checks[at]}
+            showEval={evalOn && !engineEval.failed}
+            evalScore={engineEval.score}
+            evalThinking={engineEval.thinking}
+          />
           <PlayerBar
             color="white"
             name={seatName(detail.white)}
@@ -151,27 +149,14 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
             edge={mat.advantage}
           />
           {/* Replay transport */}
-          <div className="replay-nav" role="group" aria-label="Replay controls">
-            <button onClick={() => setPly(0)} disabled={at === 0} aria-label="Start">
-              ⏮
-            </button>
-            <button onClick={() => setPly((p) => Math.max(0, p - 1))} disabled={at === 0} aria-label="Previous move">
-              ◀
-            </button>
-            <span className="replay-count">
-              {at} / {total}
-            </span>
-            <button
-              onClick={() => setPly((p) => Math.min(total, p + 1))}
-              disabled={at === total}
-              aria-label="Next move"
-            >
-              ▶
-            </button>
-            <button onClick={() => setPly(total)} disabled={at === total} aria-label="End">
-              ⏭
-            </button>
-          </div>
+          <MoveNav
+            at={at}
+            total={total}
+            onFirst={nav.first}
+            onPrev={nav.prev}
+            onNext={nav.next}
+            onLast={nav.last}
+          />
         </div>
 
         <div className="sidebar">
@@ -191,6 +176,12 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
               {" · "}
               {tc} {TC_NAME[tc] ?? ""}
             </div>
+            <EvalToggle
+              on={evalOn}
+              onChange={setEvalOn}
+              loading={engineEval.loading}
+              failed={engineEval.failed}
+            />
           </div>
 
           <div className={`result-banner ${settleLine?.cls ?? ""}`}>
@@ -212,20 +203,12 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
             <div className="muted" style={{ marginBottom: 8 }}>
               Moves
             </div>
-            <div className="moves">
-              {total === 0 && <span className="muted">No moves recorded.</span>}
-              {detail.moves.map((m, i) => (
-                <span key={i}>
-                  {i % 2 === 0 && <span className="num">{i / 2 + 1}.</span>}
-                  <button
-                    className={`move-btn${at === i + 1 ? " active" : ""}`}
-                    onClick={() => setPly(i + 1)}
-                  >
-                    {m.san}
-                  </button>{" "}
-                </span>
-              ))}
-            </div>
+            <MoveList
+              sans={detail.moves.map((m) => m.san)}
+              at={at}
+              onSelect={nav.go}
+              emptyText="No moves recorded."
+            />
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>

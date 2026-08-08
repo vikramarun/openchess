@@ -4,12 +4,33 @@ import { Chess } from "chessops/chess";
 import { INITIAL_FEN, makeFen } from "chessops/fen";
 import { makeSanAndPlay } from "chessops/san";
 import { parseUci } from "chessops/util";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { verifyResultSig, type Verification } from "@/lib/verify";
 
 export type SpectatorClock = { white_ms: number; black_ms: number; increment_ms?: number };
 export type SpectatorResult = { winner: "white" | "black" | null; reason: string };
+
+/** One position in the game so far. Index = ply (0 is the starting position),
+ *  which is what lets a spectator step back and forth through a game that is
+ *  still being played.
+ *
+ *  Deliberately no per-ply clock: a spectator who joins mid-game is replayed the
+ *  history with the CURRENT clock stamped on every historical move
+ *  (`handle_spectator` in the server's ws.rs), so a "clock at ply N" read off
+ *  these frames would be fiction. The live view therefore shows the live clock
+ *  regardless of the ply you're viewing; the finished-game replay gets real
+ *  per-move clocks from the database. */
+export type BoardFrame = {
+  fen: string;
+  /** UCI of the move that produced this position (null at ply 0). */
+  lastUci: string | null;
+  /** SAN of that same move (null at ply 0). */
+  san: string | null;
+  check: "white" | "black" | null;
+};
+
+const START: BoardFrame = { fen: INITIAL_FEN, lastUci: null, san: null, check: null };
 
 /** Board state + the WS-frame reducer shared by the wager view (SeatGame) and
  *  the spectator page (LiveSpectator). This owns the move-application logic (the
@@ -18,12 +39,13 @@ export type SpectatorResult = { winner: "white" | "black" | null; reason: string
  *  caller keeps its own socket, status, and terminal `finished` flag (their
  *  lifecycles genuinely differ: SeatGame also drives an engine seat), and feeds
  *  frames in via `applyFrame`. game_over is signalled back through `onGameOver`
- *  so the caller can stop reconnecting / advance its mode. */
+ *  so the caller can stop reconnecting / advance its mode.
+ *
+ *  Every position is retained (`frames`), not just the newest one, so a viewer
+ *  can navigate the game while it is still running (see lib/usePlyNav.ts). The
+ *  top-level `fen`/`lastUci`/`inCheck` always describe the live tip. */
 export function useSpectatorBoard() {
-  const [fen, setFen] = useState(INITIAL_FEN);
-  const [moves, setMoves] = useState<string[]>([]);
-  const [lastUci, setLastUci] = useState<string | null>(null);
-  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
+  const [frames, setFrames] = useState<BoardFrame[]>([START]);
   const [clock, setClock] = useState<SpectatorClock | null>(null);
   const [result, setResult] = useState<SpectatorResult | null>(null);
   const [verified, setVerified] = useState<Verification | null>(null);
@@ -43,10 +65,7 @@ export function useSpectatorBoard() {
         switch (m.type) {
           case "game_start":
             pos.current = Chess.default();
-            setFen(INITIAL_FEN);
-            setMoves([]);
-            setLastUci(null);
-            setInCheck(null);
+            setFrames([START]);
             setResult(null);
             if (m.clock) setClock(m.clock);
             break;
@@ -56,10 +75,13 @@ export function useSpectatorBoard() {
             // malformed frame can't corrupt the board or throw.
             if (mv && pos.current.isLegal(mv)) {
               const san = makeSanAndPlay(pos.current, mv);
-              setFen(makeFen(pos.current.toSetup()));
-              setMoves((x) => [...x, san]);
-              setLastUci(m.uci);
-              setInCheck(pos.current.isCheck() ? pos.current.turn : null);
+              const next: BoardFrame = {
+                fen: makeFen(pos.current.toSetup()),
+                lastUci: m.uci,
+                san,
+                check: pos.current.isCheck() ? pos.current.turn : null,
+              };
+              setFrames((f) => [...f, next]);
             }
             if (m.clock) setClock(m.clock);
             break;
@@ -80,5 +102,21 @@ export function useSpectatorBoard() {
     [],
   );
 
-  return { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame };
+  const tip = frames[frames.length - 1];
+  const moves = useMemo(() => frames.slice(1).map((f) => f.san ?? ""), [frames]);
+
+  return {
+    /** Live position (the newest frame). */
+    fen: tip.fen,
+    lastUci: tip.lastUci,
+    inCheck: tip.check,
+    /** SAN move list. */
+    moves,
+    /** Every position so far; index = ply. */
+    frames,
+    clock,
+    result,
+    verified,
+    applyFrame,
+  };
 }

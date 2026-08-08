@@ -595,6 +595,78 @@ pre {
 .board-wrap {
   width: 100%;
 }
+/* Board + (optional) eval bar. Stretch makes the bar exactly board-height. */
+.board-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.board-row .board-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* ---------- evaluation bar ---------- */
+.eval-bar {
+  position: relative;
+  flex: 0 0 22px;
+  width: 22px;
+}
+.eval-track {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #3a3835; /* black's share */
+}
+/* White's share grows from white's end of the board, so it flips with orientation. */
+.eval-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #eeeeec;
+  transition: height 0.35s ease;
+}
+.eval-bar.flipped .eval-fill {
+  bottom: auto;
+  top: 0;
+}
+.eval-num {
+  position: absolute;
+  bottom: 3px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+  color: var(--text-strong);
+  pointer-events: none;
+}
+.eval-bar.flipped .eval-num {
+  bottom: auto;
+  top: 3px;
+}
+.eval-num.on-white {
+  color: #2b2a27;
+}
+.eval-num.thinking {
+  opacity: 0.6;
+}
+.eval-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.eval-toggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 .board-col {
   display: flex;
   flex-direction: column;
@@ -804,6 +876,22 @@ pre {
   min-width: 60px;
   text-align: center;
   font-size: 13px;
+}
+/* "Live" pill — replaces skip-to-end while a game is still running. */
+.replay-nav button.live-jump {
+  color: var(--accent-hover);
+  border-color: #62992466;
+  font-weight: 700;
+}
+.replay-nav button.live-jump.on {
+  color: var(--muted);
+  border-color: var(--border);
+  font-weight: 400;
+  opacity: 1; /* "already live" reads as a state, not a dead control */
+}
+/* "viewing move N" note when a spectator has scrubbed back off the tip. */
+.behind {
+  color: var(--accent-hover);
 }
 .result-banner {
   text-align: center;
