@@ -1,10 +1,19 @@
 # Fly config for the OpenChess **house bot** — a separate app from the game
 # server (fly.toml). It keeps the park populated so the lobby is never empty.
 #
-#   fly launch --no-deploy --copy-config --config fly.housebot.toml --ha=false
-#   fly secrets set -a openchess-housebot OPENCHESS_WALLET_KEY=0x...  # UNFUNDED!
+#   fly apps create openchess-housebot --org personal
+#   fly secrets set --stage -a openchess-housebot OPENCHESS_WALLET_KEY=0x...
 #   fly deploy --config fly.housebot.toml --ha=false
 #   fly scale count 1 -a openchess-housebot
+#
+# `--stage` is load-bearing on the FIRST secret. Without it `fly secrets set`
+# tries to push the value straight to running machines, and this app has none
+# yet, so it fails with "could not create a fly.toml from any machines / No
+# machines configured for this app". Staging stores the secret and lets the
+# first `fly deploy` create the machine with it already in the environment —
+# which is the order you want anyway, since house-bot.sh exits immediately
+# without OPENCHESS_WALLET_KEY and would otherwise crash-loop the machine.
+# (`fly secrets deploy` hits the same no-machines wall; just deploy.)
 #
 # Run exactly ONE machine. The script already runs one autopilot per time
 # control; a second machine would post a duplicate challenge per tile under the

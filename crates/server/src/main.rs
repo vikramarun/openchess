@@ -1142,6 +1142,34 @@ impl AppState {
         self.0.auth.wallet_for_token(token)
     }
 
+    /// Like `authed_wallet`, but tells "no credential offered" apart from "a
+    /// credential was offered and it is not valid".
+    ///
+    /// Silently downgrading a stale token to anonymous is a footgun on routes
+    /// where auth is optional. An autopilot posts what it believes is a
+    /// wallet-bound challenge; the session has since expired (they live in
+    /// this process's memory, so any restart voids them); the server records
+    /// no `poster_addr`; and the client's own self-match guard — which keys on
+    /// `poster_addr` — then fails open against its own offer. Observed in
+    /// production as the house bot repeatedly joining its own challenge and
+    /// having the game rejected for same-wallet seats. Fail loudly instead, so
+    /// the caller re-authenticates rather than posting as a stranger.
+    pub fn authed_wallet_strict(&self, headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
+        let Some(value) = headers.get("authorization") else {
+            return Ok(None); // genuinely anonymous — legitimate for casual play
+        };
+        let token = value
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        self.0
+            .auth
+            .wallet_for_token(token)
+            .map(Some)
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+
     /// Whether the server is in maintenance/drain mode (no new games).
     pub fn maintenance_on(&self) -> bool {
         self.0.maintenance.load(Ordering::Relaxed)
@@ -1332,6 +1360,45 @@ mod tests {
         fn is_onchain(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn strict_auth_rejects_a_stale_bearer_instead_of_going_anonymous() {
+        // Regression: a session dies whenever the server restarts (they live
+        // in this process's memory). The old behaviour treated the stale token
+        // as "no credential" and recorded a casual offer with no poster, which
+        // made the client's `poster_addr` self-match guard fail open — the
+        // house bot then repeatedly joined its own challenge.
+        let state = test_state(false, None);
+        let mut h = HeaderMap::new();
+        h.insert(
+            "authorization",
+            "Bearer not-a-real-session".parse().unwrap(),
+        );
+        assert_eq!(
+            state.authed_wallet_strict(&h).err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn strict_auth_still_allows_a_genuinely_anonymous_caller() {
+        // Negative control: casual play without signing in must keep working,
+        // or we'd lock out every browser visitor who never connected a wallet.
+        let state = test_state(false, None);
+        assert_eq!(state.authed_wallet_strict(&HeaderMap::new()), Ok(None));
+    }
+
+    #[test]
+    fn strict_auth_accepts_a_live_session() {
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert_eq!(
+            state.authed_wallet_strict(&h),
+            Ok(Some("0xabc".to_string()))
+        );
     }
 
     #[tokio::test]

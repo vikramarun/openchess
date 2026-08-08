@@ -54,14 +54,7 @@ pub async fn run_connect(opts: ConnectOpts) -> Result<()> {
 
     // A bot is always wallet-bound: its games count toward a profile and may
     // carry stakes, so anonymous bots don't exist.
-    let session = resolve_session(&client, &http, opts.auth_token.clone(), opts.code.clone())
-        .await?
-        .ok_or_else(|| {
-            anyhow!(
-                "connecting a bot requires your wallet: pass --code (from the web app's \
-                 Connect page), --auth-token, or set OPENCHESS_WALLET_KEY"
-            )
-        })?;
+    let session = sign_in(&client, &http, &opts).await?;
     println!("signed in as {}", session.address);
 
     // Probe the engine once: verify it runs, and collect its identity and UCI
@@ -87,10 +80,61 @@ pub async fn run_connect(opts: ConnectOpts) -> Result<()> {
     };
 
     if opts.auto {
-        run_autopilot(&client, &http, &opts, &session, &engine_name, book).await
+        run_autopilot(&client, &http, &opts, session, &engine_name, book).await
     } else {
         run_agent(&http, &opts, &session, &engine_name, engine_options, book).await
     }
+}
+
+/// Sign in, retrying a failure a few times before giving up.
+///
+/// A transient sign-in failure used to kill the process. Under a supervisor
+/// (`scripts/house-bot.sh` runs four of these side by side) that is worse than
+/// it sounds: the replacement process posts a *fresh* challenge while the dead
+/// one's challenge stays in the park for its full TTL, since only the SIGTERM
+/// path withdraws offers and a crash never reaches it. The park fills with
+/// ghost offers from the same wallet, which the autopilots then match against
+/// each other. Retrying in place keeps one identity and one standing offer.
+///
+/// Bounded rather than infinite: a wrong key or a domain mismatch fails the
+/// same way every time, and exiting lets the supervisor surface it.
+async fn sign_in(client: &reqwest::Client, http: &str, opts: &ConnectOpts) -> Result<Session> {
+    const ATTEMPTS: u32 = 5;
+    let mut backoff = 2u64;
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 1..=ATTEMPTS {
+        match resolve_session(client, http, opts.auth_token.clone(), opts.code.clone()).await {
+            // No credential configured at all is a usage error, not a
+            // transient one — retrying can't conjure a wallet.
+            Ok(None) => {
+                return Err(anyhow!(
+                    "connecting a bot requires your wallet: pass --code (from the web app's \
+                     Connect page), --auth-token, or set OPENCHESS_WALLET_KEY"
+                ))
+            }
+            Ok(Some(s)) => return Ok(s),
+            Err(e) => {
+                if attempt < ATTEMPTS {
+                    eprintln!("sign-in failed ({e:#}); retrying in {backoff}s");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(30);
+                }
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap().context("sign-in failed after retries"))
+}
+
+/// Did this failure come back as HTTP 401? A session lives in the server's
+/// memory, so any restart there voids it while this process is still holding
+/// it — worth re-authenticating for rather than retrying the same dead token.
+fn is_unauthorized(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .and_then(|re| re.status())
+            .is_some_and(|s| s == reqwest::StatusCode::UNAUTHORIZED)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -267,10 +311,13 @@ async fn run_autopilot(
     client: &reqwest::Client,
     http: &str,
     opts: &ConnectOpts,
-    session: &Session,
+    session: Session,
     engine_name: &str,
     book: Option<Arc<OpeningBook>>,
 ) -> Result<()> {
+    // Owned + mutable: the server keeps sessions in memory, so a restart there
+    // voids ours mid-run and we re-authenticate in place rather than dying.
+    let mut session = session;
     let ws = ws_base(http);
     if opts.stake.is_some() {
         println!(
@@ -311,18 +358,35 @@ async fn run_autopilot(
 
         // Transient server/network errors must not kill the autopilot (an
         // exit strands the posted offer for its 1h TTL) — log and retry.
-        let seat = match find_and_accept(client, http, opts, session, engine_name).await {
-            Ok(Some(seat)) => Some(seat),
-            Ok(None) => {
-                match post_and_wait(client, http, opts, session, engine_name, &posted).await {
-                    Ok(seat) => seat,
+        let attempt =
+            match find_and_accept(client, http, opts, &session, engine_name, &posted).await {
+                Ok(Some(seat)) => Ok(Some(seat)),
+                Ok(None) => post_and_wait(client, http, opts, &session, engine_name, &posted).await,
+                Err(e) => Err(e),
+            };
+        let seat = match attempt {
+            Ok(seat) => seat,
+            // A 401 means our session is gone (the server holds them in
+            // memory, so its restart voids ours). Retrying the same dead token
+            // would spin forever, so mint a new one and rescan. Without this
+            // the server's strict-auth rejection would just stall the bot.
+            Err(e) if is_unauthorized(&e) => {
+                eprintln!("session rejected; re-authenticating…");
+                match sign_in(client, http, opts).await {
+                    Ok(s) => {
+                        println!("signed in as {}", s.address);
+                        session = s;
+                    }
+                    // Can't re-auth (a --code is single-use, so this is
+                    // terminal for that flow) — back off and let the loop or
+                    // the supervisor decide.
                     Err(e) => {
-                        eprintln!("matchmaking error: {e:#}; retrying in {backoff}s");
+                        eprintln!("re-authentication failed: {e:#}; retrying in {backoff}s");
                         tokio::time::sleep(Duration::from_secs(backoff)).await;
                         backoff = (backoff * 2).min(60);
-                        continue;
                     }
                 }
+                continue;
             }
             Err(e) => {
                 eprintln!("matchmaking error: {e:#}; retrying in {backoff}s");
@@ -383,7 +447,7 @@ fn auth_rb(rb: reqwest::RequestBuilder, session: &Session) -> reqwest::RequestBu
 
 /// An open offer is compatible when its stake and time control match ours and
 /// it wasn't posted by us.
-fn compatible(o: &Value, opts: &ConnectOpts, my_addr: &str) -> bool {
+fn compatible(o: &Value, opts: &ConnectOpts, my_addr: &str, my_offer: Option<&str>) -> bool {
     let stake_matches = match (&opts.stake, o["stake"].as_str()) {
         (None, None) => true,
         (Some(want), Some(have)) => want == have,
@@ -391,11 +455,23 @@ fn compatible(o: &Value, opts: &ConnectOpts, my_addr: &str) -> bool {
     };
     let tc_matches = o["initial_secs"].as_u64() == Some(opts.initial_secs)
         && o["increment_secs"].as_u64() == Some(opts.increment_secs);
-    let not_mine = match o["poster_addr"].as_str() {
+    // The wallet check only helps when the server publishes a poster: it is
+    // null on casual offers, where this deliberately fails OPEN so an
+    // unauthenticated poster is still matchable.
+    let not_my_wallet = match o["poster_addr"].as_str() {
         Some(poster) => !poster.eq_ignore_ascii_case(my_addr),
         None => true,
     };
-    stake_matches && tc_matches && not_mine
+    // ...which is why the offer id is the check that actually stops us taking
+    // our OWN challenge. Failing open above meant an autopilot re-scanning
+    // after a game found the offer it had just posted, joined it, and got the
+    // game rejected for same-wallet seats — then reposted, forever. The park
+    // looked empty because the bot kept eating its own challenge.
+    let not_my_own_post = match (my_offer, o["offer_id"].as_str()) {
+        (Some(mine), Some(id)) => mine != id,
+        _ => true,
+    };
+    stake_matches && tc_matches && not_my_wallet && not_my_own_post
 }
 
 /// Scan the park for a compatible open challenge and try to take it. Returns
@@ -406,6 +482,7 @@ async fn find_and_accept(
     opts: &ConnectOpts,
     session: &Session,
     engine_name: &str,
+    posted: &PostedOffer,
 ) -> Result<Option<(String, String, &'static str)>> {
     let offers: Vec<Value> = client
         .get(format!("{http}/park/offers"))
@@ -414,9 +491,12 @@ async fn find_and_accept(
         .error_for_status()?
         .json()
         .await?;
+    // Snapshot (don't hold the lock across the scan) the challenge we still
+    // have standing, so we never take our own.
+    let my_offer = posted.lock().unwrap().as_ref().map(|(id, _)| id.clone());
     let Some(offer) = offers
         .iter()
-        .find(|o| compatible(o, opts, &session.address))
+        .find(|o| compatible(o, opts, &session.address, my_offer.as_deref()))
     else {
         return Ok(None);
     };
@@ -530,10 +610,11 @@ async fn post_and_wait(
             Ok(r) => r.json().await.unwrap_or_default(),
             Err(_) => continue,
         };
-        let foreign = offers.iter().find(|c| {
-            c["offer_id"].as_str() != Some(offer_id.as_str())
-                && compatible(c, opts, &session.address)
-        });
+        // `compatible` now owns the "not our own challenge" check, so the id
+        // guard that used to live here isn't duplicated.
+        let foreign = offers
+            .iter()
+            .find(|c| compatible(c, opts, &session.address, Some(offer_id.as_str())));
         let Some(foreign) = foreign else { continue };
 
         // Withdraw ours first so we never hold two boards at once. A 409 means
@@ -549,5 +630,84 @@ async fn post_and_wait(
         let foreign_id = foreign["offer_id"].as_str().unwrap_or_default().to_string();
         println!("switching to a newly posted challenge…");
         return accept_offer(client, http, &foreign_id, opts, session, engine_name).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn opts() -> ConnectOpts {
+        ConnectOpts {
+            http_server: "http://localhost:8080".into(),
+            name: None,
+            engine_path: "stockfish".into(),
+            engine_args: vec![],
+            book_path: None,
+            book_max_ply: 0,
+            uci_options: vec![],
+            auth_token: None,
+            code: None,
+            auto: true,
+            stake: None,
+            initial_secs: 180,
+            increment_secs: 0,
+            games: 0,
+        }
+    }
+
+    /// A casual offer carries no `poster_addr` — the shape the house bot posts,
+    /// and the reason the wallet check alone can't tell ours from a stranger's.
+    fn casual_offer(id: &str) -> Value {
+        json!({
+            "offer_id": id,
+            "poster_addr": Value::Null,
+            "poster_name": "House Bot",
+            "stake": Value::Null,
+            "initial_secs": 180,
+            "increment_secs": 0,
+        })
+    }
+
+    #[test]
+    fn does_not_take_its_own_casual_challenge() {
+        // Regression: the autopilot re-scans the park after each game. It used
+        // to find the challenge it had just posted (poster_addr null → the
+        // wallet check fails open), join it, and have the game rejected for
+        // same-wallet seats — then repost, forever, leaving the park empty.
+        assert!(!compatible(
+            &casual_offer("mine"),
+            &opts(),
+            "0xabc",
+            Some("mine")
+        ));
+    }
+
+    #[test]
+    fn still_takes_a_strangers_casual_challenge() {
+        // Negative control: the id guard must not make casual offers
+        // unmatchable, or the autopilot would never pair with a real visitor.
+        assert!(compatible(
+            &casual_offer("theirs"),
+            &opts(),
+            "0xabc",
+            Some("mine")
+        ));
+    }
+
+    #[test]
+    fn still_skips_a_foreign_offer_at_another_time_control() {
+        let mut o = casual_offer("theirs");
+        o["initial_secs"] = json!(600);
+        assert!(!compatible(&o, &opts(), "0xabc", Some("mine")));
+    }
+
+    #[test]
+    fn skips_our_own_wallet_when_the_server_does_publish_it() {
+        // The wallet check still earns its keep on authed/staked offers.
+        let mut o = casual_offer("theirs");
+        o["poster_addr"] = json!("0xABC");
+        assert!(!compatible(&o, &opts(), "0xabc", Some("mine")));
     }
 }
