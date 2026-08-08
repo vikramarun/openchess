@@ -14,10 +14,74 @@ const ENGINE_URL = "/stockfish-18-lite-single.js";
  *  at longer time controls; two engines run at once on the self-play page. */
 const HASH_MB = 64;
 
+/** One `info` line from a search, as the engine reports it: the score is from
+ *  the SIDE TO MOVE's perspective (UCI convention) — flip it for a white-relative
+ *  eval (see lib/evalScore.ts). */
+export type EngineInfo = {
+  /** Centipawns, or null when the line reports a mate score. */
+  cp: number | null;
+  /** Moves to mate (signed: >0 = side to move mates), or null. */
+  mate: number | null;
+  depth: number;
+  /** Principal variation in UCI. */
+  pv: string[];
+};
+
+/** Parse a UCI `info` line into a score. Returns null for the lines that carry
+ *  no usable score — currmove/nps chatter, and fail-high/low bounds, which are
+ *  provisional and would make an eval bar jump around mid-search. */
+export function parseInfoLine(line: string): EngineInfo | null {
+  if (!line.startsWith("info ")) return null;
+  if (line.includes(" lowerbound") || line.includes(" upperbound")) return null;
+  const t = line.split(/\s+/);
+  let depth = 0;
+  let cp: number | null = null;
+  let mate: number | null = null;
+  let pv: string[] = [];
+  for (let i = 1; i < t.length; i++) {
+    switch (t[i]) {
+      case "depth":
+        depth = Number(t[++i]) || 0;
+        break;
+      case "multipv":
+        // MultiPV is pinned to 1 in the handshake; ignore anything else so a
+        // future multi-line search can't feed a side line to the bar.
+        if (Number(t[++i]) !== 1) return null;
+        break;
+      case "score":
+        if (t[i + 1] === "cp") {
+          const v = Number(t[i + 2]);
+          if (!Number.isFinite(v)) return null;
+          cp = v;
+          mate = null;
+          i += 2;
+        } else if (t[i + 1] === "mate") {
+          const v = Number(t[i + 2]);
+          if (!Number.isFinite(v)) return null;
+          mate = v;
+          cp = null;
+          i += 2;
+        }
+        break;
+      case "pv":
+        pv = t.slice(i + 1);
+        i = t.length;
+        break;
+    }
+  }
+  if (cp === null && mate === null) return null;
+  return { cp, mate, depth, pv };
+}
+
 export class BrowserEngine {
   private worker: Worker;
   private listeners: ((line: string) => void)[] = [];
   private ready: Promise<void>;
+  /** Serializes analyse() searches on the single worker. */
+  private analysisQueue: Promise<void> = Promise.resolve();
+  /** Abandons the most recently started analysis, if any. */
+  private cancelAnalysis: (() => void) | null = null;
+  private disposed = false;
   public name = "Stockfish 18 (browser)";
 
   constructor() {
@@ -134,7 +198,96 @@ export class BrowserEngine {
     );
   }
 
+  /** Analyse an arbitrary position, streaming every score the search reports so
+   *  a UI can deepen its eval progressively. Used by the eval bar, which follows
+   *  whatever position the viewer is looking at (live tip, or a scrubbed-back
+   *  ply) — hence a FEN rather than a move list. A FEN carries no repetition
+   *  history, so the eval can't see a threefold; that's the normal tradeoff for
+   *  an eval bar and never affects the authoritative result (the server is the
+   *  referee).
+   *
+   *  Searches are serialized on the worker: starting one supersedes any search
+   *  still running (`stop` → its `bestmove` → the new `position`), because UCI
+   *  commands must not interleave and the caller only ever wants the newest
+   *  position. Returns a handle whose `stop()` abandons this analysis. */
+  analyse(
+    fen: string,
+    opts: {
+      onInfo: (info: EngineInfo) => void;
+      /** Fires when the search ends (depth reached, capped, or stopped). */
+      onDone?: () => void;
+      /** Depth cap — reached first on quiet positions. */
+      depth?: number;
+      /** Wall-clock cap, so the bar keeps up with a live blitz game. */
+      maxMs?: number;
+    },
+  ): { stop: () => void } {
+    const { onInfo, onDone, depth = 18, maxMs = 2500 } = opts;
+
+    // Supersede the previous analysis: without this a stale search would hold
+    // the worker for its full budget before the new position even starts.
+    this.cancelAnalysis?.();
+
+    let cancelled = false;
+    let stopSearch: (() => void) | null = null;
+    const cancel = () => {
+      cancelled = true;
+      stopSearch?.();
+    };
+    this.cancelAnalysis = cancel;
+
+    const run = async () => {
+      if (cancelled || this.disposed) return;
+      try {
+        await this.ready;
+      } catch {
+        return; // engine failed to load — the caller degrades to no bar
+      }
+      // Re-check after the await: the engine may have been torn down while a
+      // queued analysis was waiting, and a search must never outlive `quit`.
+      if (cancelled || this.disposed) return;
+      this.send(`position fen ${fen}`);
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(cap);
+          clearTimeout(hardStop);
+          this.listeners = this.listeners.filter((l) => l !== fn);
+          stopSearch = null;
+          resolve();
+        };
+        const fn = (line: string) => {
+          if (line.startsWith("bestmove")) {
+            finish();
+            return;
+          }
+          const info = parseInfoLine(line);
+          if (info && !cancelled) onInfo(info);
+        };
+        // `stop` makes the engine emit `bestmove`, which is what actually
+        // releases the worker for the next search.
+        stopSearch = () => this.send("stop");
+        const cap = setTimeout(() => this.send("stop"), maxMs);
+        // Backstop: a worker that never answers must not wedge the queue.
+        const hardStop = setTimeout(finish, maxMs + 15000);
+        this.listeners.push(fn);
+        this.send(`go depth ${depth}`);
+      });
+      if (!cancelled) onDone?.();
+      if (this.cancelAnalysis === cancel) this.cancelAnalysis = null;
+    };
+
+    // Chain onto the previous analysis (settled or not) so `position`/`go` pairs
+    // never interleave on the worker.
+    this.analysisQueue = this.analysisQueue.then(run, run);
+    return { stop: cancel };
+  }
+
   dispose() {
+    this.disposed = true;
+    this.cancelAnalysis?.();
     try {
       this.send("quit");
       this.worker.terminate();
