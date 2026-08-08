@@ -21,13 +21,13 @@ import { authToken, clearAuth } from "./escrow";
  *  happened rather than failing silently. */
 export async function authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const token = authToken();
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      ...(init.headers ?? {}),
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-  });
+  // Build through the Headers API rather than object spread: spreading a
+  // `Headers` instance (or an array of pairs) yields `{}` and silently drops
+  // every caller-supplied header. All callers pass plain objects today, so that
+  // would have been a quiet trap for the next one.
+  const headers = new Headers(init.headers);
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  const res = await fetch(url, { ...init, headers });
   // Only when we actually presented a credential. A 401 with no token means the
   // route requires sign-in — the user was never signed in, so there is nothing
   // to clear and clearing would fire a pointless auth event.

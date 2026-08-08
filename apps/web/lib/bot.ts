@@ -31,12 +31,11 @@ export const BOT_OFFLINE: BotStatus = {
   options: [],
 };
 
-/** Poll the signed-in user's own bot status. */
-export async function fetchBot(token: string): Promise<BotStatus> {
+/** Poll the signed-in user's own bot status. Takes no token: `authedFetch`
+ *  reads the stored session, so a token that expired mid-poll is dropped here
+ *  too rather than retried forever. */
+export async function fetchBot(): Promise<BotStatus> {
   try {
-    // token arg kept for call-site compatibility; authedFetch reads the store
-    // so an expired session is dropped here too instead of polling forever.
-    void token;
     const r = await authedFetch(`${SERVER_HTTP}/agent`);
     if (!r.ok) return BOT_OFFLINE;
     return (await r.json()) as BotStatus;
@@ -57,7 +56,7 @@ export function useBotStatus(token: string | null, intervalMs = 5000): BotStatus
       return;
     }
     let alive = true;
-    const tick = () => fetchBot(token).then((b) => alive && setBot(b));
+    const tick = () => fetchBot().then((b) => alive && setBot(b));
     tick();
     const t = setInterval(tick, intervalMs);
     return () => {

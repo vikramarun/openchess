@@ -37,7 +37,7 @@ function stubFetch(status: number) {
     _url: string,
     init: RequestInit = {},
   ) => {
-    seenAuth = (init.headers as Record<string, string> | undefined)?.authorization;
+    seenAuth = new Headers(init.headers).get("authorization") ?? undefined;
     return { status, ok: status >= 200 && status < 300 } as Response;
   };
 }
@@ -54,8 +54,11 @@ async function main() {
   // A rejected session is dropped, so the UI re-renders signed-out.
   signIn();
   stubFetch(401);
-  await authedFetch("/x");
+  const rejected = await authedFetch("/x");
   check("401 with a token clears it", store.has("chess_token"), false);
+  // The caller still receives the response, or it could not tell the user why
+  // the action failed — clearing must not swallow the result.
+  check("401 is still returned to the caller", rejected.status, 401);
 
   // ...but only when we actually presented one. A 401 on an anonymous call means
   // the route wants sign-in; there is nothing to clear.
@@ -91,6 +94,21 @@ async function main() {
   stubFetch(200);
   await authedFetch("/x");
   check("omits the header when signed out", seenAuth, undefined);
+
+  // Caller headers must survive however they were supplied — a plain object
+  // and a Headers instance have to behave identically.
+  let seenType: string | null = null;
+  (globalThis as unknown as { fetch: unknown }).fetch = async (
+    _u: string,
+    init: RequestInit = {},
+  ) => {
+    seenType = new Headers(init.headers).get("content-type");
+    return { status: 200, ok: true } as Response;
+  };
+  await authedFetch("/x", { headers: { "content-type": "application/json" } });
+  check("keeps a plain-object header", seenType, "application/json");
+  await authedFetch("/x", { headers: new Headers({ "content-type": "text/plain" }) });
+  check("keeps a Headers instance", seenType, "text/plain");
 
   console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
   process.exit(failed ? 1 : 0);
