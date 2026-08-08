@@ -82,7 +82,16 @@ pub async fn run_connect(opts: ConnectOpts) -> Result<()> {
     if opts.auto {
         run_autopilot(&client, &http, &opts, session, &engine_name, book).await
     } else {
-        run_agent(&http, &opts, &session, &engine_name, engine_options, book).await
+        run_agent(
+            &client,
+            &http,
+            &opts,
+            session,
+            &engine_name,
+            engine_options,
+            book,
+        )
+        .await
     }
 }
 
@@ -141,14 +150,29 @@ fn is_unauthorized(e: &anyhow::Error) -> bool {
 // Agent mode (default): web-driven
 // ---------------------------------------------------------------------------
 
+/// Why an agent session ended. The reconnect loop has to tell a restarted
+/// server (reconnect and carry on) from a rejected credential (re-authenticate
+/// first) — the two look identical at the socket layer, and treating the second
+/// as the first reconnects with the same dead token forever.
+enum AgentExit {
+    /// Socket closed — a server deploy/restart, or a clean shutdown.
+    Closed,
+    /// The server rejected our session token.
+    Unauthorized,
+}
+
 async fn run_agent(
+    client: &reqwest::Client,
     http: &str,
     opts: &ConnectOpts,
-    session: &Session,
+    session: Session,
     engine_name: &str,
     engine_options: Vec<UciOptionInfo>,
     book: Option<Arc<OpeningBook>>,
 ) -> Result<()> {
+    // Owned + mutable: sessions live in the server's memory, so its restart
+    // voids ours and we mint a new one rather than looping on a dead token.
+    let mut session = session;
     let ws = ws_base(http);
     // No token in the URL — auth travels in the Hello frame so the 24h
     // session credential never lands in proxy/access logs.
@@ -159,17 +183,34 @@ async fn run_agent(
             &ws_url,
             &ws,
             opts,
-            session,
+            &session,
             engine_name,
             &engine_options,
             &book,
         )
         .await
         {
-            Ok(()) => {
+            Ok(AgentExit::Closed) => {
                 // Server closed the socket (deploy/restart) — reconnect.
                 eprintln!("connection closed; reconnecting…");
                 backoff = 3;
+            }
+            // The credential is dead, not the socket. Without this the bot
+            // reconnects on a schedule forever, printing the same rejection
+            // and never coming back online — silently offline until someone
+            // notices and restarts it by hand.
+            Ok(AgentExit::Unauthorized) => {
+                eprintln!("session rejected; re-authenticating…");
+                match sign_in(client, http, opts).await {
+                    Ok(s) => {
+                        println!("signed in as {}", s.address);
+                        session = s;
+                        backoff = 3;
+                    }
+                    // A --code is single-use, so this is terminal for that
+                    // flow; back off and let the supervisor surface it.
+                    Err(e) => eprintln!("re-authentication failed: {e:#}; retrying in {backoff}s"),
+                }
             }
             Err(e) => {
                 eprintln!("agent error: {e:#}; retrying in {backoff}s");
@@ -201,7 +242,7 @@ async fn agent_session(
     engine_name: &str,
     engine_options: &[UciOptionInfo],
     book: &Option<Arc<OpeningBook>>,
-) -> Result<()> {
+) -> Result<AgentExit> {
     let (ws, _resp) = connect_async(ws_url)
         .await
         .context("agent connect failed")?;
@@ -224,7 +265,7 @@ async fn agent_session(
     while let Some(frame) = read.next().await {
         let text = match frame? {
             Message::Text(t) => t.to_string(),
-            Message::Close(_) => return Ok(()),
+            Message::Close(_) => return Ok(AgentExit::Closed),
             _ => continue,
         };
         let Ok(env) = serde_json::from_str::<AgentServerEnvelope>(&text) else {
@@ -294,10 +335,16 @@ async fn agent_session(
             }
             ServerToAgent::Error { code, message } => {
                 eprintln!("server: [{code}] {message}");
+                // Only this code is actionable — everything else is a log
+                // line. Reconnecting on a dead credential just repeats it.
+                if code == protocol::ERR_UNAUTHORIZED {
+                    return Ok(AgentExit::Unauthorized);
+                }
             }
         }
     }
-    Ok(())
+    // Stream ended without a Close frame (dropped TCP) — same as a close.
+    Ok(AgentExit::Closed)
 }
 
 // ---------------------------------------------------------------------------
@@ -709,5 +756,30 @@ mod tests {
         let mut o = casual_offer("theirs");
         o["poster_addr"] = json!("0xABC");
         assert!(!compatible(&o, &opts(), "0xabc", Some("mine")));
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    /// The reconnect loop branches on this code, so a drift in its spelling
+    /// between server and client would silently restore the hang this fixes:
+    /// the bot would reconnect forever with a credential the server rejects.
+    #[test]
+    fn unauthorized_code_is_the_shared_constant() {
+        assert_eq!(protocol::ERR_UNAUTHORIZED, "unauthorized");
+    }
+
+    /// Only `unauthorized` should end the session for re-authentication.
+    /// Treating every error that way would re-auth on ordinary protocol
+    /// noise; treating none that way is the bug being fixed.
+    #[test]
+    fn only_the_unauthorized_code_triggers_reauth() {
+        let reauths = |code: &str| code == protocol::ERR_UNAUTHORIZED;
+        assert!(reauths(protocol::ERR_UNAUTHORIZED));
+        for other in ["busy", "bad_request", "not_found", "Unauthorized", ""] {
+            assert!(!reauths(other), "{other} must not trigger re-auth");
+        }
     }
 }

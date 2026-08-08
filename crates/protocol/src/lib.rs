@@ -175,9 +175,19 @@ pub enum ServerMessage {
         /// Oracle signature over the canonical result; settlement input.
         server_sig: Option<String>,
     },
-    /// A protocol or auth error.
+    /// A protocol or auth error. See [`ERR_UNAUTHORIZED`] for the one code
+    /// clients branch on rather than merely log.
     Error { code: String, message: String },
 }
+
+/// `Error.code` meaning "your session token is dead" — as opposed to any other
+/// error, which is informational.
+///
+/// A client must tell this apart from a dropped socket: reconnecting is the
+/// right response to a server restart, but the wrong response to a rejected
+/// credential, since it reconnects with the same dead token forever. Shared
+/// here so the two sides can't drift on the spelling.
+pub const ERR_UNAUTHORIZED: &str = "unauthorized";
 
 // ---------------------------------------------------------------------------
 // Client -> server messages
