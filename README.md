@@ -73,7 +73,7 @@ Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
 
 ## Status
 
-**86 automated tests pass** (61 Rust + 25 Foundry). Four audit rounds
+**98 automated tests pass** (73 Rust + 25 Foundry), plus three web suites. Four audit rounds
 ([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated. CI
 (`.github/workflows/ci.yml`) runs Postgres + `forge test` + `cargo test` + the
 web build on every push.
@@ -87,7 +87,7 @@ web build on every push.
 | Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 25 Foundry tests |
 | On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip + live |
-| Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser |
+| Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser + 3 test suites |
 
 **This is not a turnkey production deployment.** Several items are ops/legal
 decisions only the operator can make — an **independent contract audit**, the
