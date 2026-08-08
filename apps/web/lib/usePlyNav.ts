@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /** Move-by-move navigation over a game, shared by the finished-game replay and
  *  the live spectator. The one subtlety is the LIVE case: the viewer must be
@@ -17,24 +17,29 @@ export function usePlyNav(total: number) {
   /** Showing the newest position (so live clocks/turn indicators apply). */
   const live = at >= total;
 
+  // Read `total` through a ref inside the callbacks: in a live game it changes
+  // on every move, and closing over it would both re-subscribe the key handler
+  // each time and let a keypress race a move that has landed but not yet
+  // re-rendered.
+  const totalRef = useRef(total);
+  totalRef.current = total;
+
   // Landing on the last ply re-attaches to the tip: in a live game "End" means
   // "follow along again", not "pin me to move N".
-  const go = useCallback(
-    (n: number) => setPly(n >= total ? null : Math.max(0, n)),
-    [total],
-  );
+  const go = useCallback((n: number) => setPly(n >= totalRef.current ? null : Math.max(0, n)), []);
   const first = useCallback(() => setPly(0), []);
   const last = useCallback(() => setPly(null), []);
   const prev = useCallback(
-    () => setPly((p) => Math.max(0, (p === null ? total : p) - 1)),
-    [total],
+    () => setPly((p) => Math.max(0, (p === null ? totalRef.current : p) - 1)),
+    [],
   );
   const next = useCallback(
-    () => setPly((p) => {
-      const n = (p === null ? total : p) + 1;
-      return n >= total ? null : n;
-    }),
-    [total],
+    () =>
+      setPly((p) => {
+        const n = (p === null ? totalRef.current : p) + 1;
+        return n >= totalRef.current ? null : n;
+      }),
+    [],
   );
 
   useEffect(() => {
