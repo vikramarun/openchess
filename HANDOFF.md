@@ -1,6 +1,6 @@
 # OpenChess — Handoff
 
-_Last updated: 2026-07-12._
+_Last updated: 2026-08-08._
 
 Engine-vs-engine chess with non-custodial USDC wagers on Base. This doc is the
 fast path for the next person (or agent). Start here, then dive into the linked
@@ -8,7 +8,7 @@ docs.
 
 - **Product/architecture:** [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Deploy/ops + go-live checklist:** [PRODUCTION.md](PRODUCTION.md)
-- **Security history:** [AUDIT.md](AUDIT.md) (4 rounds)
+- **Security history:** [AUDIT.md](AUDIT.md) (4 review rounds + a production incident round)
 - **Live addresses:** [DEPLOYMENTS.md](DEPLOYMENTS.md)
 - **Agent orientation (build/test/run/gotchas):** [CLAUDE.md](CLAUDE.md)
 
@@ -77,8 +77,8 @@ docs.
   `releases/latest/download/<name>`; the client uses **rustls** so wss:// works
   with no system OpenSSL). Cut a release with
   `git tag v0.1.0 && git push origin v0.1.0`. `scripts/house-bot.sh` runs one
-  casual autopilot per lobby time control under an UNFUNDED wallet so the
-  park is never empty — run it 24/7 somewhere cheap.
+  casual autopilot per lobby time control under an UNFUNDED wallet so the park is
+  never empty; it is deployed as its own Fly app — see `fly.housebot.toml`.
 - **Bot leaderboard:** the lobby shows a ranked board of top players by Elo
   (`GET /leaderboard` → `crates/server/src/players.rs` + `crates/persistence`,
   `apps/web/components/Leaderboard.tsx`). Wallets with ≥1 finished rated game;
@@ -93,39 +93,68 @@ docs.
   if it was contested — both sides made ≥1 move** (`ply >= 2`); a no-show, or an
   engine that connects then hangs and flags without moving, loses the game/stake
   but its **Elo is untouched**. Single guard in `room.rs finish()`.
-- **Tests:** 61 Rust + 25 Foundry (incl. a 128k-call solvency invariant) +
-  `pnpm -C apps/web test:book` (polyglot spec vectors). CI in
-  `.github/workflows/ci.yml`; releases in `release.yml`.
+- **Tests:** 73 Rust + 25 Foundry (incl. a 128k-call solvency invariant) + three
+  web suites (`test:book` polyglot vectors, `test:eval` eval bar, `test:auth`
+  session expiry). CI in `.github/workflows/ci.yml` runs all of them; releases in
+  `release.yml`.
 
-## ⚠️ Not yet done — the gap between "merged" and "shareable"
+## Shipped 2026-08-08 — first-visitor path is open
 
-The BYO-multiplayer feature set (PRs #2–#4), rate limiting, the bot
-leaderboard (PRs #6–#7), and owner-triggered maintenance/drain mode (PR #8) are
-**complete and on `main`, but not all of it is deployed**. The hardening tasks
-are done; the remaining gap is mostly ops:
+> **Merged ≠ deployed.** The Fly server does **not** auto-deploy; only the web
+> app does (Vercel, on merge to `main`). Anything below marked *(needs deploy)*
+> is on `main` and inert until `./scripts/deploy-server.sh` runs. Check with
+> `curl -s -o /dev/null -w '%{http_code}' https://openchess.fly.dev/games/unsettled/0x0`
+> — a 404 means the running server predates these changes.
 
-1. **Publish the release + start a house bot.** Vercel is **done** —
-   `openchess.ai` serves the SF18 build. Two things are still open, and both are
-   why a new visitor currently hits a dead end:
+- **Prebuilt clients download.** `v0.1.0` is published with all four artifacts;
+  the `/connect` buttons return 200. The release had been silently broken for a
+  month: the `macos-13` Intel job queued 24h and was cancelled (GitHub retired
+  that image), and `publish` needs every build job. The Intel binary now
+  cross-compiles on the Apple Silicon runner, so no Intel runner is needed.
+- **The lobby is never empty.** The house bot runs as its **own Fly app**
+  (`openchess-housebot`, `Dockerfile.housebot` + `fly.housebot.toml`) — one
+  autopilot per lobby tile under a fresh, unfunded wallet. Verified holding four
+  wallet-bound offers steady.
+- **Postgres is attached and live**, so persistence and the durable settlement
+  outboxes are running again (see the incidents below for how long they weren't).
+- **`REQUIRE_ONCHAIN=1`** *(needs deploy)* — set in `fly.toml`, so a
+  half-configured node will refuse to boot. Safe to enable: all four secrets it
+  checks are present.
+- **`/ready` no longer lies** *(needs deploy)* — it fails when on-chain
+  settlement is live but no DB is configured, instead of reporting healthy.
+- **Split-brain detection** *(needs deploy)* — `singlenode.rs` watches
+  `<app>.internal` and pages on a second machine.
+- **Stuck stakes are recoverable in-app** — `claimTimeout` has a browser UI
+  (`GameRefund.tsx`). The web half is live via Vercel; its discovery endpoint
+  *(needs deploy)*, so the panel simply stays hidden until the server ships.
+- **Sessions expire gracefully** *(PR #27, not yet merged)* — a stale token is
+  dropped client-side (`apps/web/lib/authedFetch.ts`) instead of dead-ending on a
+  401. Without it, every returning user hits an unrecoverable error the day after
+  a deploy, since sessions are in-memory with a 24h TTL.
 
-   - **No GitHub Release exists, so every `/connect` download button 404s.** The
-     `v0.1.0` tag was pushed, but its Release run **queued 24h and was
-     cancelled**: the `macos-13` Intel build job never got a runner (GitHub
-     retired that image), and `publish` needs every build job, so nothing was
-     ever published. **Fixed** in `.github/workflows/release.yml` — the Intel
-     binary now cross-compiles on the Apple Silicon runner (verified locally:
-     produces a `Mach-O 64-bit executable x86_64` reporting the right
-     `--version`). To actually publish, re-point the tag at `main` and push it:
-     `git tag -f v0.1.0 && git push -f origin v0.1.0`. Nothing was ever released
-     under that tag, so re-pointing it rewrites nothing anyone has downloaded.
-     Watch it with `gh run watch` and confirm with `gh release list`.
-   - **The house bot runs nowhere, so the lobby is empty** (`/park/offers` and
-     `/games/live` both return `[]`). `scripts/house-bot.sh` was complete but had
-     no home; it now deploys as its **own Fly app** via `Dockerfile.housebot` +
-     `fly.housebot.toml` (stockfish + `chess-client` in one image, one autopilot
-     per lobby time control). Deploy commands are in the header of
-     `fly.housebot.toml`. The house wallet must be a **fresh, UNFUNDED** key —
-     house games are casual, so it only ever signs SIWE.
+## ⚠️ Two production incidents worth not repeating
+
+Both were already documented, both had a mitigation, and both happened anyway —
+because nothing *enforced* them. Read this before the next deploy.
+
+1. **The server ran as a two-machine HA pair.** Every piece of live state is in
+   one process's memory, so the proxy alternating between machines meant a SIWE
+   nonce issued by A failed to verify on B (intermittent sign-in 401s that read
+   exactly like a client bug) and park offers appeared and vanished between
+   refreshes. It cost most of a debugging session, chasing client-side symptoms.
+   The tell: polling one endpoint repeatedly returned two stable, alternating
+   answers. **Now enforced twice** — `deploy-server.sh` asserts the machine count
+   and exits non-zero, and the server itself watches `<app>.internal` DNS and
+   pages via `ALERT_WEBHOOK_URL` (`crates/server/src/singlenode.rs`). Neither
+   prevents a bare `fly deploy` from re-adding the machine; they make sure you
+   find out in minutes.
+2. **The server ran with no `DATABASE_URL`** while `wager_enabled: true`. No
+   persistence, and — because the settlement outbox workers only spawn when a DB
+   exists — no durable settlement, with wagers still accepted. `/health` and
+   `/ready` both returned 200 the whole time; only `/leaderboard` 503'd, and
+   nothing watched it. `/ready` now fails when money is live without a DB, and
+   `REQUIRE_ONCHAIN=1` refuses the boot outright.
+
 2. **Rate limiting / abuse guardrails — DONE** (`crates/server/src/ratelimit.rs`).
    In-process, single-node (moves behind Redis with the rest of the state when
    multi-node lands). Per-IP token-bucket throttles on `/auth/*` (middleware),

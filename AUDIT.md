@@ -322,3 +322,25 @@ Remaining (tracked, not security-blocking): Swiss/knockout tournament pairing
 Merkle-claim and refund browser UIs have since shipped —
 `apps/web/components/TournamentClaim.tsx` calls both `claimTournament` and
 `claimRefund`, surfaced next to the bankroll by `ClaimWinnings.tsx`.
+
+
+---
+
+## Round 5: production incident review (first real deploy)
+
+Not an audit — findings from putting the thing in front of users. Every one was
+already documented somewhere, already had a mitigation, and happened anyway,
+because nothing enforced them. That pattern is the actual finding.
+
+| Finding | Sev | Status | Fix |
+|---|---|---|---|
+| Server ran as a two-machine HA pair | High (availability/auth) | Fixed | All live state is per-process, so the proxy alternating between machines meant a SIWE nonce issued by A failed to verify on B — intermittent sign-in 401s indistinguishable from a client bug — and park offers appeared/vanished per refresh. `deploy-server.sh` now asserts the machine count; `singlenode.rs` independently watches `<app>.internal` and pages. |
+| Server ran with no `DATABASE_URL` while `wager_enabled` | High (durability) | Fixed | No persistence and no settlement-outbox workers (they only spawn when a DB exists), so wagers settled "best-effort inline" with no retry — one transient RPC failure would strand a stake until `claimTimeout`. `/ready` now fails on money-live-without-DB, and `REQUIRE_ONCHAIN=1` refuses the boot. |
+| `/ready` reported healthy with no database | Med | Fixed | It pinged the DB only `if let Some(db)`, so a DB-less node was indistinguishable from a healthy one. This is *why* the finding above went unnoticed. |
+| A stale bearer silently became anonymous | Med | Fixed | Auth is optional on casual offers, so an expired session posted an offer with no `poster_addr`. That broke the client's self-match guard (which keys on that field) and the server's same-wallet rejection (which needs both addresses) — the house bot repeatedly played itself. `authed_wallet_strict` now 401s a present-but-invalid credential; a genuinely anonymous caller is still allowed. |
+| Expired session dead-ended the web UI | Med (UX) | Fixed | The 401 above surfaced as an unrecoverable error until a manual sign-out — landing on every returning user the day after a deploy, since sessions are in-memory with a 24h TTL. `authedFetch` drops the rejected token so the UI re-renders signed-out. |
+| Published `v0.1.0` shipped a client that matched its own challenge | Med | Fixed | `compatible()` decided "not mine" from `poster_addr`, which is null on casual offers, so the check failed open. Now keyed on the offer id we posted. Re-tagged and republished. |
+
+Nothing here touched fund safety: the money paths failed closed throughout, and
+no stake was lost or mis-settled. The damage was availability, wasted debugging,
+and a first-visitor experience that didn't work.

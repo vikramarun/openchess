@@ -1,6 +1,7 @@
 # Going to production
 
-OpenChess has been **hardened** through three audit rounds (see `AUDIT.md`) — the
+OpenChess has been **hardened** through four audit rounds plus a production
+incident round (see `AUDIT.md`) — the
 code-level Critical/High findings are fixed, and the money paths fail closed. But
 **this is not yet a turnkey production deployment**: several items are infra /
 ops / legal decisions that only you (the operator) can make. This doc is the
@@ -32,7 +33,7 @@ honest checklist.
   play client (resign instead of stall on engine/move failure), SRI on CDN CSS,
   client-only wagmi config.
 - **CI** (`.github/workflows/ci.yml`): Postgres + `forge test` + `cargo test` +
-  web build.
+  the three web suites (`test:book`, `test:eval`, `test:auth`) + web build.
 
 ## Action items only you can do (before mainnet)
 
@@ -61,9 +62,9 @@ honest checklist.
 - [ ] **Run exactly one `chess-server` replica.** Multi-replica is *broken* today
   (rooms, launch tokens, lobby, and SIWE sessions are in-process) — needs the
   Redis-backed session/lobby + sharded rooms work first.
-- [ ] Managed **Postgres** with automated backups + PITR. Run migrations as a
-  **one-shot deploy step** (not in-process on every boot) before any future
-  destructive migration.
+- [x] Managed **Postgres** — attached (`openchess-db`). Confirm backups/PITR are
+  on. Migrations still run in-process on boot; move them to a **one-shot deploy
+  step** before any future destructive migration.
 - [ ] **TLS everywhere**: serve the web over `https` and the server over `wss`
   (terminate at a reverse proxy). The launch token rides in the WS query string —
   keep it on TLS and out of logs.
@@ -73,7 +74,15 @@ honest checklist.
   open-offer cap. Env-tunable (`RL_*`), keyed on `Fly-Client-IP`. **Still add
   edge rate limiting** (Cloudflare/gateway) as defense-in-depth for the L3/L4
   floods the app never sees, and pin `Fly-Client-IP` trust to the deploy.
-- [ ] Set `REQUIRE_ONCHAIN=1` so a misconfigured node refuses to boot.
+- [x] `REQUIRE_ONCHAIN=1` set in `fly.toml` — a misconfigured node refuses to
+  boot. This is not belt-and-braces: the server ran for a stretch with no
+  `DATABASE_URL`, meaning no persistence and no durable settlement, while still
+  accepting wagers. Takes effect on the next deploy.
+- [x] **Single-node is enforced, twice.** `deploy-server.sh` asserts the machine
+  count and exits non-zero; the server independently watches `<app>.internal` DNS
+  and pages on a sibling (`singlenode.rs`). Neither stops a bare `fly deploy`
+  from re-adding the HA machine — they make sure you find out in minutes rather
+  than during a debugging session. Always deploy through the wrapper.
 
 ### 4. Observability
 - [ ] Put `/ready` in the load-balancer health check; keep `/health` for
@@ -109,7 +118,8 @@ honest checklist.
 
 ## Known limitations (not production-ready as-is)
 
-- **Single-node only** (see Infra #1).
+- **Single-node only** (see Infra #1). Detected automatically now, but not
+  prevented — a bare `fly deploy` still re-adds the HA machine.
 - **Tournament restart**: tournament entrants/standings are now persisted. On
   restart, a tournament whose games all finished is **settled by result**; one
   with games still in flight is marked `abandoned` (their rooms are gone) and

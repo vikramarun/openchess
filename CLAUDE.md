@@ -76,6 +76,25 @@ wallet.
   dev preview breaks after a build: `rm -rf apps/web/.next` and restart it.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
+- **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
+  `main`). The Fly server needs `./scripts/deploy-server.sh`, and the house bot
+  needs `fly deploy --config fly.housebot.toml --ha=false`. A change to
+  `crates/*` is inert in production until you run one of those — check with
+  `curl -s -o /dev/null -w '%{http_code}' https://openchess.fly.dev/games/unsettled/0x0`
+  (404 ⇒ the running server predates the current `main`).
+- **Two machines silently breaks everything, and it has happened.** Every piece
+  of live state is per-process, so a second machine makes SIWE fail
+  intermittently (nonce issued by A, verified against B) and the lobby flicker.
+  `deploy-server.sh` asserts the count and `singlenode.rs` pages on a sibling —
+  but a bare `fly deploy` still re-adds it. Symptom to recognise: polling one
+  endpoint returns two stable, alternating answers.
+- **An authed poster must never appear anonymous.** Auth is optional on casual
+  offers, so a stale bearer used to be treated as "no credential" and the offer
+  recorded no `poster_addr` — which silently disabled the client's self-match
+  guard and the server's same-wallet rejection. `authed_wallet_strict` 401s a
+  present-but-invalid credential; keep it that way, and route new authed web
+  calls through `apps/web/lib/authedFetch.ts` so an expired session self-heals
+  instead of dead-ending.
 
 ## Conventions
 - Money is `rust_decimal` / `U256` — never `f64`. USDC has 6 decimals.
