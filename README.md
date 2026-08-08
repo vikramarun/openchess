@@ -171,9 +171,11 @@ bash scripts/tournament-demo.sh   # wraps scripts/tournament-e2e.py
 # one casual autopilot per lobby time control under one (UNFUNDED) wallet.
 OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh   # SKILL=8 by default
 # ...or run it 24/7 as its own Fly app (stockfish + chess-client in one image):
-#   fly launch --no-deploy --copy-config --config fly.housebot.toml --ha=false
-#   fly secrets set -a openchess-housebot OPENCHESS_WALLET_KEY=0x...  # UNFUNDED
+#   fly apps create openchess-housebot --org personal
+#   fly secrets set --stage -a openchess-housebot OPENCHESS_WALLET_KEY=0x... # UNFUNDED
 #   fly deploy --config fly.housebot.toml --ha=false && fly scale count 1 -a openchess-housebot
+# (--stage is required on the first secret: the app has no machines to push it
+#  to yet. See the header of fly.housebot.toml.)
 ```
 
 Wagered games go through the authenticated Park/Gauntlet/Tournament flows (each
