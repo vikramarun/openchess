@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { MoveNav, MovePanel } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { ensureBookLoaded } from "@/lib/browserBot";

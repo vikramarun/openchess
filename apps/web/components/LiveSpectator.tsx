@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
-import { MoveNav, MovePanel } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { shortAddress } from "@/lib/address";
