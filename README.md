@@ -186,7 +186,7 @@ demo scripts and [PRODUCTION.md](PRODUCTION.md) for the exact env.
 ## Deploy
 
 - **Web** → **Vercel**, Root Directory `apps/web` (env: `NEXT_PUBLIC_SERVER_HTTP`,
-  `NEXT_PUBLIC_SERVER_WS`, `NEXT_PUBLIC_WC_PROJECT_ID`).
+  `NEXT_PUBLIC_SERVER_WS`, `NEXT_PUBLIC_DYNAMIC_ENV_ID`).
 - **Game server** → **Fly** (`Dockerfile` + `fly.toml`), a single stateful
   machine (`fly scale count 1`); it can't run on Vercel (long-lived WebSockets).
 - **Contract** → Base via `contracts/script/Deploy.s.sol` (auto-picks Base

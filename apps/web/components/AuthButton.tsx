@@ -1,40 +1,53 @@
 "use client";
 
-import { ConnectButton } from "@rainbow-me/rainbowkit";
+import { DynamicUserProfile, useDynamicContext } from "@dynamic-labs/sdk-react-core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAccount, useAccountEffect, useChainId, useSignMessage } from "wagmi";
+import { useAccount, useAccountEffect, useChainId } from "wagmi";
 
+import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { authAddress, authToken, clearAuth } from "@/lib/escrow";
 import { signInWithEthereum } from "@/lib/siwe";
+import { playerLabel } from "@/lib/playerLabel";
 import { usePlayerCard } from "@/lib/usePlayerCard";
+import { useDynamicSigner } from "@/lib/useDynamicSigner";
 import { useEnsureChain } from "@/lib/useEnsureChain";
 import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
+import { useStaleAuthRecovery } from "@/lib/useStaleAuthRecovery";
 
-/** Mount gate: the wagmi hooks live in AuthButtonInner, which only renders once
- *  the client-only WagmiProvider (app/providers.tsx) is in the tree. */
+/** Mount gate: the wagmi + Dynamic hooks live in AuthButtonInner, which only
+ *  renders once the client-only provider tree (app/providers.tsx) is mounted.
+ *
+ *  It also gates on `dynamicConfigured`, because without an environment id
+ *  providers.tsx omits DynamicContextProvider entirely and every Dynamic hook
+ *  below would then read an undefined context and throw. */
 export function AuthButton() {
-  if (!useMounted()) return <div style={{ width: 1 }} />;
+  const mounted = useMounted();
+  if (!mounted || !dynamicConfigured) return <div style={{ width: 1 }} />;
   return <AuthButtonInner />;
 }
 
-/** One button for the whole entry flow. Connecting a wallet auto-switches to the
- *  server's expected chain and, on a staked server, immediately prompts the
- *  SIWE signature — so there's a single "Sign in", never a separate connect +
- *  sign-in step. The session token is bound to the wallet it was issued for and
- *  cleared on disconnect / account switch. */
+/** One button for the whole entry flow. Signing in opens Dynamic's modal — email
+ *  and Google provision an embedded wallet, external wallets connect as before —
+ *  then we auto-switch to the server's expected chain and, on a staked server,
+ *  immediately prompt the SIWE signature. So there's a single "Sign in", never a
+ *  separate connect + sign-in step. The session token is bound to the wallet it
+ *  was issued for and cleared on disconnect / account switch. */
 function AuthButtonInner() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const ensureChain = useEnsureChain();
-  const { signMessageAsync } = useSignMessage();
+  const signMessageAsync = useDynamicSigner();
+  const { setShowAuthFlow, setShowDynamicUserProfile, sdkHasLoaded } = useDynamicContext();
+  const { showEscapeHatch, manualLogout } = useStaleAuthRecovery();
 
   const { config, wagerOn } = useOnchainConfig();
   const expected = config?.chainId ?? null;
-  // The photo and handle this wallet set here, if any. Both take precedence
-  // over the ENS equivalents below: they are what the user chose *on this site*,
-  // so seeing a pawn (or an old ENS name) in the header right after setting one
-  // reads as the change having failed.
+  // The photo and handle this wallet set here, if any — one request for both,
+  // since they come off the same `/players/{addr}` row. Both are what the user
+  // chose *on this site*, which matters more now than it did: an email/Google
+  // user has no ENS name or avatar to fall back on, so without a username the
+  // chip has only the pawn glyph and a hex address to show them.
   const { photo, username } = usePlayerCard(address);
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -72,7 +85,7 @@ function AuthButtonInner() {
     setBusy(true);
     try {
       await ensureChain(expected);
-      await signInWithEthereum(address, expected, (a) => signMessageAsync(a));
+      await signInWithEthereum(address, expected, signMessageAsync);
       // The account may have switched while the signature was pending — never
       // claim signed-in for a wallet the token wasn't issued to.
       if (addressRef.current?.toLowerCase() !== signingFor) {
@@ -81,6 +94,11 @@ function AuthButtonInner() {
       }
       setSignedIn(true);
     } catch (e: any) {
+      // Dynamic swallows some connector-level failures, so log the raw error as
+      // well as showing the short form — otherwise a wallet that silently
+      // declines looks identical to one that never got the request.
+      // eslint-disable-next-line no-console
+      console.error("[auth] sign-in failed", e);
       setError(e?.shortMessage ?? e?.message ?? "sign-in failed");
     } finally {
       setBusy(false);
@@ -100,52 +118,80 @@ function AuthButtonInner() {
     runSignIn();
   }, [ready, wagerOn, signedIn, busy, address, runSignIn]);
 
-  return (
-    <ConnectButton.Custom>
-      {({ account, chain, openAccountModal, openConnectModal, mounted: rkMounted }) => {
-        if (!rkMounted) return <div style={{ width: 1 }} />;
+  // Dynamic says we're logged in but the session never became usable. This is
+  // checked before `sdkHasLoaded` because it covers BOTH stuck states the hook
+  // detects, and only one of them has the SDK still loading — in the other the
+  // SDK is up but the user/wallet never resolve, which would otherwise render a
+  // "Sign in" button that reopens the same broken session. `showEscapeHatch`
+  // already implies staleness (the hook clears it as soon as the session
+  // recovers), so it needs no second condition.
+  if (showEscapeHatch) {
+    return (
+      <button className="wrong-net" onClick={() => manualLogout()}>
+        Stuck? Sign out
+      </button>
+    );
+  }
 
-        if (!account || !chain) {
-          return (
-            <button className="primary" onClick={() => openConnectModal?.()}>
-              Sign in
-            </button>
-          );
-        }
+  // Dynamic is still booting. Nothing to show yet, and the branch above is what
+  // stops this placeholder from being the whole header forever.
+  if (!sdkHasLoaded) return <div style={{ width: 1 }} />;
 
-        // Connected but the signed-in session isn't established yet.
-        if (wagerOn && !signedIn) {
-          return (
-            <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-              {error && <span className="auth-err">{error}</span>}
-              <button className="primary" disabled={busy} onClick={runSignIn}>
-                {busy ? "Signing…" : "Finish sign-in"}
-              </button>
-            </span>
-          );
-        }
+  function control() {
+    if (!isConnected || !address) {
+      return (
+        <button className="primary" onClick={() => setShowAuthFlow(true)}>
+          Sign in
+        </button>
+      );
+    }
 
-        // Signed-in user drifted to the wrong network — surface a switch control
-        // (the old default ConnectButton did this; the custom chip must too).
-        if (wagerOn && expected != null && chainId !== expected) {
-          return (
-            <button className="wrong-net" onClick={() => ensureChain(expected).catch(() => {})}>
-              Wrong network, switch
-            </button>
-          );
-        }
-
-        // Signed in (or a casual server that needs no signature) → account chip.
-        return (
-          <button className="account-chip" onClick={() => openAccountModal?.()} title="Account">
-            {photo ?? account.ensAvatar ?
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={photo ?? account.ensAvatar} alt="" className="chip-av" />
-            : <span className="chip-av chip-av-fallback">♟</span>}
-            <span>{username ?? account.ensName ?? account.displayName}</span>
+    // Connected but the signed-in session isn't established yet.
+    if (wagerOn && !signedIn) {
+      return (
+        <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+          {error && <span className="auth-err">{error}</span>}
+          <button className="primary" disabled={busy} onClick={runSignIn}>
+            {busy ? "Signing…" : "Finish sign-in"}
           </button>
-        );
-      }}
-    </ConnectButton.Custom>
+        </span>
+      );
+    }
+
+    // Signed-in user drifted to the wrong network — surface a switch control.
+    if (wagerOn && expected != null && chainId !== expected) {
+      return (
+        <button className="wrong-net" onClick={() => ensureChain(expected).catch(() => {})}>
+          Wrong network, switch
+        </button>
+      );
+    }
+
+    // Signed in (or a casual server that needs no signature) → account chip.
+    return (
+      <button
+        className="account-chip"
+        onClick={() => setShowDynamicUserProfile(true)}
+        title="Account"
+      >
+        {photo ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={photo} alt="" className="chip-av" />
+        ) : (
+          <span className="chip-av chip-av-fallback">♟</span>
+        )}
+        <span>{playerLabel({ username, address })}</span>
+      </button>
+    );
+  }
+
+  return (
+    <>
+      {control()}
+      {/* Must be in the tree for setShowDynamicUserProfile to have anything to
+          open; it renders nothing until then. Also where logging out lives, and
+          a Dynamic logout disconnects wagmi, which fires clearAuth above. */}
+      <DynamicUserProfile />
+    </>
   );
 }
