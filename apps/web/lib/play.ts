@@ -11,13 +11,19 @@ import {
   probeUserBook,
 } from "./browserBot";
 import { SERVER_WS } from "./config";
-import { BrowserEngine } from "./engine";
+import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
 import { budgetMs, goCommand } from "./timePolicy";
 import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
+  /** Scores from THIS seat's own search, as it thinks about its move. `ply` is
+   *  the position being searched (moves played so far), so the side to move —
+   *  whose perspective the UCI score is from — is `ply % 2`. Lets the UI show an
+   *  eval bar without a second engine: this search is happening anyway. Silent
+   *  on a book move, since no search runs. */
+  onEval?: (info: EngineInfo, ply: number) => void;
   /** Asked once, before this seat declares itself ready. Resolving false holds
    *  the seat back: the server starts a game only when BOTH seats ready, so
    *  this is the hook a "confirm the stakes" prompt hangs off. Omit to ready
@@ -223,12 +229,19 @@ export function playSeat(
                 deadlineInMs,
               }),
             });
+            // The seat's eval bar rides on the search it is already running for
+            // its own move (#39), so it has to survive the time policy taking
+            // over the `go` command — otherwise the bar silently goes blank on
+            // every playing board.
+            const onInfo = handlers.onEval
+              ? (info: EngineInfo) => handlers.onEval!(info, history.length)
+              : undefined;
             let played: string;
             if (booked) {
               played = booked;
             } else {
               try {
-                played = await engine.bestMoveWithPlan(history, plan);
+                played = await engine.bestMoveWithPlan(history, plan, onInfo);
               } catch (err) {
                 // The engine itself died. Resigning here forfeits a real stake
                 // over a crashed worker, so try once with a fresh default
@@ -237,7 +250,7 @@ export function playSeat(
                 const swap = onFallback;
                 onFallback = null;
                 engine = await swap();
-                played = await engine.bestMoveWithPlan(history, plan);
+                played = await engine.bestMoveWithPlan(history, plan, onInfo);
               }
             }
             if (cancelled()) {
