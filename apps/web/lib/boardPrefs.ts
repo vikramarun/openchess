@@ -9,7 +9,7 @@
 //   - the LOOK (board colors, piece art) is CSS custom properties on <html>, so
 //     it is stamped once and every board on the page picks it up. The inline
 //     bootstrap script in app/layout.tsx writes these before first paint.
-//   - the BEHAVIOUR (coordinates, animation, highlights) is chessground config,
+//   - the BEHAVIOR (coordinates, animation, highlights) is chessground config,
 //     which components must push through `api.set()` when it changes.
 
 import { boardBackground, boardTheme, DEFAULT_BOARD_THEME } from "./boardThemes";

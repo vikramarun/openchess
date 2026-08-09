@@ -18,7 +18,7 @@
 //
 // The overflow half is the quietest of the four. A `<select>` is intrinsically
 // as wide as its LONGEST OPTION and a grid item is `min-width: auto`, so one
-// long book title ("Hypermodern — Indian defences (21 KB)") sized the
+// long book title ("Hypermodern — Indian defenses (21 KB)") sized the
 // repertoire grid's tracks and pushed the fourth dropdown past the right edge
 // of the page. Nothing errors, nothing looks broken above the fold — the page
 // is just wider than the screen.

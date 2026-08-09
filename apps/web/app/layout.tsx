@@ -136,7 +136,7 @@ export default function RootLayout({
           {/* Phones only (CSS decides; see .tabbar in globals.css). Last in the
               DOM because it is last on screen: a bar pinned to the bottom of the
               viewport should be the last thing a keyboard user tabs into, not
-              the first. It is a labelled <nav> landmark, so a screen-reader
+              the first. It is a labeled <nav> landmark, so a screen-reader
               rotor still reaches it directly. Rendered on the server too, so its
               links work before hydration. */}
           <TabBar />

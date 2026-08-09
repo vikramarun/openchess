@@ -11,7 +11,7 @@ import type { EvalScore } from "@/lib/evalScore";
 import { useBoardPrefs } from "@/lib/useBoardPrefs";
 // The board's look (squares, piece art) is CSS custom properties on <html> —
 // see app/board.css and lib/boardPrefs.ts. Nothing about the theme reaches this
-// component; only the behavioural preferences below do.
+// component; only the behavioral preferences below do.
 
 /** Read-only chessground board driven by a FEN string. Optionally highlights the
  *  last move (from/to squares) and flags the side in check — the standard cues

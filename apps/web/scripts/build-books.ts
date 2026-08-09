@@ -18,7 +18,7 @@
 // short enough that we hand off to the engine before UHO's skew matters.
 //
 // Books are organized by STYLE × SLOT, not by first move. "Sharp" is not one
-// defence — it is a weighted mix of the Open Sicilian, the King's Gambit, the
+// defense — it is a weighted mix of the Open Sicilian, the King's Gambit, the
 // Scotch, the Advance variations. Corpus frequency alone would wreck those
 // mixes (Réti outnumbers Larsen 23:1, so a "hypermodern" bot would just play
 // 1.Nf3 forever), so each opening gets a DESIGNED share and its weights are
@@ -107,7 +107,7 @@ const OPENINGS: Opening[] = [
   O("wing-gambit", "e2e4 c7c5 b2b4"),
   O("blackmar-diemer", "d2d4 d7d5 e2e4"),
   O("vienna-gambit", "e2e4 e7e5 b1c3 g8f6 f2f4"),
-  O("centre-game", "e2e4 e7e5 d2d4"),
+  O("center-game", "e2e4 e7e5 d2d4"),
   // --- Black vs 1.e4 ---
   O("sicilian", "e2e4 c7c5"),
   O("open-games", "e2e4 e7e5"),
@@ -149,7 +149,7 @@ const OPENINGS: Opening[] = [
   O("flank-d5-nf3", "g1f3 d7d5"),
   O("flank-nf6-nf3", "g1f3 g8f6"),
   // --- broad coverage tails (every game after a given first move) ---
-  // A style mix only names the defences it has an opinion about, so on its own
+  // A style mix only names the defenses it has an opinion about, so on its own
   // a White book leaves book the moment Black plays something else (1.e4 d5 and
   // a "Sharp" bot is calculating from move two). These add a thin mainline
   // continuation against EVERY reply. Weighted low, so they extend coverage
@@ -246,7 +246,7 @@ const BOOKS: BookDef[] = [
     mix: [["slav", 40], ["qgd", 30], ["queens-indian", 30]],
   },
   {
-    id: "b-d4-hypermodern", label: "Hypermodern — Indian defences", slot: "vsD4", style: "hypermodern", source: "balanced",
+    id: "b-d4-hypermodern", label: "Hypermodern — Indian defenses", slot: "vsD4", style: "hypermodern", source: "balanced",
     mix: [["nimzo-indian", 28], ["queens-indian", 24], ["kings-indian", 26], ["grunfeld", 22]],
   },
   {

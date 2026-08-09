@@ -10,7 +10,6 @@ import {
   DEMO_COIN,
   DEMO_END,
   DEMO_FRAMES,
-  DEMO_NOTES,
   DEMO_STAKE,
   DEMO_START,
   beatMs,
@@ -34,13 +33,16 @@ import { fmtUsdc, profitForStake } from "@/lib/escrow";
  *    - a hidden tab;
  *    - being scrolled off screen.
  *  On return it restarts from the coin rather than resuming: for a reel that is
- *  the better viewing, and it removes a whole class of resume-state bugs. */
-export function HomeDemo() {
+ *  the better viewing, and it removes a whole class of resume-state bugs.
+ *
+ *  `onFinishedChange` reports when the game is over, because the result card
+ *  renders in the pitch column next to the board rather than inside this
+ *  component — see `DemoResult` below. */
+export function HomeDemo({ onFinishedChange }: { onFinishedChange?: (done: boolean) => void }) {
   const [state, setState] = useState<DemoState>(DEMO_START);
   const [visible, setVisible] = useState(true);
   const [inView, setInView] = useState(true);
   const [reduced, setReduced] = useState(false);
-  const [replayNonce, setReplayNonce] = useState(0);
   const host = useRef<HTMLElement>(null);
 
   // Read in an effect, never in a state initializer: the initial state has to
@@ -102,14 +104,17 @@ export function HomeDemo() {
       alive = false;
       window.clearTimeout(handle);
     };
-  }, [running, reduced, replayNonce]);
+  }, [running, reduced]);
 
   const frame = DEMO_FRAMES[state.ply];
   const playing = state.phase === "play";
   const finished = state.phase === "result" || state.phase === "hold";
   const turn = sideToMoveFromFen(frame.fen);
   const mat = material(frame.fen);
-  const note = DEMO_NOTES[state.ply];
+
+  useEffect(() => {
+    onFinishedChange?.(finished);
+  }, [finished, onFinishedChange]);
 
   return (
     <section className="demo" ref={host} aria-label="Demo: how a staked bot game plays out">
@@ -156,65 +161,34 @@ export function HomeDemo() {
         captured={mat.whiteCaptured}
         edge={mat.advantage}
       />
-
-      {/* The payout card is ALWAYS rendered, and hidden until it is due — that
-          is what reserves its height from the first paint. It lands ~28s in, and
-          CLS accumulates over a page's whole lifetime, so appearing into an
-          unreserved slot would shove the whole page down long after it looked
-          settled. See .demo-outcome in globals.css for why this is not a
-          min-height. */}
-      <div className="demo-outcome">
-        {/* Kept deliberately short. The card is height-reserved from the first
-            paint, so every line it wraps to is dead space under the board for
-            the ~28s before it appears — which is why the "a real game can go
-            either way" caveat lives in the permanent note below instead of
-            here, where it would cost two lines of void and only be readable
-            once the game is already over. */}
-        <div className={`demo-payout${finished ? " on" : ""}`}>
-          <div className="demo-payout-top">
-            <span className="demo-payout-head">
-              <span className="player-dot white" aria-hidden /> Checkmate — White wins
-            </span>
-            <span className="demo-payout-amt">+{fmtUsdc(profitForStake(DEMO_STAKE))} USDC</span>
-          </div>
-          <div className="demo-payout-math">
-            {/* fmtUsdc trims trailing zeros, so this is "5" and not "5.00" —
-                without the unit it reads as a bare number. */}
-            Your {fmtUsdc(DEMO_STAKE)} USDC stake back, plus theirs, less the 1% fee.
-          </div>
-        </div>
-        {!finished && (
-          <div className="demo-caption">
-            {frame.san ? (
-              <>
-                <span className="demo-move">{frame.san}</span>
-                {note && <span className="demo-note-beat">{note}</span>}
-              </>
-            ) : (
-              <span className="muted">Drawing for colour…</span>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* The honesty line. Permanent, outside every phase branch, and in the
-          server-rendered HTML. */}
-      <p className="demo-note muted">
-        Demo — a scripted replay. Not a real game and not a real payout; a real one can go
-        either way.
-        {state.phase === "hold" && (
-          <>
-            {" "}
-            <button
-              type="button"
-              className="demo-replay"
-              onClick={() => setReplayNonce((n) => n + 1)}
-            >
-              Replay
-            </button>
-          </>
-        )}
-      </p>
     </section>
+  );
+}
+
+/** The result, for the slot beside the board.
+ *
+ *  Split out of `HomeDemo` because it renders in the pitch column rather than
+ *  under the board, and the two are different grid children — `finished` comes
+ *  back up through `onFinishedChange` rather than either of them owning the
+ *  other. Same reason `Lobby` reports through `onActiveChange`.
+ *
+ *  Always rendered, hidden until it is due: that is what reserves its height.
+ *  It appears ~28s in, CLS accumulates over a page's whole lifetime, and a fixed
+ *  min-height is a guess that under-reserves at some viewport. */
+export function DemoResult({ finished }: { finished: boolean }) {
+  return (
+    <div className={`demo-payout${finished ? " on" : ""}`}>
+      <div className="demo-payout-top">
+        <span className="demo-payout-head">
+          <span className="player-dot white" aria-hidden /> Checkmate — White wins
+        </span>
+        <span className="demo-payout-amt">+{fmtUsdc(profitForStake(DEMO_STAKE))} USDC</span>
+      </div>
+      <div className="demo-payout-math">
+        {/* fmtUsdc trims trailing zeros, so this is "5" and not "5.00" — without
+            the unit it reads as a bare number. */}
+        Your {fmtUsdc(DEMO_STAKE)} USDC stake back, plus theirs, less the 1% fee.
+      </div>
+    </div>
   );
 }

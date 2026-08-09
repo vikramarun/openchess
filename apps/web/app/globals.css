@@ -45,9 +45,9 @@
   --accent-cta-hover: #82c433;
 
   /* ---------- money ----------
-     This product settles USDC and had no colour for it: a stake, a payout,
+     This product settles USDC and had no color for it: a stake, a payout,
      "engine ready" and "free" all rendered in the same green. On a money app
-     "free" and "stakes" sharing a colour is a real defect, not a cosmetic one.
+     "free" and "stakes" sharing a color is a real defect, not a cosmetic one.
      Green now means live / free / ready. Gold means money. Kept brighter and
      more chromatic than --warn so the maintenance banner doesn't read as a
      payout. */
@@ -533,53 +533,13 @@ a:hover {
   text-transform: uppercase;
   letter-spacing: var(--tr-wide);
 }
-/* The payout card lands ~28s after load, and CLS accumulates over a page's whole
-   lifetime — so it must not shove the rest of the page down long after the page
-   looked settled.
-   The slot reserves the card's height by CONTAINING it from the first paint:
-   both children share one grid cell, and the card is `visibility: hidden` until
-   it is due. A fixed min-height was the obvious version of this and it was
-   wrong — the card is 173px at 440px wide and taller again at 320px, where the
-   fine print wraps, so any single number is a guess that under-reserves at some
-   viewport. (visibility, not opacity: it keeps the box in layout while taking
-   the text out of the accessibility tree, so a screen reader doesn't announce a
-   result that hasn't happened.) */
-.demo-outcome {
-  display: grid;
-}
-.demo-outcome > * {
-  grid-area: 1 / 1;
-  align-self: start;
-}
-.demo-caption {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-2);
-  padding-top: var(--s-2);
-  font-size: var(--t-sm);
-}
-.demo-move {
-  font-family: var(--font-mono);
-  color: var(--text-strong);
-  font-weight: 700;
-}
-.demo-note-beat {
-  color: var(--gold);
-  font-weight: 600;
-}
-.demo-note {
-  margin: 0;
-  font-size: var(--t-xs);
-}
-.demo-replay {
-  background: none;
-  border: 0;
-  padding: 0;
-  color: var(--blue);
-  font: inherit;
-  cursor: pointer;
-  text-decoration: underline;
-}
+/* The payout card takes the slot the engine banner used to hold, in the pitch
+   column beside the board. It is rendered from the first paint at
+   `visibility: hidden` so it reserves its own height: it appears ~28s in, CLS
+   accumulates over a page's whole lifetime, and any fixed min-height is a guess
+   that under-reserves at some viewport. (visibility, not opacity: it keeps the
+   box in layout while taking the text out of the accessibility tree, so a
+   screen reader doesn't announce a result that hasn't happened.) */
 
 /* The payout. Green plate and border, matching .result-banner.won, so "money
    in" looks the same here as it does at the end of a real game — but the AMOUNT
@@ -591,7 +551,7 @@ a:hover {
   border-radius: var(--r-lg);
   background: var(--win-bg);
   /* Present from the first paint so it reserves its own height; see
-     .demo-outcome. `.on` is what actually shows it. */
+     the comment above this rule. `.on` is what actually shows it. */
   visibility: hidden;
 }
 .demo-payout.on {
@@ -654,44 +614,76 @@ a:hover {
 }
 .coin {
   position: relative;
-  width: 84px;
-  height: 84px;
+  width: clamp(76px, 26%, 104px);
+  aspect-ratio: 1;
   transform-style: preserve-3d;
-  /* `forwards`: the disc STAYS on the face it landed on for the whole call-out
+  /* `forwards`: the chip STAYS on the face it landed on for the whole call-out
      beat. Without it it snaps back to 0deg mid-readout. */
-  animation: coin-toss-white 1.5s cubic-bezier(0.18, 0.72, 0.3, 1) forwards;
+  animation: coin-toss-light 1.5s cubic-bezier(0.18, 0.72, 0.3, 1) forwards;
+  filter: drop-shadow(0 14px 20px #000000a6);
 }
 .coin.lands-black {
-  animation-name: coin-toss-black;
+  animation-name: coin-toss-dark;
 }
+
+/* A struck chip, in three stacked background layers: a sheen on top, then the
+   raised inner face, then the notched rim showing through as a ring where the
+   inner face stops. The repeating-conic-gradient is what reads as milling. */
 .coin-face {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
   border-radius: 50%;
-  font-size: 46px;
-  line-height: 1;
   backface-visibility: hidden;
-  box-shadow: 0 10px 26px #000000a6;
 }
-.coin-face.white {
-  background: linear-gradient(158deg, #f6f4f0, #cbc4b8);
-  color: #2a2825;
-  border: 2px solid #ffffff40;
+.coin-face.light {
+  background:
+    linear-gradient(148deg, #ffffff66, #ffffff00 46%),
+    radial-gradient(circle at 50% 46%, #ffeaad 0 24%, #f0cd70 0 61%, #00000000 61.5%),
+    repeating-conic-gradient(from -7.5deg, #ffeec0 0deg 7.5deg, #b98b21 7.5deg 15deg);
+  box-shadow:
+    inset 0 0 0 1px #ffffff5c,
+    inset 0 -6px 12px #8a610f66;
 }
-.coin-face.black {
-  background: linear-gradient(158deg, #3b3833, #1c1a17);
-  color: #ece8e0;
-  border: 2px solid #ffffff1f;
+.coin-face.dark {
+  /* The other side of the same minted coin: gold milling, graphite face. */
+  background:
+    linear-gradient(148deg, #ffffff3d, #ffffff00 46%),
+    radial-gradient(circle at 50% 46%, #3b3630 0 24%, #24211c 0 61%, #00000000 61.5%),
+    repeating-conic-gradient(from -7.5deg, #e2c887 0deg 7.5deg, #7a6425 7.5deg 15deg);
+  box-shadow:
+    inset 0 0 0 1px #ffffff33,
+    inset 0 -6px 12px #00000080;
   transform: rotateX(180deg);
 }
+/* The engraved ring between the milling and the stamp. */
+.coin-rim {
+  position: absolute;
+  inset: 13%;
+  border-radius: 50%;
+  border: 1px solid #00000038;
+  box-shadow: 0 1px 0 #ffffff40;
+}
+.coin-face.dark .coin-rim {
+  border-color: #ffffff26;
+  box-shadow: 0 1px 0 #0000006b;
+}
+.coin-mark {
+  position: relative;
+  /* Struck, not printed: a hairline highlight under the shape reads as depth. */
+  filter: drop-shadow(0 1px 0 #ffffff4d);
+}
+.coin-face.dark .coin-mark {
+  filter: drop-shadow(0 1px 0 #00000073);
+}
+
 /* Two keyframe sets rather than one with a var() inside rotateX(): custom
    properties in keyframes are substituted at computed-value time and older
    Safari is unreliable about it, and this is the first thing on the page on a
-   cold mobile load. 5 turns lands front-up (white), 5.5 lands back-up (black);
-   the mid-keyframe arc is what sells it as a toss rather than a spinning plate. */
-@keyframes coin-toss-white {
+   cold mobile load. 5 turns lands front-up, 5.5 lands back-up; the mid-keyframe
+   arc is what sells it as a toss rather than a spinning plate. */
+@keyframes coin-toss-light {
   0% {
     transform: translateY(6px) rotateX(0deg) scale(0.9);
   }
@@ -702,7 +694,7 @@ a:hover {
     transform: translateY(0) rotateX(1800deg) scale(1);
   }
 }
-@keyframes coin-toss-black {
+@keyframes coin-toss-dark {
   0% {
     transform: translateY(6px) rotateX(0deg) scale(0.9);
   }
@@ -713,6 +705,7 @@ a:hover {
     transform: translateY(0) rotateX(1980deg) scale(1);
   }
 }
+
 .coin-call {
   font-size: var(--t-md);
   font-weight: 700;
@@ -745,21 +738,11 @@ a:hover {
   }
 }
 
-/* ---------- engine banner ---------- */
-.engine-banner {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin: 20px auto 26px;
-  padding: 12px 18px;
-  max-width: 620px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  font-size: 14px;
-}
-.engine-banner .free {
+/* All that survives the engine banner, which used to sit in the hero and is now
+   a sentence in the how-it-works footnote: the mark on "running in your browser
+   for free", which is the part of it worth keeping. Green, not gold — the engine
+   being free is not a money figure. */
+.free {
   color: var(--accent);
   font-weight: 600;
 }
@@ -2275,6 +2258,14 @@ table.standings tr.me td {
   border-radius: var(--r-lg);
   padding: 16px;
 }
+/* The footnotes the hero used to carry: what the demo board is, and what the
+   in-browser engine costs. Both are true and both need saying — they just
+   aren't the pitch. */
+.how-note {
+  margin: var(--s-4) 0 0;
+  font-size: var(--t-sm);
+  max-width: 70ch;
+}
 .how-num {
   width: 26px;
   height: 26px;
@@ -2333,7 +2324,7 @@ table.standings tr.me td {
   color: var(--text-strong);
   margin: 30px 0 8px;
 }
-/* Line-height only, deliberately NO `color`. A colour here would be `.legal p`
+/* Line-height only, deliberately NO `color`. A color here would be `.legal p`
    at (0,1,1), which outranks every single-class modifier put on those same
    elements no matter what order they appear in — it silently ate both
    `.legal-meta.muted` and `.legal-lede`'s `--text-strong`, leaving the lede
@@ -2658,7 +2649,7 @@ select:focus-visible,
   display: grid;
   gap: 4px;
   /* Grid items default to min-width:auto, so the widest book title
-     ("Hypermodern — Indian defences (21 KB)") pushed the fourth slot off the
+     ("Hypermodern — Indian defenses (21 KB)") pushed the fourth slot off the
      right edge of the page. Let the track win. */
   min-width: 0;
 }

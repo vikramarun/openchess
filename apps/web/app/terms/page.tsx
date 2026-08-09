@@ -165,12 +165,12 @@ export default function TermsPage() {
 
       <h2>10. The software</h2>
       <p>
-        The client, the server and the contract are open source under the MIT licence and are
+        The client, the server and the contract are open source under the MIT license and are
         available on{" "}
         <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
           GitHub
         </a>
-        . The licence governs the code; these terms govern this hosted service.
+        . The license governs the code; these terms govern this hosted service.
       </p>
 
       <h2>11. Changes</h2>

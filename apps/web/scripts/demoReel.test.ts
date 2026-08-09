@@ -66,7 +66,7 @@ check(
 // Castling has two UCI spellings and chessops writes the wrong one. Nothing in
 // the reel reaches an engine, but a king-takes-rook lastMove would highlight the
 // rook's square instead of the king's — and this is the only file in the app
-// that serialises castling by hand. O-O-O is ply 23.
+// that serializes castling by hand. O-O-O is ply 23.
 const castle = DEMO_FRAMES[23];
 check(
   "castling is the king's two-square move, not king-takes-rook",
@@ -154,15 +154,26 @@ check(
   "reduced motion remounts the board rather than animating 33 plies at once",
   /key=\{reduced \? "static" : "reel"\}/.test(demo),
 );
-// Read from the RAW source: the point is that the disclaimer is in the rendered
-// output, and a stripped copy would also pass if it only survived in a comment.
+// Read from the RAW source: the point is that these are in the rendered output,
+// and a stripped copy would also pass if they only survived in a comment.
+//
+// Two halves, in two files. The badge is on the board itself and shows in every
+// frame, including the server render; the words moved down to the how-it-works
+// footnote when the hero was cut back. A demo board on a money product needs
+// both — the badge to catch someone who only glances, the sentence to say what
+// it actually is.
 check(
-  "the board is labelled a demo in every frame",
-  demoRaw.includes('className="demo-chip"') && demoRaw.includes('className="demo-note muted"'),
-  "the Demo chip and the permanent note are what stop this reading as a real game",
+  "the board carries a Demo badge in every frame",
+  demoRaw.includes('className="demo-chip"'),
+  "nothing on the board would say it isn't a live game",
 );
 
 const page = read("app/page.tsx");
+check(
+  "the page says in words that the board is a demo",
+  /scripted demo/i.test(page) && /not a real game/i.test(page),
+  "the disclaimer that pairs with the badge is gone from app/page.tsx",
+);
 // The `inGame` ternary's else-arm runs from ") : (" to the start of the lobby
 // slot; <HomeDemo> has to be inside it.
 //

@@ -3,7 +3,7 @@ import { SOCIALS } from "@/lib/brand";
 /** The marks, as path data in a 0 0 24 24 box — the two brands' own official
  *  glyphs, which is what makes them recognisable at 18px. Inline rather than
  *  <img>, so they inherit `currentColor` and follow the link's hover state
- *  instead of being two fixed-colour rasters.
+ *  instead of being two fixed-color rasters.
  *
  *  Keyed by the ids in lib/brand.ts SOCIALS; a social added there without a
  *  glyph here renders as a text label rather than an empty box. */

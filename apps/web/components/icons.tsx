@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
  *  active route. That rules out the two things already in this codebase —
  *  unicode chess glyphs render IN THE FONT, so they inherit Noto Sans's design
  *  and vary by platform where coverage is missing; and the emoji used by
- *  `.mode-card` and Leaderboard are colour glyphs that cannot go monochrome,
+ *  `.mode-card` and Leaderboard are color glyphs that cannot go monochrome,
  *  which is the whole visual grammar of a tab bar.
  *
  *  24px grid, 1.75 stroke, no fills — a filled glyph at 22px on a dark panel

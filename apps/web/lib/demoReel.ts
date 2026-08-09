@@ -46,9 +46,13 @@ export const DEMO_SAN = [
   "Rd8#",
 ] as const;
 
-/** A caption beat, keyed by frame index (1-based = ply). Only a handful of plies
- *  carry one; that is what makes the reel read as a story rather than as pieces
- *  moving. */
+/** The plies that get room to land, keyed by frame index (1-based = ply).
+ *
+ *  These were captions once; the reel shows no move text now, so what survives
+ *  is the PACING — `beatMs` holds each of these a second longer than a normal
+ *  move, which is what makes four sacrifices read as four separate moments
+ *  rather than a blur. The strings are kept because they say why each ply is on
+ *  the list. */
 export const DEMO_NOTES: Record<number, string> = {
   19: "Knight sacrifice",
   25: "Rook sacrifice",
@@ -179,10 +183,13 @@ const BEAT = {
   mate: 1600,
   hold: 8000,
 };
-/** Loops before the reel settles on the payout with a Replay button. Two is
- *  enough for a second look and short of the point where motion on a landing
- *  page becomes something you want to leave. */
-const LOOPS = 2;
+/** Plays once, then rests on the result.
+ *
+ *  It looped twice when the result lived under the board. It sits in the pitch
+ *  column now, right beside the call to action, so a second loop would clear
+ *  that card and bring it back — churn next to the button the page is asking
+ *  you to press. One complete story, then stillness. */
+const LOOPS = 1;
 
 /** How long to SIT in this state before advancing. */
 export function beatMs(s: DemoState): number {

@@ -3,7 +3,7 @@
 // downloads. The native client (chess-client) is the power tier; this is the
 // on-ramp.
 //
-// No display name lives here any more. A seat is labelled by the USERNAME of the
+// No display name lives here any more. A seat is labeled by the USERNAME of the
 // wallet sitting in it, resolved server-side, because a name the client chose
 // can name anybody — see `seat_info` in crates/server/src/main.rs.
 //
@@ -28,7 +28,7 @@ import { DEFAULT_TIME_POLICY, normalizeTimePolicy, timePolicyLabel, type TimePol
 export type BrowserBotConfig = {
   /** Stop using an opening book after this many plies. */
   bookMaxPly: number;
-  /** Which built-in opening books this bot plays, per colour/reply slot. */
+  /** Which built-in opening books this bot plays, per color/reply slot. */
   repertoire: Repertoire;
   /** How it spends its clock. */
   time: TimePolicy;

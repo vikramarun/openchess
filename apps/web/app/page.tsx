@@ -2,48 +2,30 @@
 
 import { useCallback, useState } from "react";
 
-import { HomeDemo } from "@/components/HomeDemo";
+import { DemoResult, HomeDemo } from "@/components/HomeDemo";
 import { Lobby } from "@/components/Lobby";
 import { Logo } from "@/components/Logo";
-import { useEngine } from "@/lib/engineContext";
 import { useMounted } from "@/lib/useMounted";
 
 export default function Home() {
-  const { status } = useEngine();
   const mounted = useMounted();
   // The lobby swaps itself for a board when you're in a game. The pitch above it
-  // — hero, demo reel and engine banner — is most of a viewport, which pushed
-  // your own board off the bottom of the fold, the result banner to ~525px and
-  // "Back to lobby" to ~1000px, the same height that put the top nav out of
-  // reach. Stand it down while you play; it comes back when you do.
+  // — hero and demo reel — is most of a viewport, which pushed your own board off
+  // the bottom of the fold, the result banner to ~525px and "Back to lobby" to
+  // ~1000px, the same height that put the top nav out of reach. Stand it down
+  // while you play; it comes back when you do.
   const [inGame, setInGame] = useState(false);
-  // Stable identity: Lobby reports through this from an effect, and a fresh
-  // callback each render would re-run it every render.
+  // Stable identity: both children report through these from an effect, and a
+  // fresh callback each render would re-run it every render.
   const onActiveChange = useCallback((active: boolean) => setInGame(active), []);
+
+  // The reel's board and its result sit in different columns of .home-hero, so
+  // the phase travels up here rather than one of them nesting the other.
+  const [demoDone, setDemoDone] = useState(false);
+  const onFinishedChange = useCallback((done: boolean) => setDemoDone(done), []);
 
   const scrollToPlay = () =>
     document.getElementById("play")?.scrollIntoView({ behavior: "smooth", block: "start" });
-
-  const banner =
-    status === "ready" ? (
-      <span>
-        Your engine is <b>ready</b>. Stockfish,{" "}
-        <span className="free">running in your browser for free</span>. No download, no
-        server cost.
-      </span>
-    ) : status === "loading" ? (
-      <span>Loading Stockfish in your browser…</span>
-    ) : status === "error" ? (
-      <span>
-        Couldn’t load the in-browser engine. You can still bring your own with the native
-        client.
-      </span>
-    ) : (
-      <span>
-        Stockfish, <span className="free">running in your browser for free</span>. No
-        download until you play or turn on the eval bar.
-      </span>
-    );
 
   return (
     <div className="container">
@@ -60,13 +42,13 @@ export default function Home() {
         // game.
         <section className="home-hero">
           <div className="home-hero-board">
-            <HomeDemo />
+            <HomeDemo onFinishedChange={onFinishedChange} />
           </div>
           <div className="home-hero-pitch">
             <h1 className="display d2">
               <Logo size={38} className="mark" /> OpenChess
             </h1>
-            <p className="home-lede">Two bots. One coin flip. Winner takes the pot.</p>
+            <p className="home-lede">Two bots. One winner. May the best engine win.</p>
             <p className="home-sub muted">
               Bring your own engine or use the one already in your browser. Play free, or
               stake USDC and settle onchain.
@@ -79,10 +61,11 @@ export default function Home() {
                 How it works
               </a>
             </div>
-            <div className="engine-banner">
-              <span className={`dot ${status}`} />
-              {banner}
-            </div>
+            {/* The result lands here, in the slot the engine-status banner used
+                to hold. Rendered from the first paint and hidden until it is
+                due, so it reserves its own height instead of shoving the page
+                down ~28 seconds after it looked settled. */}
+            <DemoResult finished={demoDone} />
           </div>
         </section>
       )}
@@ -123,6 +106,15 @@ export default function Home() {
               </div>
             </div>
           </div>
+          {/* Both of these used to sit up in the hero — the engine-status banner
+              and the reel's disclaimer. They are footnotes, not the pitch, and
+              the board still carries its own DEMO badge in every frame. */}
+          <p className="how-note muted">
+            The board above is a scripted demo, not a real game or a real payout — a real one
+            can go either way. The engine is Stockfish,{" "}
+            <span className="free">running in your browser for free</span>: nothing downloads
+            until you play or turn on the eval bar.
+          </p>
         </div>
       )}
     </div>
