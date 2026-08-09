@@ -120,4 +120,71 @@ check(
   `max-width is ${decl(field, "max-width") ?? "unset"}`,
 );
 
+// --- half four: the mobile tab bar ---
+// Below 720px the header's `.nav` is display:none and this bar is the ONLY way
+// to reach four of the five destinations, so it fails in two silent ways.
+//
+// If it ever outranks `.modal-overlay`, the pre-game stake confirmation gets
+// five tappable links across its bottom edge — the same bug as a header that
+// outranks it, on the same money path. It must also stay under the HEADER:
+// `.site-header` is sticky with a z-index, so it is a stacking context and
+// `.wallet-pop` (the bankroll popover, z-index 50) is scoped inside it, meaning
+// that 50 never competes at the root. A bar above the header would paint over
+// the bottom of the popover, which on a phone is where Deposit lives.
+//
+// And a `position: fixed` bar takes no space in the flow, so without a
+// compensating bottom padding the last row of the footer sits permanently
+// underneath it — which no build error and no desktop screenshot would show.
+const tabbar = ruleBody(".tabbar");
+
+check(".tabbar rule exists", tabbar !== null);
+check(
+  ".tabbar is fixed to the viewport",
+  decl(tabbar, "position") === "fixed",
+  `position is ${decl(tabbar, "position") ?? "unset"}`,
+);
+
+const tabbarZRaw = decl(tabbar, "z-index");
+const tabbarZ = num(tabbarZRaw);
+check(".tabbar sets a z-index", Number.isFinite(tabbarZ), `got ${tabbarZRaw ?? "unset"}`);
+check(
+  "a modal outranks the tab bar",
+  Number.isFinite(tabbarZ) && Number.isFinite(overlayZ) && tabbarZ < overlayZ,
+  `tabbar ${tabbarZ} vs overlay ${overlayZ}`,
+);
+check(
+  "the tab bar does not outrank the header",
+  Number.isFinite(tabbarZ) && Number.isFinite(headerZ) && tabbarZ < headerZ,
+  `tabbar ${tabbarZ} vs header ${headerZ}`,
+);
+
+// The bar's height and the padding that clears it must read the SAME token, or
+// they drift the first time someone makes the bar taller.
+check(
+  ":root declares --tabbar-h",
+  /--tabbar-h\s*:\s*\d/.test(css.slice(0, css.indexOf("}"))),
+  "no --tabbar-h in the first block of the file",
+);
+check(
+  ".tabbar's height comes from --tabbar-h",
+  /height:\s*[^;\n]*var\(--tabbar-h\)/.test(tabbar ?? ""),
+  `height is ${decl(tabbar, "height") ?? "unset"}`,
+);
+check(
+  ".tabbar clears the home indicator",
+  /padding-bottom:\s*env\(safe-area-inset-bottom/.test(tabbar ?? ""),
+  "no env(safe-area-inset-bottom) padding on .tabbar",
+);
+
+// The clearance itself lives on <body> INSIDE the ≤720px query — indented, so
+// `ruleBody` cannot see it by design. Match the query's text directly.
+const mobile = css.slice(css.indexOf("@media (max-width: 720px)"));
+check(
+  "phones pad the page below the bar",
+  /\n\s+body\s*\{[^}]*padding-bottom:\s*calc\([^;}]*var\(--tabbar-h\)[^;}]*env\(safe-area-inset-bottom/.test(
+    mobile,
+  ),
+  "no `body { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)) }` in a ≤720px query",
+);
+
 process.exit(failed === 0 ? 0 : 1);

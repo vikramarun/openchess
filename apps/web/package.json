@@ -28,6 +28,8 @@
     "test:gamemeta": "tsx scripts/gameSummary.test.ts",
     "test:avatar": "tsx scripts/avatar.test.ts",
     "test:layout": "tsx scripts/layout.test.ts",
+    "test:tabs": "tsx scripts/tabs.test.ts",
+    "test:demo": "tsx scripts/demoReel.test.ts",
     "test:profile": "tsx scripts/profileFilter.test.ts"
   },
   "dependencies": {

@@ -1,17 +1,128 @@
+/* Design tokens.
+ *
+ * Additive over the original thirteen: nothing below CHANGES a value that
+ * shipped, because --bg / --text-strong / --accent are mirrored by hand into
+ * lib/brand.ts (MARK_TILE / MARK_LIGHT / MARK_ACCENT) and from there into
+ * app/icon.svg, the apple icon, the OG cards and manifest.ts. Editing one of
+ * those three here is a five-file change plus `pnpm gen:icon`; adding a name
+ * beside it is one file. Prefer adding.
+ *
+ * Note what is deliberately NOT a token: the three z-indexes (.site-header 40,
+ * .modal-overlay 50, .tabbar 30). scripts/layout.test.ts reads them straight
+ * through Number(), so `z-index: var(--anything)` scores as NaN and fails the
+ * check that keeps a modal above the header on the money path. They stay bare
+ * integers, each commented with the other two. */
 :root {
+  /* ---------- surfaces ---------- */
   --bg: #161512;
   --bg-2: #1b1a17;
   --panel: #262421;
   --panel-2: #2b2a27;
   --border: #ffffff14;
+  /* For a card that has to lift off --panel, and for hover. */
+  --border-strong: #ffffff29;
+
+  /* ---------- text ---------- */
   --text: #bababa;
   --text-strong: #ededec;
   --muted: #9c968c;
+
+  /* ---------- brand + status ---------- */
   --accent: #629924;
   --accent-hover: #6fab2a;
   --blue: #3692e7;
   --danger: #e06c6c;
+  /* Names for hexes that were already hardcoded around this file. Same values,
+     so adopting them at the call sites is a visual no-op. */
+  --accent-weak: #62992418;
+  --warn: #d6a13a;
+  --win-bg: #2a3a1c;
+  --loss-bg: #3a2222;
+  --loss-border: #7a3b3b;
+  /* A louder green for the affirmative button only. --accent itself can't move
+     without moving the mark with it (see the header comment). */
+  --accent-cta: #74b32b;
+  --accent-cta-hover: #82c433;
+
+  /* ---------- money ----------
+     This product settles USDC and had no colour for it: a stake, a payout,
+     "engine ready" and "free" all rendered in the same green. On a money app
+     "free" and "stakes" sharing a colour is a real defect, not a cosmetic one.
+     Green now means live / free / ready. Gold means money. Kept brighter and
+     more chromatic than --warn so the maintenance banner doesn't read as a
+     payout. */
+  --gold: #f0b429;
+  --gold-hover: #ffc848;
+  --gold-ink: #1b1405;
+  --gold-weak: #f0b4291f;
+  --gold-line: #f0b4293d;
+  --ring-gold: 0 0 0 3px #f0b4292e;
+
+  /* ---------- radii ----------
+     --radius stays 6px: ~90 rules read it, including <input>, <select>, <code>
+     and every pill, and a 14px-radius <select> looks broken. Cards opt UP to
+     --r-lg explicitly. */
   --radius: 6px;
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+
+  /* ---------- spacing, 4px base ---------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+  --s-16: 64px;
+
+  /* ---------- type ----------
+     --t-base is the 15px html/body already sets. The display sizes are clamped
+     because the hero has to survive 320px and 1440px with one declaration. */
+  --t-xs: 12px;
+  --t-sm: 13px;
+  --t-base: 15px;
+  --t-md: 17px;
+  --t-lg: 20px;
+  --t-xl: 24px;
+  --t-d3: clamp(22px, 3.4vw, 30px);
+  --t-d2: clamp(28px, 5vw, 44px);
+  --t-d1: clamp(38px, 8.5vw, 68px);
+  --lh-tight: 1.04;
+  --lh-snug: 1.2;
+  --lh-base: 1.5;
+  --tr-tight: -0.03em;
+  --tr-wide: 0.06em;
+
+  /* ---------- elevation ---------- */
+  --sh-1: 0 1px 2px #00000033;
+  --sh-2: 0 6px 18px #00000040;
+  --sh-3: 0 12px 40px #00000070;
+  --sh-up: 0 -8px 24px #00000047;
+
+  /* ---------- motion ---------- */
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --dur-1: 120ms;
+  --dur-2: 220ms;
+  --dur-3: 420ms;
+
+  /* ---------- chrome geometry ----------
+     --tabbar-h is read in two places that MUST agree: the bar's own height, and
+     the <body> padding that keeps the footer out from under it. A fixed bar
+     takes no space in the flow, so if those drift the last line of the footer
+     silently sits underneath it. scripts/layout.test.ts pins the pair. */
+  --header-h: 56px;
+  --tabbar-h: 58px;
+  --content-w: 1040px;
+
+  /* ---------- mono ---------- */
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
 }
 
 * {
@@ -59,6 +170,31 @@ a:hover {
   white-space: nowrap;
 }
 
+/* ---------- display type ----------
+   There is no second webfont. Noto Sans is loaded as a VARIABLE font (app/
+   layout.tsx passes no `weight`), so the whole 100–900 axis is already in the
+   file we ship — 800 costs nothing extra, where a display face would be a
+   second payload and a second way for scripts/font.test.ts to go wrong.
+   The size comes from the clamped --t-d* tokens, so one declaration survives
+   320px and 1440px. */
+.display {
+  font-weight: 800;
+  letter-spacing: var(--tr-tight);
+  line-height: var(--lh-tight);
+  color: var(--text-strong);
+  text-wrap: balance;
+  margin: 0;
+}
+.display.d1 {
+  font-size: var(--t-d1);
+}
+.display.d2 {
+  font-size: var(--t-d2);
+}
+.display.d3 {
+  font-size: var(--t-d3);
+}
+
 /* ---------- header ---------- */
 /* Sticky, because a game view is far taller than a viewport: "Back to lobby"
    sits ~1000px down on a page that still carries a lobby's worth of content
@@ -74,11 +210,22 @@ a:hover {
   z-index: 40;
   display: flex;
   align-items: center;
-  gap: 28px;
-  padding: 0 24px;
-  height: 56px;
-  background: var(--panel-2);
+  padding: 0 var(--s-6);
+  height: var(--header-h);
+  /* --bg-2, not --panel-2: the chrome recedes one step so the page's cards read
+     as the lit surface rather than competing with the bar above them. */
+  background: var(--bg-2);
   border-bottom: 1px solid var(--border);
+}
+/* Holds the header's contents to the same column as .container, while the
+   background and bottom border above stay full-bleed. */
+.header-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-8);
+  width: 100%;
+  max-width: var(--content-w);
+  margin: 0 auto;
 }
 .brand {
   display: flex;
@@ -88,6 +235,8 @@ a:hover {
   font-weight: 700;
   color: var(--text-strong);
   letter-spacing: -0.5px;
+  text-decoration: none;
+  flex: none;
 }
 /* The mark carries its own fills, so this is alignment only. .brand aligns on
    the baseline, which an inline SVG meets with its bottom edge — centering it
@@ -98,19 +247,28 @@ a:hover {
 }
 .nav {
   display: flex;
-  gap: 22px;
+  align-items: center;
+  gap: var(--s-1);
   flex: 1;
+  min-width: 0;
 }
 .nav a {
   color: var(--text);
   font-weight: 600;
-  text-transform: uppercase;
-  font-size: 13px;
-  letter-spacing: 0.5px;
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-pill);
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
 .nav a:hover {
   color: var(--text-strong);
+  background: #ffffff0d;
   text-decoration: none;
+}
+.nav a.on {
+  color: var(--text-strong);
+  background: var(--accent-weak);
 }
 .header-actions {
   display: flex;
@@ -140,8 +298,12 @@ a:hover {
   background: var(--accent);
   box-shadow: 0 0 6px var(--accent);
 }
+/* Blue, not amber: this is a PROGRESS state, not a warning, and amber now sits
+   one hue away from --gold, which this app spends on money. A pulsing amber dot
+   beside a gold "Deposit" button reads as the same signal twice. --warn keeps
+   the amber, for the maintenance banner that genuinely is one. */
 .dot.loading {
-  background: #d6a13a;
+  background: var(--blue);
   animation: pulse 1s infinite;
 }
 .dot.error {
@@ -196,7 +358,7 @@ a:hover {
   z-index: 50;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   padding: 4px;
 }
@@ -204,8 +366,12 @@ a:hover {
   margin: 0;
   border: none;
   background: transparent;
-  /* The panel's own 18px is tuned for a full-width page section; in here it is
-     36px of a 360px popover. */
+  box-shadow: none;
+  /* Square, deliberately: .panel is 14px now and this sits 4px inside a 14px
+     popover, so an inherited radius bulges out through the corner. */
+  border-radius: 0;
+  /* The panel's own 20px is tuned for a full-width page section; in here it is
+     40px of a 360px popover. */
   padding: 14px;
 }
 
@@ -267,27 +433,290 @@ a:hover {
 }
 
 /* ---------- hero ---------- */
-.hero {
-  text-align: center;
-  padding: 26px 0 22px;
+/* ---------- homepage hero ---------- */
+/* Board first, pitch second — in the DOM as well as on screen, so a phone gets
+   the demo before it gets a word of copy. Above 900px the two sit side by side;
+   the board keeps the wider track because it is the argument. */
+/* The board is capped rather than given the free track. At 1fr it grew to 570px
+   on a 1280px screen, which put the whole reel — bars, board, payout slot — at
+   922px and pushed the Play card, the thing the page is actually asking for,
+   entirely below a 720px fold. */
+.home-hero {
+  display: grid;
+  grid-template-columns: minmax(300px, 440px) minmax(300px, 1fr);
+  gap: var(--s-8);
+  align-items: start;
+  padding: var(--s-6) 0 var(--s-8);
 }
-.hero h1 {
-  font-size: 46px;
-  margin: 0 0 8px;
+.home-hero-pitch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  align-items: flex-start;
+}
+.home-hero-pitch h1 {
+  font-size: var(--t-d2);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.home-hero-pitch h1 .mark {
+  flex: none;
+}
+.home-lede {
+  font-size: var(--t-lg);
+  font-weight: 600;
   color: var(--text-strong);
-  letter-spacing: -1px;
+  margin: 0;
+  text-wrap: balance;
 }
-/* Nudged off the baseline so the rook's base lines up with the wordmark's,
-   rather than its bounding box bottom. */
-.hero h1 .mark {
-  vertical-align: -0.06em;
-  margin-right: 4px;
+.home-sub {
+  font-size: var(--t-base);
+  margin: 0;
+  max-width: 46ch;
 }
-.hero p {
-  font-size: 17px;
-  color: var(--muted);
-  margin: 0 auto;
-  max-width: 640px;
+.home-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+}
+
+/* ---------- homepage demo reel ---------- */
+.demo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+/* Exists to be the positioned ancestor for the coin scrim and the Demo chip, so
+   <Chessboard>'s own DOM stays untouched. */
+.demo-board {
+  position: relative;
+}
+.demo-chip {
+  position: absolute;
+  top: var(--s-2);
+  left: var(--s-2);
+  z-index: 3;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  background: #12110fd9;
+  border: 1px solid var(--border-strong);
+  color: var(--text-strong);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tr-wide);
+}
+/* The payout card lands ~28s after load, and CLS accumulates over a page's whole
+   lifetime — so it must not shove the rest of the page down long after the page
+   looked settled.
+   The slot reserves the card's height by CONTAINING it from the first paint:
+   both children share one grid cell, and the card is `visibility: hidden` until
+   it is due. A fixed min-height was the obvious version of this and it was
+   wrong — the card is 173px at 440px wide and taller again at 320px, where the
+   fine print wraps, so any single number is a guess that under-reserves at some
+   viewport. (visibility, not opacity: it keeps the box in layout while taking
+   the text out of the accessibility tree, so a screen reader doesn't announce a
+   result that hasn't happened.) */
+.demo-outcome {
+  display: grid;
+}
+.demo-outcome > * {
+  grid-area: 1 / 1;
+  align-self: start;
+}
+.demo-caption {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  padding-top: var(--s-2);
+  font-size: var(--t-sm);
+}
+.demo-move {
+  font-family: var(--font-mono);
+  color: var(--text-strong);
+  font-weight: 700;
+}
+.demo-note-beat {
+  color: var(--gold);
+  font-weight: 600;
+}
+.demo-note {
+  margin: 0;
+  font-size: var(--t-xs);
+}
+.demo-replay {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--blue);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* The payout. Green plate and border, matching .result-banner.won, so "money
+   in" looks the same here as it does at the end of a real game — but the AMOUNT
+   is gold, which is what this app spends on money everywhere else. */
+.demo-payout {
+  width: 100%;
+  padding: var(--s-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-lg);
+  background: var(--win-bg);
+  /* Present from the first paint so it reserves its own height; see
+     .demo-outcome. `.on` is what actually shows it. */
+  visibility: hidden;
+}
+.demo-payout.on {
+  visibility: visible;
+  animation: demo-pop var(--dur-2) var(--ease) both;
+}
+/* Result and amount share a row where there's width for it, and wrap to two
+   where there isn't. Either way the card reserves its own height, so the wrap
+   costs nothing but space. */
+.demo-payout-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.demo-payout-head {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.demo-payout-amt {
+  font-size: var(--t-xl);
+  font-weight: 800;
+  letter-spacing: var(--tr-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.demo-payout-math {
+  font-size: var(--t-sm);
+  margin-top: var(--s-1);
+}
+@keyframes demo-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------- the coin ---------- */
+.demo-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-5);
+  background: #12110fcc;
+  border-radius: var(--radius);
+  perspective: 700px;
+}
+.coin {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  transform-style: preserve-3d;
+  /* `forwards`: the disc STAYS on the face it landed on for the whole call-out
+     beat. Without it it snaps back to 0deg mid-readout. */
+  animation: coin-toss-white 1.5s cubic-bezier(0.18, 0.72, 0.3, 1) forwards;
+}
+.coin.lands-black {
+  animation-name: coin-toss-black;
+}
+.coin-face {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 46px;
+  line-height: 1;
+  backface-visibility: hidden;
+  box-shadow: 0 10px 26px #000000a6;
+}
+.coin-face.white {
+  background: linear-gradient(158deg, #f6f4f0, #cbc4b8);
+  color: #2a2825;
+  border: 2px solid #ffffff40;
+}
+.coin-face.black {
+  background: linear-gradient(158deg, #3b3833, #1c1a17);
+  color: #ece8e0;
+  border: 2px solid #ffffff1f;
+  transform: rotateX(180deg);
+}
+/* Two keyframe sets rather than one with a var() inside rotateX(): custom
+   properties in keyframes are substituted at computed-value time and older
+   Safari is unreliable about it, and this is the first thing on the page on a
+   cold mobile load. 5 turns lands front-up (white), 5.5 lands back-up (black);
+   the mid-keyframe arc is what sells it as a toss rather than a spinning plate. */
+@keyframes coin-toss-white {
+  0% {
+    transform: translateY(6px) rotateX(0deg) scale(0.9);
+  }
+  50% {
+    transform: translateY(-56px) rotateX(1080deg) scale(1.06);
+  }
+  100% {
+    transform: translateY(0) rotateX(1800deg) scale(1);
+  }
+}
+@keyframes coin-toss-black {
+  0% {
+    transform: translateY(6px) rotateX(0deg) scale(0.9);
+  }
+  50% {
+    transform: translateY(-56px) rotateX(1170deg) scale(1.06);
+  }
+  100% {
+    transform: translateY(0) rotateX(1980deg) scale(1);
+  }
+}
+.coin-call {
+  font-size: var(--t-md);
+  font-weight: 700;
+  color: var(--text-strong);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease) 0.1s;
+}
+.coin-call.on {
+  opacity: 1;
+}
+/* The global reduced-motion block collapses animation-duration to 0.001ms,
+   which happens to land the coin correctly — but `animation: none` would
+   discard the `forwards` fill and leave the disc at 0deg, so state the landed
+   position explicitly. (HomeDemo also skips the coin phase entirely under
+   reduced motion; this covers a landed coin rendered statically.) */
+@media (prefers-reduced-motion: reduce) {
+  .coin {
+    animation: none;
+    transform: rotateX(0deg);
+  }
+  .coin.lands-black {
+    transform: rotateX(180deg);
+  }
+  .coin-call {
+    transition: none;
+    opacity: 1;
+  }
+  .demo-payout {
+    animation: none;
+  }
 }
 
 /* ---------- engine banner ---------- */
@@ -301,7 +730,7 @@ a:hover {
   max-width: 620px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   font-size: 14px;
 }
 .engine-banner .free {
@@ -323,7 +752,7 @@ a:hover {
   min-height: 132px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   cursor: pointer;
   transition: background 0.12s, transform 0.12s, box-shadow 0.12s;
   text-align: left;
@@ -333,7 +762,7 @@ a:hover {
 .mode-card:hover:not(:disabled) {
   background: var(--panel-2);
   transform: translateY(-2px);
-  box-shadow: 0 6px 18px #00000040;
+  box-shadow: var(--sh-2);
   text-decoration: none;
 }
 .mode-card:disabled {
@@ -361,6 +790,23 @@ a:hover {
   color: var(--accent);
   font-weight: 700;
 }
+/* A tag that says "stakes" is talking about money, and money is gold in this
+   app now — green is for live / free / ready. */
+.mode-card .mc-tag.money {
+  color: var(--gold);
+  background: var(--gold-weak);
+  border-radius: var(--r-pill);
+  padding: 2px 9px;
+}
+
+/* A route's own title block, above whatever that route lists. */
+.page-head {
+  margin-bottom: var(--s-6);
+}
+.page-head p {
+  margin: var(--s-2) 0 0;
+  max-width: 60ch;
+}
 .mode-card .mc-desc {
   color: var(--muted);
   font-size: 14px;
@@ -370,7 +816,7 @@ a:hover {
 .quick-play {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   padding: 20px 22px;
   margin-bottom: 14px;
 }
@@ -394,6 +840,16 @@ a:hover {
   letter-spacing: 0.5px;
   color: var(--accent);
   font-weight: 700;
+}
+/* Lobby messages. Were inline `color: "#e06c6c"` / `"#e0a96c"` at four sites. */
+.lobby-err {
+  color: var(--danger);
+  font-size: var(--t-sm);
+  margin-top: var(--s-2);
+}
+.lobby-warn {
+  color: #e0a96c;
+  font-size: var(--t-sm);
 }
 .quick-play .qp-desc {
   font-size: 14px;
@@ -422,7 +878,7 @@ a:hover {
 .tc-tile:hover {
   background: var(--bg-2);
   transform: translateY(-2px);
-  box-shadow: 0 6px 18px #00000040;
+  box-shadow: var(--sh-2);
   text-decoration: none;
   border-color: var(--accent);
 }
@@ -483,12 +939,12 @@ a:hover {
   max-width: 360px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   padding: 20px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  box-shadow: 0 12px 40px #00000070;
+  box-shadow: var(--sh-3);
 }
 .modal-title {
   font-size: 20px;
@@ -617,36 +1073,83 @@ a:hover {
 /* ---------- buttons ---------- */
 button.primary,
 a.primary {
-  background: var(--accent);
+  background: var(--accent-cta);
   color: #fff;
   border: 0;
-  border-radius: var(--radius);
+  border-radius: var(--r-md);
   padding: 10px 18px;
-  font-size: 15px;
-  font-weight: 600;
+  font-size: var(--t-base);
+  font-weight: 700;
   cursor: pointer;
   display: inline-block;
+  transition: background var(--dur-1) var(--ease);
 }
 button.primary:hover,
 a.primary:hover {
-  background: var(--accent-hover);
+  background: var(--accent-cta-hover);
   text-decoration: none;
 }
 button.primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-button.ghost {
+button.ghost,
+a.ghost {
   background: var(--bg-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-md);
   padding: 9px 16px;
   cursor: pointer;
   font-weight: 600;
+  display: inline-block;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
 }
-button.ghost:hover {
+button.ghost:hover,
+a.ghost:hover {
   background: var(--panel-2);
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+
+/* The money button. A separate class from .primary on purpose: .primary is the
+   app's general affirmative, and this is the one that commits or moves USDC.
+   Repainting .primary gold would have golded every "Save", "Apply" and "Flip
+   board" on the inner routes too. */
+button.money,
+a.money {
+  background: var(--gold);
+  color: var(--gold-ink);
+  border: 0;
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-6);
+  font-size: var(--t-md);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  display: inline-block;
+  transition: background var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease);
+}
+button.money:hover,
+a.money:hover {
+  background: var(--gold-hover);
+  box-shadow: var(--ring-gold);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+button.money:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* An amount of money, anywhere. */
+.amt {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--gold);
 }
 
 input,
@@ -664,11 +1167,58 @@ select {
   max-width: 100%;
 }
 
+/* The app's card surface, used on every route — which is why the rounded
+   refresh lands HERE and /profile, /gauntlet, /tournament and the game sidebar
+   pick it up without a single edit to their markup.
+   --r-lg, not --radius: --radius stays 6px because ~90 rules read it, including
+   <input>, <select>, <code> and every pill, and a 14px-radius <select> looks
+   broken. Cards opt up explicitly. */
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 18px;
+  border-radius: var(--r-lg);
+  padding: var(--s-5);
+  box-shadow: var(--sh-1);
+}
+
+/* A panel that is also a link or a button. */
+.panel.interactive {
+  transition: transform var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.panel.interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--sh-2);
+  border-color: var(--border-strong);
+  background: var(--panel-2);
+  text-decoration: none;
+}
+
+/* A card that is carrying money: a stake, a balance, a payout. */
+.panel.money-card {
+  border-color: var(--gold-line);
+  box-shadow: inset 0 1px 0 var(--gold-weak), var(--sh-1);
+}
+
+/* A card whose content fills it edge to edge — a table, a board. */
+.panel.flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* The heading row inside a card. Worth a class: Leaderboard.tsx inlined exactly
+   these three declarations twice and has no stylesheet of its own at all. */
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-md);
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-bottom: var(--s-3);
+}
+.panel-head .spacer {
+  margin-left: auto;
 }
 
 code,
@@ -998,7 +1548,7 @@ html[data-coords="off"] .board-wrap coords {
   vertical-align: middle;
 }
 .tag-rated {
-  background: #2a3a1c;
+  background: var(--win-bg);
   color: var(--accent-hover);
 }
 .sidebar {
@@ -1036,7 +1586,7 @@ html[data-coords="off"] .board-wrap coords {
   color: #fff;
 }
 .moves {
-  font-family: ui-monospace, "SF Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.8;
   max-height: 320px;
@@ -1127,15 +1677,15 @@ html[data-coords="off"] .board-wrap coords {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 .result-banner.won {
   border-color: var(--accent);
-  background: #2a3a1c;
+  background: var(--win-bg);
 }
 .result-banner.lost {
-  border-color: #7a3b3b;
-  background: #3a2222;
+  border-color: var(--loss-border);
+  background: var(--loss-bg);
 }
 
 /* ---------- bankroll + wager forms ---------- */
@@ -1281,7 +1831,7 @@ html[data-coords="off"] .board-wrap coords {
   padding: 12px 14px;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
 }
 .tourney-card .tc-main {
   min-width: 0;
@@ -1421,7 +1971,7 @@ table.standings tr.me td {
   font-size: 22px;
   font-weight: 700;
   color: var(--text-strong);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 /* Both ladders side by side at the right of the profile head. Two tiles where
    there used to be one, so the head has to be allowed to wrap on a phone. */
@@ -1470,7 +2020,7 @@ table.standings tr.me td {
 }
 .seg-btn.on {
   border-color: var(--accent);
-  background: #62992418;
+  background: var(--accent-weak);
   color: var(--text-strong);
 }
 .stat-grid {
@@ -1526,7 +2076,7 @@ table.standings tr.me td {
 .history-table td {
   padding: 10px;
   border-bottom: 1px solid var(--border);
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 .pill {
   display: inline-block;
@@ -1546,6 +2096,16 @@ table.standings tr.me td {
   background: #777;
 }
 
+@media (max-width: 900px) {
+  /* One column, board first. The pitch column's minimum (300px) plus the
+     board's (320px) plus the gap already overflows a phone, so this has to fire
+     above the 880px breakpoint the rest of the page uses. */
+  .home-hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-5);
+    padding-top: var(--s-3);
+  }
+}
 @media (max-width: 880px) {
   .stat-grid,
   /* The 3-tile casual grid needs the same narrow-screen treatment; without it
@@ -1576,7 +2136,7 @@ table.standings tr.me td {
   line-height: 1.3;
 }
 .maint-on {
-  background: #d6a13a;
+  background: var(--warn);
   color: #161512;
   border-bottom: 1px solid #00000040;
 }
@@ -1633,7 +2193,7 @@ table.standings tr.me td {
 .how-step {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   padding: 16px;
 }
 .how-num {
@@ -1656,28 +2216,31 @@ table.standings tr.me td {
 .site-footer {
   /* Rendered at body level by the root layout (it's on every route), so it
      carries the .container geometry itself instead of inheriting it. */
-  max-width: 1040px;
-  margin: 32px auto 0;
-  padding: 20px 24px 40px;
+  max-width: var(--content-w);
+  margin: var(--s-8) auto 0;
+  padding: var(--s-5) var(--s-6) var(--s-10);
   border-top: 1px solid var(--border);
-  font-size: 13px;
+  font-size: var(--t-sm);
   color: var(--text);
 }
 .footer-cols {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
+  gap: var(--s-5);
 }
 .footer-h {
   font-weight: 700;
   color: var(--text-strong);
   margin-bottom: 6px;
 }
+.footer-verify {
+  margin-top: var(--s-1);
+}
 .footer-legal {
-  margin-top: 18px;
-  padding-top: 12px;
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
   border-top: 1px solid var(--border);
-  font-size: 12px;
+  font-size: var(--t-xs);
 }
 @media (max-width: 720px) {
   .how-steps,
@@ -1716,51 +2279,135 @@ select:focus-visible,
   }
 }
 
+/* ---------- mobile bottom tab bar ---------- */
+/* Everything except `display` lives here at column 0. scripts/layout.test.ts
+   reads the first UNINDENTED rule for a selector, so the geometry has to be
+   visible to it — and keeping it in one place is better CSS anyway. The ≤720px
+   query below only switches it on.
+ *
+ * z-index 30 is BELOW the header's 40, and that is deliberate rather than
+ * sloppy. `.site-header` is position:sticky WITH a z-index, so it is a stacking
+ * context, and `.wallet-pop` (the bankroll popover, z-index 50) is scoped inside
+ * it — its 50 never competes at the root. A bar that outranked the header would
+ * therefore paint over the bottom 58px of that popover, on a phone, where it is
+ * already nearly viewport-tall and where Deposit lives.
+ * Still under `.modal-overlay` (50), which is the invariant that matters: the
+ * pre-game stake confirmation must not have five tappable links across its
+ * bottom edge. All three numbers are bare integers, never var() — layout.test.ts
+ * reads them straight through Number().
+ *
+ * No backdrop-filter. A blurred fixed element repainting behind a board that
+ * moves every half-second is the classic iOS scroll-jank source, and on a dark
+ * app an opaque --panel-2 reads the same. */
+.tabbar {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  grid-template-columns: repeat(5, 1fr);
+  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--panel-2);
+  border-top: 1px solid var(--border);
+  box-shadow: var(--sh-up);
+}
+.tabbar-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  /* No explicit height: the grid row already IS the bar's content box, and
+     restating --tabbar-h here double-counts the 1px top border and the
+     safe-area padding, so the item hung 1px below the bar it lives in. */
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: color var(--dur-1) var(--ease);
+}
+.tabbar-item:hover {
+  text-decoration: none;
+}
+.tabbar-item.on {
+  color: var(--text-strong);
+}
+.tabbar-icon {
+  transition: transform var(--dur-2) var(--ease), color var(--dur-1) var(--ease);
+}
+.tabbar-item.on .tabbar-icon {
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+/* The active marker sits at the TOP edge of the tab, not under the label:
+   an underline at the bottom of a bottom bar lands in the home-indicator zone. */
+.tabbar-item.on::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 26px;
+  height: 3px;
+  border-radius: 0 0 var(--r-pill) var(--r-pill);
+  background: var(--accent);
+}
+.tabbar-item:active .tabbar-icon {
+  transform: scale(0.92);
+}
+
 /* ---------- responsive header + board (mobile) ---------- */
 @media (max-width: 720px) {
-  .site-header {
-    flex-wrap: wrap;
-    height: auto;
-    gap: 12px 18px;
-    padding: 10px 16px;
-  }
-  /* One scrollable row, not a wrapped block: the header is sticky, so every
-     line it wraps onto is a line permanently off the top of a phone screen
-     (wrapping cost 167px of an 812px viewport).
-     The padding/negative-margin pair widens the SCROLL BOX without changing the
-     header's height: `overflow-x` forces `overflow-y` to `auto` (a scrolling
-     axis can't pair with `visible`), and the row is exactly one link tall, so
-     without it the 2px focus ring at 2px offset is clipped away.
-     The mask fades whatever reaches the right edge, so a nav that runs past the
-     viewport (Profile is 77px out at 375px wide) reads as cut off rather than
-     absent. It costs nothing when the row fits — it only ever fades empty
-     space to the right of the last link — and it lifts while the row has focus,
-     because tabbing to the last link scrolls it flush against that edge and
-     fading the element you just focused is the one thing it must not do. */
+  /* The nav's links used to live here as a masked horizontal scroller, because
+     a sticky header that wraps costs 167px of an 812px phone viewport
+     permanently. It worked, but "Customize" still sat 77px off the right edge
+     at 375px — a destination reachable only by discovering that a row with no
+     scrollbar scrolls. That is the bottom tab bar's job now (components/
+     TabBar.tsx), which is why this is display:none rather than a fallback: two
+     navs on one screen is worse than one, and keeping the scroller alive keeps
+     the off-screen-destination bug alive with it. There is no no-JS argument
+     for keeping it either — TabBar renders on the server and its links work
+     before hydration. */
   .nav {
-    order: 3;
-    flex-basis: 100%;
-    gap: 16px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 6px 0;
-    margin: -6px 0;
-    scrollbar-width: none;
-  }
-  .nav:not(:focus-within) {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
-    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
-  }
-  .nav::-webkit-scrollbar {
     display: none;
   }
-  .nav a {
-    white-space: nowrap;
+  /* With the nav gone the header is one row again — brand + actions — so it
+     goes back to a fixed height instead of wrapping. */
+  .site-header {
+    height: var(--header-h);
+    gap: var(--s-3);
+    padding: 0 var(--s-4);
+  }
+  .tabbar {
+    display: grid;
+  }
+  /* A fixed bar takes no space in the flow, so without this the last row of the
+     footer — the "stakes are real money" line — sits permanently underneath it.
+     On <body> rather than .container because SiteFooter is rendered at body
+     level, outside every page wrapper. Reads the same --tabbar-h the bar does,
+     so the two cannot drift; scripts/layout.test.ts pins that pair. */
+  body {
+    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+  }
+  /* The bankroll popover is nearly viewport-tall on a phone. Cap it so its
+     Deposit/Withdraw controls stay above the bar. */
+  .wallet-pop {
+    max-height: calc(100dvh - var(--header-h) - var(--tabbar-h) - var(--s-4));
+    overflow-y: auto;
   }
   .header-actions {
     margin-left: auto;
     gap: 10px;
+  }
+  /* 85px of status readout, in a 343px row that also has to hold the wordmark,
+     the wallet pill and Sign in — without this the auth button is squeezed to
+     ~75px and "Sign in" wraps to two lines inside a 56px header. It is a status
+     indicator, not a control, and the homepage states the same thing at full
+     width in .engine-banner. */
+  .engine-pill {
+    display: none;
   }
   .brand {
     font-size: 20px;
@@ -1792,7 +2439,7 @@ select:focus-visible,
   padding: 10px 12px;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--r-lg);
   cursor: pointer;
   text-align: left;
   color: inherit;
@@ -1804,7 +2451,7 @@ select:focus-visible,
 }
 .rep-preset.active {
   border-color: var(--accent);
-  background: #62992418;
+  background: var(--accent-weak);
 }
 .rep-preset .rp-name {
   font-weight: 700;

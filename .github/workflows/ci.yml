@@ -148,4 +148,13 @@ jobs:
           # you can click behind. Both are one-line CSS regressions that nothing
           # else here would see.
           pnpm test:layout
+          # Below 720px the bottom tab bar is the ONLY navigation (the header's
+          # .nav is display:none there), and "/player/0xabc".startsWith("/play")
+          # is true — so a bare prefix match lights "Engine" on every profile.
+          pnpm test:tabs
+          # The homepage reel is a scripted replay with no engine behind it. If
+          # its move list stops ending in mate, or the component ever reaches for
+          # lib/engine, the landing page silently costs every cold mobile visit a
+          # 7 MB wasm download.
+          pnpm test:demo
           pnpm build

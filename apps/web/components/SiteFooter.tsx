@@ -37,7 +37,7 @@ export function SiteFooter() {
           ) : (
             <span className="muted">Escrow contract address loads from the server config.</span>
           )}
-          <div style={{ marginTop: 4 }}>
+          <div className="footer-verify">
             Every result is a signed, verifiable oracle statement you can check onchain.
           </div>
         </div>
