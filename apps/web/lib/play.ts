@@ -2,12 +2,12 @@
 // same WebSocket protocol the native client uses, and drives a BrowserEngine.
 
 import { Chess } from "chessops/chess";
-import { parseUci } from "chessops/util";
 
 import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
+import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
@@ -23,27 +23,55 @@ export type PlayHandlers = {
   confirmStart?: (deadlineMs: number | null) => Promise<boolean>;
 };
 
-/** True if `uci` is legal in `pos`. */
-function isLegalUci(pos: Chess, uci: string): boolean {
-  const m = parseUci(uci);
-  return !!m && pos.isLegal(m);
+/** Reset the engine and ask once more, for a seat whose engine just answered
+ *  with a move that does not exist in this position. Bounded by a fixed think
+ *  time AND a hard wall-clock cap: recovery must not eat the clock it is trying
+ *  to save, and an engine that has stopped answering must not hold the seat for
+ *  the 120s the normal search watchdog allows. Null if it fails again. */
+async function retryAfterResync(
+  engine: BrowserEngine,
+  replay: Replay,
+  movetimeMs: number,
+): Promise<string | null> {
+  let cap: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await engine.resync();
+    const search = engine.bestMove(replay.history, movetimeMs);
+    // Cap the wait, then STOP the search rather than walking away from it: an
+    // abandoned search keeps running, and its late bestmove would be waiting in
+    // the queue when the next ply asks a question of its own.
+    const again = await Promise.race([
+      search,
+      new Promise<null>((r) => {
+        cap = setTimeout(() => {
+          engine.stopSearch();
+          r(null);
+        }, movetimeMs + 2000);
+      }),
+    ]);
+    return again ? toStandardUci(replay.pos, again) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(cap);
+  }
 }
 
-/** A book move for this history — the user's uploaded Polyglot book first,
- *  then the built-in mainline set — returning the first LEGAL of the two, so a
+/** A book move for `pos` — the user's uploaded Polyglot book first, then the
+ *  built-in mainline set — returning the first LEGAL of the two, so a
  *  bad/illegal user-book entry falls through to the built-in book (and then to
- *  the engine) rather than suppressing it. */
-function legalBookMove(movesUci: string[]): string | null {
-  const pos = Chess.default();
-  for (const u of movesUci) {
-    if (!isLegalUci(pos, u)) return null;
-    pos.play(parseUci(u)!);
-  }
+ *  the engine) rather than suppressing it. Answers in standard UCI.
+ *
+ *  `history` must already be standard UCI: the built-in book is keyed by
+ *  move-sequence PREFIX, so a history in the king-takes-rook notation would
+ *  miss every entry from the castle onwards. */
+function legalBookMove(pos: Chess, history: string[]): string | null {
   const maxPly = getBrowserBotConfig().bookMaxPly;
-  const user = probeUserBook(pos, movesUci.length, maxPly);
-  if (user && isLegalUci(pos, user)) return user;
-  const builtin = bookMove(movesUci);
-  return builtin && isLegalUci(pos, builtin) ? builtin : null;
+  const user = probeUserBook(pos, history.length, maxPly);
+  const userStd = user ? toStandardUci(pos, user) : null;
+  if (userStd) return userStd;
+  const builtin = bookMove(history);
+  return builtin ? toStandardUci(pos, builtin) : null;
 }
 
 /** Play one seat of a game in the browser, driving `engine`. Resolves when the
@@ -109,15 +137,32 @@ export function playSeat(
         }
         case "your_turn": {
           try {
-            const history: string[] = m.moves_uci ?? [];
+            // Replay the server's history ourselves. Two things come out of it:
+            // the position (for the book), and the history rewritten to standard
+            // UCI. The server accepts castling in EITHER notation from any
+            // client, so a peer's "e1h1" can reach us — and a UCI engine in
+            // standard mode silently truncates its position at that move and
+            // plays the rest of the game a ply behind (see lib/uci.ts).
+            const replay = replayHistory(m.moves_uci ?? []);
+            const history: string[] = replay?.history ?? m.moves_uci ?? [];
+            if (!replay) {
+              // We could not replay the SERVER's own history, so this seat is
+              // flying blind for the rest of the game: no book, and no way to
+              // check its own move before sending it. Say so — the alternative
+              // is losing on a rejected move with nothing in the log.
+              console.warn(
+                `[openchess] cannot replay the game history at ply ${m.ply}; ` +
+                  `book and move validation are off for this seat`,
+              );
+            }
             // Opening book first: play known lines instantly instead of burning
             // clock on move 1. Falls through to the engine once out of book.
-            const booked = legalBookMove(history);
+            const booked = replay ? legalBookMove(replay.pos, history) : null;
             // Play to the authoritative clock when the server provides one, so
             // the time control is real (the engine self-allocates and can
             // flag). Fall back to a fixed think time if no clock is present.
             const c = m.clock;
-            const uci =
+            const played =
               booked ??
               (c
                 ? await engine.bestMoveWithClock(
@@ -130,6 +175,28 @@ export function playSeat(
             if (cancelled()) {
               ws.close();
               return;
+            }
+            // Last gate before the wire. An illegal move is not survivable —
+            // the server rejects it and will not re-prompt this ply — so an
+            // out-of-sync engine gets one reset and one more try, and failing
+            // that the seat spends a legal move rather than the whole game:
+            // resigning is a certain loss (wagered, a certain loss of the
+            // stake) in a position that is usually perfectly fine.
+            let uci = played;
+            if (replay) {
+              let std = toStandardUci(replay.pos, played);
+              if (!std) {
+                console.warn(
+                  `[openchess] engine answered ${played} at ply ${m.ply}, which ` +
+                    `is not legal here — resetting it and asking again`,
+                );
+                std = await retryAfterResync(engine, replay, movetimeMs);
+                if (cancelled()) {
+                  ws.close();
+                  return;
+                }
+              }
+              uci = std ?? anyLegalUci(replay.pos) ?? played;
             }
             send({
               type: "move",

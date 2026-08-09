@@ -15,32 +15,9 @@
 // with the identically-named ones in authedFetch.test.ts.
 export {};
 
-type Sent = Record<string, unknown>;
+import { FakeSocket, install, type Sent } from "./fakeSocket";
 
-class FakeSocket {
-  static last: FakeSocket | null = null;
-  sent: Sent[] = [];
-  closed = false;
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((ev: { data: string }) => void | Promise<void>) | null = null;
-  constructor(public url: string) {
-    FakeSocket.last = this;
-  }
-  send(raw: string) {
-    this.sent.push(JSON.parse(raw));
-  }
-  close() {
-    this.closed = true;
-  }
-  /** Deliver a server frame and let the handler's awaits settle. */
-  async deliver(msg: Sent) {
-    await this.onmessage?.({ data: JSON.stringify(msg) });
-    await new Promise((r) => setTimeout(r, 0));
-  }
-}
-(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeSocket;
+install();
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -67,7 +44,7 @@ async function seatAfterWelcome(
   return ws;
 }
 
-const types = (ws: FakeSocket) => ws.sent.map((m) => m.type);
+const types = (ws: FakeSocket) => ws.types();
 
 async function main() {
   // Dynamic import: the fake WebSocket above must be installed first.

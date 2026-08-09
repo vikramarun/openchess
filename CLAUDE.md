@@ -14,9 +14,14 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
 (cd contracts && forge test)       # Foundry: 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
+(cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
+(cd apps/web && pnpm test:move)   # what a seat sends: never an illegal move
+(cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 (cd apps/web && pnpm test:nav)     # move nav (following the live tip vs. parked on a ply)
+(cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
+(cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -136,6 +141,29 @@ wallet.
   parses fine and never hits (`book::shipped_book` tests exist to catch exactly
   that); and `BookPolicy::Best` would walk one identical line every game, which
   is why `Weighted` is the default.
+- **Castling has two UCI spellings and only one of them is safe.** chessops,
+  Polyglot and Chess960 all write castling as king-takes-rook (`e1h1`);
+  standard UCI writes the king's two-square move (`e1g1`). shakmaty accepts
+  BOTH, so the server happily records either, but Stockfish in standard mode
+  does not: its `position startpos moves …` parser stops at the first move it
+  cannot read and **keeps the prefix silently**. One `e1h1` in the history
+  leaves the engine a ply behind (usually on the wrong side to move) for the
+  rest of the game, so every `bestmove` it returns is illegal, the server
+  rejects it, and `play.ts` resigns. A level position, seconds on the clock, no
+  error anywhere. That shipped: `scripts/build-book.mjs` used chessops'
+  `makeUci`, so 553 of 1817 lines in `public/book.json` carried it. Anything
+  reaching an engine or the wire goes through `lib/uci.ts` first;
+  `pnpm test:openings` fails if a king-takes-rook move lands in the book again,
+  and `pnpm test:move` pins what a seat sends. The seat no longer resigns over
+  an illegal move either: it resets the engine, asks once more, and failing that
+  spends a legal move, because resigning is a certain loss of a position that is
+  usually fine, and of the stake with it.
+- **One `bestmove` answers one `go`, in order.** `BrowserEngine` hands each one
+  to the oldest waiter, never to every waiter: a caller that stops waiting for a
+  search (the desync recovery above) leaves it running, and its late answer
+  would otherwise resolve the NEXT search too, with a move for the previous
+  position. `pnpm test:engine` pins it. Use `stopSearch()` rather than walking
+  away, and keep `resync()` (`ucinewgame`) off a worker that is mid-search.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match
