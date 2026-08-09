@@ -1206,7 +1206,6 @@ pre {
   white-space: nowrap;
 }
 .bankroll-stats .bk-l {
-  order: -1;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -1221,7 +1220,12 @@ pre {
   flex: 1;
   min-width: 0;
 }
-.bankroll-actions button {
+/* Named both ways on purpose: `.bankroll-actions button` ties `button.ghost`
+   on specificity and would win only by sitting later in this file, so the
+   padding would revert silently the day these blocks move. The 4px it buys
+   back is the difference between "amount in USDC" fitting and not. */
+.bankroll-actions button.primary,
+.bankroll-actions button.ghost {
   white-space: nowrap;
   padding-left: 14px;
   padding-right: 14px;
