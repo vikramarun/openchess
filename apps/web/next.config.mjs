@@ -60,7 +60,10 @@ const csp = [
   `script-src ${scriptSrc}`,
   "style-src 'self' 'unsafe-inline'",
   // 'self' also covers the vendored piece SVGs under public/piece/.
-  "img-src 'self' data: blob: https:", // ENS/wallet avatars (IPFS gateways, arbitrary https)
+  // SERVER_HTTP is the profile-photo route: covered by `https:` in production,
+  // but named explicitly so the http://127.0.0.1 dev server isn't blocked and
+  // the local preview exercises the same path production does.
+  `img-src 'self' data: blob: https: ${SERVER_HTTP}`, // ENS/wallet avatars (IPFS gateways, arbitrary https)
   "font-src 'self' data:",
   "worker-src 'self' blob:", // Stockfish web worker
   "frame-src 'self' https://*.walletconnect.com https://*.walletconnect.org https://keys.coinbase.com",

@@ -1370,6 +1370,15 @@ table.standings tr.me td {
   align-items: center;
   justify-content: center;
   font-size: 38px;
+  /* The photo is a square; clip it to the same rounded box as the ♟ fallback. */
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .profile-head .who {
   font-size: 22px;

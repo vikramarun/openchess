@@ -47,6 +47,14 @@ pub struct PlayerStatsRow {
     pub net: Decimal,
 }
 
+/// A stored profile photo. Only read on the image route — the profile JSON
+/// carries the timestamp alone, never the bytes.
+#[derive(Debug, sqlx::FromRow)]
+pub struct AvatarRow {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct LeaderboardRow {
     pub wallet: String,
@@ -707,6 +715,81 @@ impl Db {
 
     // -- player profile / stats -------------------------------------------
 
+    /// Store (or replace) a wallet's profile photo. Upserts the user row: a
+    /// wallet can sign in and set a photo before it has ever played a game, so
+    /// there may be no `users` row yet.
+    ///
+    /// `wallet` is lowercased here so the unique key and the `lower(wallet)`
+    /// read path can't disagree about which row an address owns.
+    pub async fn set_avatar(&self, wallet: &str, mime: &str, data: &[u8]) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO users (id, wallet, avatar_mime, avatar_data, avatar_updated_at)
+               VALUES ($1, $2, $3, $4, now())
+               ON CONFLICT (wallet) DO UPDATE
+                 SET avatar_mime=EXCLUDED.avatar_mime,
+                     avatar_data=EXCLUDED.avatar_data,
+                     avatar_updated_at=now()"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(wallet.to_lowercase())
+        .bind(mime)
+        .bind(data)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drop a wallet's profile photo. A no-op when it never had one.
+    pub async fn clear_avatar(&self, wallet: &str) -> Result<()> {
+        sqlx::query(
+            r#"UPDATE users
+                 SET avatar_mime=NULL, avatar_data=NULL, avatar_updated_at=NULL
+               WHERE lower(wallet)=$1"#,
+        )
+        .bind(wallet.to_lowercase())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A wallet's profile photo bytes, or `None` when it has none.
+    pub async fn avatar(&self, wallet: &str) -> Result<Option<AvatarRow>> {
+        let row = sqlx::query_as::<_, AvatarRow>(
+            r#"SELECT avatar_mime AS mime, avatar_data AS data
+                 FROM users
+                WHERE lower(wallet)=$1
+                  AND avatar_data IS NOT NULL AND avatar_mime IS NOT NULL"#,
+        )
+        .bind(wallet.to_lowercase())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Everything the profile head needs off the `users` row: the rating, and
+    /// when the photo last changed (the version tag the API hands out, so
+    /// clients can cache the image and still see a replacement).
+    ///
+    /// One lookup rather than two — both halves live on the same row, and this
+    /// is the most-hit public read on the server. Never selects the bytes.
+    /// Defaults to 1500 with no photo for a wallet that has never been seen.
+    pub async fn player_card(
+        &self,
+        wallet: &str,
+    ) -> Result<(f32, Option<chrono::DateTime<chrono::Utc>>)> {
+        let row: Option<(f32, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT rating,
+                      CASE WHEN avatar_data IS NOT NULL AND avatar_mime IS NOT NULL
+                           THEN avatar_updated_at END
+                 FROM users
+                WHERE lower(wallet)=$1"#,
+        )
+        .bind(wallet.to_lowercase())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.unwrap_or((1500.0, None)))
+    }
+
     /// Aggregate W/L/D + net winnings (USDC base units) for an address over
     /// finished games. `address` is matched case-insensitively.
     pub async fn player_stats(&self, address: &str) -> Result<PlayerStatsRow> {
@@ -884,6 +967,48 @@ mod tests {
         assert_eq!(g.status, "finished");
         assert_eq!(g.result.as_deref(), Some("white"));
         assert_eq!(g.pgn.as_deref(), Some("1. e4 e5"));
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn avatar_roundtrip() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // Mixed case on purpose: every read path folds through lower(wallet),
+        // so a photo set from a checksummed address must be found by the
+        // lowercased one the API serves and vice versa.
+        let tag = Uuid::new_v4().simple().to_string();
+        let wallet = format!("0xAbC_{tag}");
+
+        assert!(db.avatar(&wallet).await?.is_none(), "no photo to begin with");
+        // Unseen wallet: the default rating, and nothing for the client to
+        // build an image URL out of.
+        assert_eq!(db.player_card(&wallet).await?, (1500.0, None));
+
+        // Sets a photo for a wallet that has never played — no users row yet.
+        db.set_avatar(&wallet, "image/jpeg", b"\xff\xd8\xffbytes").await?;
+        let got = db.avatar(&wallet.to_lowercase()).await?.expect("photo");
+        assert_eq!(got.mime, "image/jpeg");
+        assert_eq!(got.data, b"\xff\xd8\xffbytes");
+        let first = db.player_card(&wallet).await?.1.expect("timestamp");
+
+        // Replacing keeps one row and moves the version forward, which is what
+        // busts the cached image URL.
+        db.set_avatar(&wallet, "image/png", b"\x89PNGnew").await?;
+        let got = db.avatar(&wallet).await?.expect("photo");
+        assert_eq!(got.mime, "image/png");
+        assert_eq!(got.data, b"\x89PNGnew");
+        assert!(db.player_card(&wallet).await?.1.expect("timestamp") >= first);
+
+        db.clear_avatar(&wallet).await?;
+        assert!(db.avatar(&wallet).await?.is_none(), "cleared");
+        assert!(db.player_card(&wallet).await?.1.is_none(), "and no version left");
         Ok(())
     }
 

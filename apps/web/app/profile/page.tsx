@@ -130,7 +130,7 @@ function ProfileTab() {
   return (
     <>
       {isConnected && address ? (
-        <ProfileStats address={address} />
+        <ProfileStats address={address} editable />
       ) : (
         <div className="panel">
           <b style={{ color: "var(--text-strong)" }}>Sign in to see your profile</b>

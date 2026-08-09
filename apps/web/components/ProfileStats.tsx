@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import { AvatarEditor } from "@/components/AvatarEditor";
 import { shortAddress } from "@/lib/address";
+import { avatarUrl } from "@/lib/avatar";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, fmtUsdcSigned } from "@/lib/escrow";
 
@@ -17,6 +19,9 @@ type Profile = {
   losses: number;
   draws: number;
   net: string;
+  /** RFC 3339 timestamp of the last photo change, or null when there's none.
+   *  Both the presence flag and the image URL's cache-busting version. */
+  avatar_updated_at: string | null;
 };
 type GameItem = {
   game_id: string;
@@ -40,12 +45,20 @@ function outcome(g: GameItem, me: string): "win" | "loss" | "draw" | "-" {
 }
 
 /** Public rating + record + game history for a wallet. Rendered by the public
- *  /player/[address] page and by the signed-in /profile hub. */
-export function ProfileStats({ address }: { address: string }) {
+ *  /player/[address] page and by the signed-in /profile hub.
+ *
+ *  `editable` adds the profile-photo controls, and is only ever set on your own
+ *  profile — the write itself is bound to the SIWE session server-side, so this
+ *  decides what is offered, not what is allowed. */
+export function ProfileStats({ address, editable }: { address: string; editable?: boolean }) {
   const me = address.toLowerCase();
   const [p, setP] = useState<Profile | null>(null);
   const [games, setGames] = useState<GameItem[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  // Bumped after a photo change to refetch the profile: the new
+  // `avatar_updated_at` is what busts the cached image URL.
+  const [reload, setReload] = useState(0);
+  const onPhotoChanged = useCallback(() => setReload((n) => n + 1), []);
 
   useEffect(() => {
     let live = true;
@@ -58,14 +71,8 @@ export function ProfileStats({ address }: { address: string }) {
     (async () => {
       try {
         const seg = encodeURIComponent(me);
-        const [pr, gr] = await Promise.all([
-          fetch(`${SERVER_HTTP}/players/${seg}`).then((r) => r.json()),
-          fetch(`${SERVER_HTTP}/players/${seg}/games`).then((r) => r.json()),
-        ]);
-        if (live) {
-          setP(pr);
-          setGames(Array.isArray(gr) ? gr : []);
-        }
+        const pr = await fetch(`${SERVER_HTTP}/players/${seg}`).then((r) => r.json());
+        if (live) setP(pr);
       } catch {
         if (live) setErr("Couldn’t load the profile. Is the server running?");
       }
@@ -73,20 +80,50 @@ export function ProfileStats({ address }: { address: string }) {
     return () => {
       live = false;
     };
+    // `reload` refetches this half only: a photo change moves
+    // `avatar_updated_at`, and nothing else here depends on it.
+  }, [me, reload]);
+
+  useEffect(() => {
+    let live = true;
+    if (!ADDR_RE.test(me)) return;
+    (async () => {
+      try {
+        const seg = encodeURIComponent(me);
+        const gr = await fetch(`${SERVER_HTTP}/players/${seg}/games`).then((r) => r.json());
+        if (live) setGames(Array.isArray(gr) ? gr : []);
+      } catch {
+        if (live) setErr("Couldn’t load the profile. Is the server running?");
+      }
+    })();
+    return () => {
+      live = false;
+    };
+    // No `reload`: changing your photo doesn't change 50 games of history.
   }, [me]);
 
   const winRate = p && p.games > 0 ? Math.round((p.wins / p.games) * 100) : 0;
   const netClass = p && Number(p.net) > 0 ? "pos" : p && Number(p.net) < 0 ? "neg" : "";
+  const photo = avatarUrl(me, p?.avatar_updated_at);
 
   return (
     <>
       <div className="profile-head">
-        <div className="avatar">♟</div>
+        <div className="avatar">
+          {/* Plain <img>: next/image would want this remote host in its config
+              and buys nothing for one already-256px square. Empty alt — the
+              wallet right next to it is the label, so a screen reader
+              announcing the photo again would only be noise. */}
+          {photo ? <img src={photo} alt="" /> : "♟"}
+        </div>
         <div>
           <div className="who">{shortAddress(me)}</div>
           <div className="muted" style={{ fontSize: 13, wordBreak: "break-all" }}>
             {me}
           </div>
+          {editable && (
+            <AvatarEditor hasPhoto={Boolean(p?.avatar_updated_at)} onChanged={onPhotoChanged} />
+          )}
         </div>
         <div style={{ marginLeft: "auto", textAlign: "right" }}>
           <div className="stat" style={{ minWidth: 120 }}>
