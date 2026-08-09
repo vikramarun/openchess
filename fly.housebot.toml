@@ -32,9 +32,13 @@ primary_region = "iad"
   SERVER = "https://openchess.fly.dev"
   ENGINE = "/usr/games/stockfish"
   NAME = "House Bot"
-  # Stockfish "Skill Level" 0..20. Deliberately beatable: a newcomer's first
-  # bot should win sometimes, or the park is a wall instead of an on-ramp.
-  SKILL = "8"
+  # Stockfish "Skill Level" 0..20 — 20 is full strength. The house bot plays
+  # its best; it is an opponent, not a tutorial. (Below 20 Stockfish doesn't
+  # think less, it searches just as long and then plays a deliberately worse
+  # move from the top few — weakness that reads as random blunders. If a
+  # beatable tier is ever wanted, UCI_LimitStrength + UCI_Elo is the knob that
+  # actually targets a rating.)
+  SKILL = "20"
   # Matches the lobby's 1+0 / 3+0 / 5+0 / 10+0 tiles.
   TCS = "60:0 180:0 300:0 600:0"
 

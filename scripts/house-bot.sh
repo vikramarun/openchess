@@ -15,8 +15,12 @@
 #   SERVER                default https://openchess.fly.dev
 #   ENGINE                default stockfish (must be on PATH or a path)
 #   NAME                  default "House Bot"
-#   SKILL                 default 8 — Stockfish "Skill Level" 0..20; keep it
-#                         beatable so newcomers' bots get wins sometimes
+#   SKILL                 default 20 — Stockfish "Skill Level" 0..20. 20 is
+#                         full strength (and Stockfish's own default). Below 20
+#                         the engine picks a deliberately worse move from the
+#                         top few, which reads as random blunders rather than
+#                         weaker play; if you ever want a beatable house bot
+#                         again, UCI_LimitStrength + UCI_Elo is the honest knob.
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
 #   MOVE_BUDGET           default 80 — plan each game as this many moves; the
@@ -30,7 +34,7 @@ set -euo pipefail
 SERVER="${SERVER:-https://openchess.fly.dev}"
 ENGINE="${ENGINE:-stockfish}"
 NAME="${NAME:-House Bot}"
-SKILL="${SKILL:-8}"
+SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
 MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
@@ -78,12 +82,17 @@ echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS"
 # wallet's offers, and different time controls never match each other anyway.
 run_tc() {
   local initial="$1" increment="$2" delay=10
-  # Ceiling on a single search. Left to itself, Stockfish's sudden-death
-  # allocation spends ~62s on move 1 of a 10+0 game (and ~5s on move 1 of 3+0),
-  # then plays the rest in a hurry — the house bot looked frozen in the opening
-  # and flagged in the endgame. Nothing is lost by capping it here: at Skill
-  # Level 8 the engine locks its move in at depth 9 and every deeper iteration
-  # is discarded, and the cap still leaves it reaching depth ~20.
+  # Ceiling on a single search. Sudden-death allocation lets one unstable root
+  # eat several times the target, and the start position is the most unstable
+  # root there is (d4/e4/c4/Nf3 keep trading places), so move 1 is the worst
+  # case: at full strength Stockfish spends 22s of a 10+0 clock and 11s of a
+  # 3+0 clock on it, then plays the rest in a hurry. That is the whole
+  # complaint — frozen in the opening, flagging in the endgame.
+  #
+  # The cap costs very little: 7.5s still reaches depth 27 at 10+0 (vs 33
+  # uncapped) and picks the same move; 2.25s reaches depth 24 at 3+0. Deep
+  # opening analysis is what a BOOK is for, and this bot has none — see the
+  # --book flag if you ever hand it a Polyglot file.
   local max_move_ms=$(( initial * 1000 / MOVE_BUDGET ))
   ((max_move_ms < 300)) && max_move_ms=300
   while true; do

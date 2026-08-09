@@ -127,16 +127,21 @@ docs.
 - **Stuck stakes are recoverable in-app** — `claimTimeout` has a browser UI
   (`GameRefund.tsx`). The web half is live via Vercel; its discovery endpoint
   *(needs deploy)*, so the panel simply stays hidden until the server ships.
-- **The house bot no longer burns its clock in the opening** *(needs a house-bot
-  deploy: `fly deploy --config fly.housebot.toml --ha=false`)*. Measured against
-  the real server, an uncapped Stockfish 17 spent **20.5s on move 1** of a 10+0
-  game and 8s on move 2, then rushed the endgame and flagged — which is exactly
-  what it looked like from the outside. `house-bot.sh` now passes
-  `--max-move-ms` (`initial/80`: 0.75s at 1+0 … 7.5s at 10+0) and
-  `--move-overhead-ms 250`. Nothing is lost: at `Skill Level=8` Stockfish fixes
-  its move at depth 9 and discards every deeper iteration, and the cap still
-  reaches depth ~21. The browser engine got the `Move Overhead` half of the same
-  fix (`apps/web/lib/engine.ts`); it is **not** capped, so a browser seat playing
+- **The house bot plays at full strength and no longer burns its clock in the
+  opening** *(needs a house-bot deploy: `fly deploy --config fly.housebot.toml
+  --ha=false`)*. `SKILL` is now 20; the handicap is gone, because Skill Level
+  below 20 doesn't think less, it searches just as long and then plays a
+  deliberately worse move from the top few — weakness that reads as random
+  blunders. Measured against the real server, an uncapped Stockfish 17 spent
+  **20.5s on move 1** of a 10+0 game and 8s on move 2, then rushed the endgame
+  and flagged. `house-bot.sh` now passes `--max-move-ms` (`initial/80`: 0.75s at
+  1+0 … 7.5s at 10+0) and `--move-overhead-ms 250`. The cap costs little even at
+  full strength: 7.5s still reaches depth 27 at 10+0 (vs 33 uncapped) and picks
+  the same move. **The house bot has no opening book** — `--book` is never
+  passed and no `.bin` ships in the repo — so every opening move is a real
+  search; a book is the proper fix for a slow opening and remains unbuilt. The
+  browser engine got the `Move Overhead` half of the same fix
+  (`apps/web/lib/engine.ts`); it is **not** capped, so a browser seat playing
   for money still searches at full strength.
 - **Games start on a two-sided handshake** *(needs deploy for the opponent name
   only)*. A browser seat in the lobby now holds its `ready` frame until the
