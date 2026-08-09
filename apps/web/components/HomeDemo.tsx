@@ -32,8 +32,10 @@ import { fmtUsdc, profitForStake } from "@/lib/escrow";
  *      destroys the Chessground instance;
  *    - a hidden tab;
  *    - being scrolled off screen.
- *  On return it restarts from the coin rather than resuming: for a reel that is
- *  the better viewing, and it removes a whole class of resume-state bugs.
+ *  It RESUMES on return rather than restarting. Scrolling down to the Play card
+ *  and back up is an ordinary thing to do on this page, and restarting threw
+ *  away whatever you had just watched — the game you came back to was never the
+ *  one you left.
  *
  *  `onFinishedChange` reports when the game is over, because the result card
  *  renders in the pitch column next to the board rather than inside this
@@ -74,6 +76,13 @@ export function HomeDemo({ onFinishedChange }: { onFinishedChange?: (done: boole
 
   const running = visible && inView;
 
+  // The pause effect below deliberately does not depend on `state` — a beat is a
+  // setTimeout chain, and re-running the effect on every beat would cancel and
+  // reschedule 34 times a lap. So the resume path reads the current state from a
+  // ref instead.
+  const latest = useRef(state);
+  latest.current = state;
+
   // One self-rescheduling setTimeout, one handle. Not setInterval — a fixed
   // cadence can't give a sacrifice a longer beat than a book move, and it drifts
   // under load. Not requestAnimationFrame — chessground already owns the
@@ -99,7 +108,8 @@ export function HomeDemo({ onFinishedChange }: { onFinishedChange?: (done: boole
         if (n) step(n);
       }, ms);
     };
-    step(DEMO_START);
+    // Resume where the pause left off, not from the top.
+    step(latest.current);
     return () => {
       alive = false;
       window.clearTimeout(handle);

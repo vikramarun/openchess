@@ -25,6 +25,9 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 (cd apps/web && pnpm test:nav)     # move nav (following the live tip vs. parked on a ply)
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
+(cd apps/web && pnpm test:payouts) # a tournament's prize split adds up to the pool
+(cd apps/web && pnpm test:tourney) # buy-in vs free vs casual (a "0" buy-in is truthy)
+(cd apps/web && pnpm test:sponsor) # sponsoring a pool, and getting it back if the event dies
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts

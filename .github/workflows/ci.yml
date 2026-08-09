@@ -110,6 +110,15 @@ jobs:
           # row and seats a joiner at the wrong board; the walk is where a
           # lost race is told apart from a real failure.
           pnpm test:offers
+          # The three tournament-money suites arrived with the prize-pool work and
+          # were never listed here, so they existed and never ran — the exact hole
+          # this file warns about twice above. Prize splits that don't total the
+          # pool, a "0" buy-in read as truthy (which renders "0 USDC entry" and
+          # tags a free event Ranked), and a sponsor refund path are all silent
+          # in a build.
+          pnpm test:payouts
+          pnpm test:tourney
+          pnpm test:sponsor
           # Guards the two halves of the castling-notation trap: a king-takes-rook
           # move in the shipped book, or one reaching an engine, silently
           # truncates the engine's position, and every move it returns after
