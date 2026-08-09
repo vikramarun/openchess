@@ -3,9 +3,9 @@
 
 use anyhow::Result;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -1965,7 +1965,10 @@ mod tests {
 
         // And the name is findable from either casing, which is the thing the
         // fork used to break.
-        assert_eq!(db.username_for(&checksummed).await?.as_deref(), Some(&*name));
+        assert_eq!(
+            db.username_for(&checksummed).await?.as_deref(),
+            Some(&*name)
+        );
         assert_eq!(db.username_for(&lowercased).await?.as_deref(), Some(&*name));
         assert_eq!(
             db.wallet_for_username(&name).await?.as_deref(),
@@ -1998,7 +2001,9 @@ mod tests {
         assert_eq!(db.username_for(&wallet).await?.as_deref(), Some(&*name));
         // Found case-insensitively, from either direction.
         assert_eq!(
-            db.wallet_for_username(&name.to_uppercase()).await?.as_deref(),
+            db.wallet_for_username(&name.to_uppercase())
+                .await?
+                .as_deref(),
             Some(&*wallet.to_lowercase())
         );
         assert_eq!(
@@ -2038,7 +2043,11 @@ mod tests {
             .iter()
             .filter(|o| **o == SetUsernameOutcome::Taken)
             .count();
-        assert_eq!((winners, losers), (1, 1), "exactly one claim wins: {outcomes:?}");
+        assert_eq!(
+            (winners, losers),
+            (1, 1),
+            "exactly one claim wins: {outcomes:?}"
+        );
         Ok(())
     }
 

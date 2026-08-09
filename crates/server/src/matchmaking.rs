@@ -29,8 +29,8 @@ use ledger::{merkle_proof, tournament_leaf, Address, U256};
 use crate::agents::AgentUnavailable;
 use crate::ratelimit::client_ip;
 use crate::{
-    build_wager, sanitize_label, validate_tc, AppState, GameOutcome, Ladder,
-    SeatDelivery, SeatMeta, MAX_STAKE,
+    build_wager, sanitize_label, validate_tc, AppState, GameOutcome, Ladder, SeatDelivery,
+    SeatMeta, MAX_STAKE,
 };
 
 /// Fields larger than this settle via a Merkle root (winners claim individually)
@@ -2264,7 +2264,12 @@ fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
 fn entrant_seats(t: &Tournament) -> HashMap<String, String> {
     t.players
         .iter()
-        .filter_map(|p| Some((p.clone(), entrant_wallet(&t.entrant_bots, &t.entrant_wallets, p)?)))
+        .filter_map(|p| {
+            Some((
+                p.clone(),
+                entrant_wallet(&t.entrant_bots, &t.entrant_wallets, p)?,
+            ))
+        })
         .collect()
 }
 

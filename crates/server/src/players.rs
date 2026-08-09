@@ -415,15 +415,23 @@ struct SearchQuery {
 /// Returns `[]` rather than an error for a short, malformed or unanswerable
 /// query: a typeahead that 400s mid-keystroke is worse than one that shows
 /// nothing. Throttled by this router's per-IP `reads` layer.
-async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> Json<Vec<PlayerHit>> {
+async fn search(
+    State(state): State<AppState>,
+    Query(q): Query<SearchQuery>,
+) -> Json<Vec<PlayerHit>> {
     let prefix = q.q.trim();
     let well_formed = (2..=username::USERNAME_MAX).contains(&prefix.chars().count())
-        && prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
     let Some(db) = state.0.db.as_ref().filter(|_| well_formed) else {
         return Json(Vec::new());
     };
     let hits = db
-        .search_usernames(&username::like_prefix(prefix), q.limit.unwrap_or(10).clamp(1, 20))
+        .search_usernames(
+            &username::like_prefix(prefix),
+            q.limit.unwrap_or(10).clamp(1, 20),
+        )
         .await
         .unwrap_or_default();
     Json(
@@ -489,9 +497,11 @@ async fn set_username(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     match db.set_username(&wallet, name).await {
-        Ok(persistence::SetUsernameOutcome::Set { username }) => {
-            (StatusCode::OK, Json(serde_json::json!({ "username": username }))).into_response()
-        }
+        Ok(persistence::SetUsernameOutcome::Set { username }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "username": username })),
+        )
+            .into_response(),
         Ok(persistence::SetUsernameOutcome::Taken) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({ "error": "taken" })),

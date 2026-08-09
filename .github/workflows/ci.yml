@@ -154,6 +154,16 @@ jobs:
           # The same helpers have to degrade to today's single record against a
           # server that predates the split, which is the normal deploy order.
           pnpm test:profile
+          # A username's grammar exists twice — the server enforces it, this
+          # mirror answers while somebody types — and the two gates on each side
+          # must NOT agree: the routing gate has to keep resolving a name whose
+          # word later joined the reserved list, or a profile the server still
+          # serves by address starts 404ing by handle. Merging them is the
+          # obvious "simplification" and it breaks routing, not validation.
+          # Also pins that a blank username falls through to the address instead
+          # of rendering an empty name, and that a cooldown is never reported
+          # from a bare 403 or from either of the two 429s this API already has.
+          pnpm test:username
           # A static site header puts the top nav ~640px above the screen by the
           # time a finished game is readable, so the only clickable link left is
           # the one in the board sidebar — and a header that outranks

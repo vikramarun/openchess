@@ -235,7 +235,14 @@ mod tests {
 
     #[test]
     fn reserved_words_are_refused_however_they_are_capitalised() {
-        for bad in ["admin", "Admin", "ADMIN", "oPenChess", "anonymous", "Oracle"] {
+        for bad in [
+            "admin",
+            "Admin",
+            "ADMIN",
+            "oPenChess",
+            "anonymous",
+            "Oracle",
+        ] {
             assert_eq!(
                 validate_username(bad),
                 Err(UsernameError::Reserved),
@@ -270,9 +277,15 @@ mod tests {
     /// Every static child of `/players/` must be unclaimable, or its route would
     /// shadow the profile of whoever holds that name. Today the list is just
     /// `search`; this test is what makes adding the next one loud.
+    ///
+    /// A slice rather than an array literal so it stays a LIST — the point is
+    /// that it grows, and clippy's `single_element_loop` would otherwise push
+    /// this toward a single inlined assertion that the next person has to
+    /// re-expand.
     #[test]
     fn a_route_segment_can_never_be_claimed() {
-        for segment in ["search"] {
+        const STATIC_CHILDREN_OF_PLAYERS: &[&str] = &["search"];
+        for segment in STATIC_CHILDREN_OF_PLAYERS {
             assert_eq!(
                 validate_username(segment),
                 Err(UsernameError::Reserved),
@@ -301,9 +314,18 @@ mod tests {
         assert_eq!(addr.len(), 42);
         assert!(is_address_shape(addr), "{addr} is 0x + 40 hex");
         assert!(is_address_shape(&addr.to_uppercase()));
-        assert!(!is_address_shape(&format!("0x{}", "a".repeat(39))), "41 chars");
-        assert!(!is_address_shape(&format!("0x{}", "a".repeat(41))), "43 chars");
-        assert!(!is_address_shape(&format!("0x{}", "z".repeat(40))), "not hex");
+        assert!(
+            !is_address_shape(&format!("0x{}", "a".repeat(39))),
+            "41 chars"
+        );
+        assert!(
+            !is_address_shape(&format!("0x{}", "a".repeat(41))),
+            "43 chars"
+        );
+        assert!(
+            !is_address_shape(&format!("0x{}", "z".repeat(40))),
+            "not hex"
+        );
         assert!(!is_address_shape("alice"));
         // And the two never both claim the same string.
         assert!(!is_address_shape("0xdeadbeef"));
