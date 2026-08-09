@@ -41,7 +41,7 @@ pub use alloy::signers::local::PrivateKeySigner;
 use std::sync::Arc;
 
 /// Build a settlement sink from the environment. If `RPC_URL`, `ESCROW_ADDR`,
-/// and `ORACLE_KEY` are all set it returns an on-chain sink; otherwise it falls
+/// and `ORACLE_KEY` are all set it returns an onchain sink; otherwise it falls
 /// back to the no-chain logging sink so the server still runs locally.
 pub fn from_env() -> Arc<dyn SettlementSink> {
     let rpc = std::env::var("RPC_URL").ok();
@@ -55,7 +55,7 @@ pub fn from_env() -> Arc<dyn SettlementSink> {
                 key.parse::<PrivateKeySigner>(),
             ) {
                 (Ok(url), Ok(escrow), Ok(oracle)) => {
-                    tracing::info!(%escrow, "settlement: on-chain sink configured");
+                    tracing::info!(%escrow, "settlement: onchain sink configured");
                     Arc::new(OnchainSettlement::new(url, escrow, oracle))
                 }
                 _ => {
@@ -185,7 +185,7 @@ pub trait SettlementSink: Send + Sync {
     /// Settle a finished game. `winner == None` is a draw (both refunded).
     async fn report_result(&self, game_id: Uuid, winner: Option<Address>) -> anyhow::Result<()>;
 
-    /// Whether this sink actually settles on-chain. The server refuses wagered
+    /// Whether this sink actually settles onchain. The server refuses wagered
     /// games when this is false (fail-closed — never take money it can't settle).
     fn is_onchain(&self) -> bool {
         false
@@ -193,15 +193,15 @@ pub trait SettlementSink: Send + Sync {
 
     /// The escrow contract's current owner (`Ownable2Step`) — the wallet
     /// allowed to administer the server (e.g. toggle maintenance). Each call
-    /// reads the live on-chain owner; `None` off-chain or if the view call
+    /// reads the live onchain owner; `None` off-chain or if the view call
     /// fails. (Callers may cache it — see `AppState::admin_wallet`.)
     async fn owner(&self) -> Option<Address> {
         None
     }
 
-    /// Whether a game is already settled on-chain. Lets the settlement worker
+    /// Whether a game is already settled onchain. Lets the settlement worker
     /// treat a crash-after-submit (or any replay revert) as success rather than
-    /// a failure. Default `false` for non-chain sinks.
+    /// a failure. Default `false` for nonchain sinks.
     async fn is_settled(&self, _game_id: Uuid) -> bool {
         false
     }
@@ -230,7 +230,7 @@ pub trait SettlementSink: Send + Sync {
     }
 
     /// Settle a large tournament by committing a Merkle root of the payout
-    /// leaves; winners claim individually on-chain. Returns the committed root.
+    /// leaves; winners claim individually onchain. Returns the committed root.
     async fn settle_tournament_root(
         &self,
         tid: Uuid,
@@ -240,7 +240,7 @@ pub trait SettlementSink: Send + Sync {
         Ok(B256::ZERO)
     }
 
-    /// Whether a tournament is already settled on-chain (worker idempotency).
+    /// Whether a tournament is already settled onchain (worker idempotency).
     async fn is_tournament_settled(&self, _tid: Uuid) -> bool {
         false
     }
@@ -260,7 +260,7 @@ pub trait SettlementSink: Send + Sync {
         None
     }
 
-    /// The escrow contract address (checksummed), if this sink settles on-chain.
+    /// The escrow contract address (checksummed), if this sink settles onchain.
     /// Published so the web app can wire deposits/withdrawals to the right
     /// contract without a second place to configure it.
     fn escrow_address(&self) -> Option<String> {
@@ -269,7 +269,7 @@ pub trait SettlementSink: Send + Sync {
 }
 
 /// Default no-chain sink: logs what it *would* settle. Used when the server is
-/// not configured with on-chain credentials (e.g. the local demo).
+/// not configured with onchain credentials (e.g. the local demo).
 pub struct LogSettlement;
 
 #[async_trait]
@@ -291,7 +291,7 @@ impl SettlementSink for LogSettlement {
     }
 }
 
-/// On-chain sink backed by the `ChessEscrow` contract on an EVM chain (Base /
+/// Onchain sink backed by the `ChessEscrow` contract on an EVM chain (Base /
 /// Base Sepolia / local Anvil).
 pub struct OnchainSettlement {
     provider: DynProvider,
@@ -978,7 +978,7 @@ mod tests {
 
         // Wait out the settle window (opened ~now; over-wait to clear the boundary).
         let wait = refund_timeout + 15;
-        eprintln!("waiting {wait}s for the refund window to open…");
+        eprintln!("waiting {wait}s for the refund window to open...");
         std::thread::sleep(std::time::Duration::from_secs(wait));
         let rcpt2 = re.claimRefund(gid2, me).send().await?.get_receipt().await?;
         let after_ref = re.bankroll(me).call().await?;

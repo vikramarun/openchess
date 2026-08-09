@@ -154,7 +154,7 @@ pub struct RateLimits {
     /// Game/queue/gauntlet/tournament **creation** routes (`POST /games`,
     /// `/queue`, `/gauntlet/start`, `/tournaments`, `/tournaments/{id}/join`,
     /// `/tournaments/{id}/start`). Each spawns a room actor and/or an
-    /// oracle-gas-costing on-chain call, so they're the most expensive things to
+    /// oracle-gas-costing onchain call, so they're the most expensive things to
     /// spam. Kept off the shared router layer so it never throttles the UI's
     /// frequent read/poll GETs on the same paths.
     pub create: TokenBucket,
@@ -171,7 +171,7 @@ pub struct RateLimits {
     /// anonymous casual offers) may hold.
     pub max_open_offers: usize,
     /// Max not-yet-finished **buy-in** tournaments a single organizer wallet may
-    /// have open at once. Each buy-in tournament opens an on-chain pool at
+    /// have open at once. Each buy-in tournament opens an onchain pool at
     /// creation (oracle-paid gas) while the attacker locks nothing until someone
     /// joins, so without this cap one authed wallet could drain oracle ETH by
     /// looping `POST /tournaments {buy_in}`. Casual (no-pool) tournaments are

@@ -51,7 +51,7 @@ function MaintenanceBannerInner() {
           r.status === 401
             ? SESSION_EXPIRED
             : r.status === 403
-              ? "Not authorized — sign in with the owner wallet."
+              ? "Not authorized. Sign in with the owner wallet."
               : `Failed (${r.status}).`,
         );
         return;
@@ -80,7 +80,7 @@ function MaintenanceBannerInner() {
   return (
     <div className="maint-bar maint-on">
       <span>
-        <strong>Maintenance mode.</strong> No new games can be started — games
+        <strong>Maintenance mode.</strong> No new games can be started. Games
         already in progress will finish normally.
       </span>
       {isAdmin && (

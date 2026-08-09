@@ -27,7 +27,7 @@ use tokio::time::{interval, Instant};
 /// than a second copy of this number that drifts.
 pub const START_WINDOW: Duration = Duration::from_secs(60);
 
-/// On-chain seats for a wagered game (used to settle the result).
+/// Onchain seats for a wagered game (used to settle the result).
 #[derive(Clone, Copy)]
 pub struct StakeInfo {
     pub white: Address,
@@ -200,7 +200,7 @@ impl Room {
             // doesn't linger forever as a ghost in the lobby's "live" list.
             // Resolve it as a forfeit: the side that showed up and readied wins;
             // if neither did, it's a draw. Routing through `finish()` settles a
-            // wagered escrow on-chain NOW — the stake goes to the player who
+            // wagered escrow onchain NOW — the stake goes to the player who
             // showed up (or both are refunded if nobody did) instead of sitting
             // locked behind the contract's 24h `claimTimeout` — tells that
             // player they won, and keeps mode standings progressing.

@@ -7,6 +7,7 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
+import { BOT_OFFLINE } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import {
   fetchTournament,
@@ -38,8 +39,8 @@ export default function TournamentPage() {
       <div className="hero" style={{ paddingBottom: 8 }}>
         <h1>🏆 Tournament</h1>
         <p>
-          Buy in to a prize pool. A round-robin runs (Swiss &amp; knockout coming), and the
-          pool is distributed on-chain by final standings.
+          Pay one entry into a prize pool. A round-robin runs, with Swiss and knockout
+          coming, and the pool is distributed onchain by final standings.
         </p>
       </div>
       {mounted ? <TournamentClient /> : null}
@@ -115,11 +116,11 @@ function TournamentClient() {
     if (!name.trim()) return setErr("Give the tournament a name.");
     let buyInBase: string | undefined;
     if (buyIn.trim()) {
-      if (!token) return setErr("Sign in (top right) to create a buy-in tournament.");
+      if (!token) return setErr("Sign in (top right) to create a tournament with an entry fee.");
       try {
         buyInBase = parseUsdc(buyIn).toString();
       } catch {
-        return setErr("Enter a valid USDC buy-in.");
+        return setErr("Enter a valid USDC entry fee.");
       }
     }
     try {
@@ -136,7 +137,7 @@ function TournamentClient() {
           increment_secs: tc.inc,
         }),
       });
-      if (!r.ok) return setErr(`Couldn't create (${r.status}).`);
+      if (!r.ok) return setErr(`Couldn’t create (${r.status}).`);
       setName("");
       setBuyIn("");
     } catch {
@@ -148,7 +149,7 @@ function TournamentClient() {
     setErr(null);
     if ((t.buy_in || asBot) && !token)
       return setErr(
-        asBot ? "Sign in to enter with your bot." : "Sign in (top right) to join a buy-in tournament.",
+        asBot ? "Sign in to enter with your bot." : "Sign in (top right) to join a tournament with an entry fee.",
       );
     const player = t.buy_in ? undefined : casualName.trim() || `guest-${Math.floor(Date.now() % 100000)}`;
     try {
@@ -166,10 +167,10 @@ function TournamentClient() {
       if (!r.ok) {
         setErr(
           r.status === 502
-            ? "Couldn't move your buy-in into the pool — check your deposited balance."
+            ? "Couldn’t move your entry into the pool. Check your deposited balance."
             : r.status === 424
-              ? "Your bot is offline — check the chess-client window."
-              : `Couldn't join (${r.status}).`,
+              ? BOT_OFFLINE
+              : `Couldn’t join (${r.status}).`,
         );
         return;
       }
@@ -194,7 +195,7 @@ function TournamentClient() {
             ? "Need at least 2 players."
             : r.status === 403
               ? "Only the organizer can start this tournament."
-              : `Couldn't start (${r.status}).`,
+              : `Couldn’t start (${r.status}).`,
         );
     } catch {
       setErr("Server unreachable.");
@@ -213,7 +214,7 @@ function TournamentClient() {
       const r = await fetch(url, {
         headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
       });
-      if (!r.ok) return setErr(`Couldn't load your games (${r.status}).`);
+      if (!r.ok) return setErr(`Couldn’t load your games (${r.status}).`);
       const games: MyGame[] = await r.json();
       const map: Record<string, MyGame> = {};
       for (const g of games) map[g.game_id] = g;
@@ -314,15 +315,15 @@ function TournamentClient() {
                 Watch live ↗
               </a>
               <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-                Your bot plays every round automatically — leave this tab open.
+                Your bot plays every round automatically. Leave this tab open.
               </div>
             </>
           ) : done ? (
             <>
               <b style={{ color: "var(--text-strong)" }}>Tournament finished 🎉</b>
               <p className="muted">
-                Standings decide the pool; a winning share is credited to your bankroll — claim
-                any payout or refund from the wallet menu (top right).
+                Standings decide the pool, and a winning share is credited to your balance.
+                Claim any payout or refund from the wallet menu (top right).
               </p>
               {backBtn}
             </>
@@ -364,7 +365,7 @@ function TournamentClient() {
             <b style={{ color: "var(--text-strong)" }}>You’ve finished your games 🎉</b>
             <p className="muted">
               Standings are tallied as every pairing completes. Small fields credit your winning
-              share to your bankroll directly; large fields settle a Merkle root — claim it from
+              share to your balance directly. Large fields settle a Merkle root, claimed from
               the wallet menu (top right).
             </p>
           </>
@@ -382,10 +383,10 @@ function TournamentClient() {
       <div className="panel" style={{ marginBottom: 16 }}>
         <b style={{ color: "var(--text-strong)" }}>How it works</b>
         <ol className="muted" style={{ lineHeight: 1.8, marginBottom: 0 }}>
-          <li>Create or join; your uniform buy-in locks into the on-chain pool.</li>
+          <li>Create or join. Every entrant pays the same entry into the onchain pool.</li>
           <li>The organizer starts a round-robin; you play your pairings in-browser.</li>
-          <li>The pool is distributed by final standings — small fields directly, large fields via a Merkle claim.</li>
-          <li>If it never settles, every entrant reclaims their buy-in after a timeout.</li>
+          <li>The pool is distributed by final standings: small fields directly, large fields via a Merkle claim.</li>
+          <li>If it never settles, every entrant reclaims their entry after a timeout.</li>
         </ol>
       </div>
 
@@ -397,7 +398,7 @@ function TournamentClient() {
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Friday Arena" />
           </label>
           <label className="of-field">
-            <span className="muted">Buy-in (USDC)</span>
+            <span className="muted">Entry (USDC)</span>
             <input
               inputMode="decimal"
               value={buyIn}
@@ -442,7 +443,7 @@ function TournamentClient() {
         <b style={{ color: "var(--text-strong)" }}>Tournaments</b>
         {tourneys.length === 0 ? (
           <div className="muted" style={{ marginTop: 8 }}>
-            None yet — create one above. Watch engines free in <Link href="/play">Test Engine</Link>.
+            None yet. Create one above, or watch engines free in <Link href="/play">Test Engine</Link>.
           </div>
         ) : (
           <div className="tourney-list">
@@ -458,7 +459,7 @@ function TournamentClient() {
                       <span className={`status-pill ${t.status}`}>{t.status}</span>
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
-                      {t.buy_in ? `${fmtUsdc(t.buy_in)} USDC buy-in` : "casual"} · {t.players.length}{" "}
+                      {t.buy_in ? `${fmtUsdc(t.buy_in)} USDC entry` : "casual"} · {t.players.length}{" "}
                       player{t.players.length === 1 ? "" : "s"}
                       {t.games.length > 0 && ` · ${t.games.length} games`}
                     </div>

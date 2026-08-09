@@ -69,7 +69,7 @@ export function ConnectEngine() {
     (async () => {
       try {
         const r = await authedFetch(`${SERVER_HTTP}/auth/link`, { method: "POST" });
-        if (!r.ok) return setCodeErr("Couldn't create a pairing code — try signing in again.");
+        if (!r.ok) return setCodeErr("Couldn’t create a pairing code. Try signing in again.");
         setCode((await r.json()).code);
       } catch {
         setCodeErr("Server unreachable.");
@@ -117,27 +117,27 @@ export function ConnectEngine() {
   return (
     <>
       <p className="muted" style={{ marginTop: 0 }}>
-        Run any UCI engine — and optionally a Polyglot opening book — on <b>your own computer</b>{" "}
+        Run any UCI engine, and optionally a Polyglot opening book, on <b>your own computer</b>{" "}
         and pair it with your wallet, once. After that this site is the remote control: start or
         join games in the <Link href="/">lobby</Link> and your bot plays them. The server stays
-        the referee — legality, clocks and results are decided server-side; your machine only
-        picks moves.
+        the referee: legality, clocks and results are decided server-side, and your machine
+        only picks moves.
       </p>
 
       {bot.online ? (
         <div className="panel" style={{ marginBottom: 16, borderColor: "#3a7d44" }}>
           <b style={{ color: "var(--text-strong)" }}>
-            ✓ {bot.name ?? bot.engine} is online{bot.busy ? " — playing right now" : ""}
+            ✓ {bot.name ?? bot.engine} is online{bot.busy ? " and playing right now" : ""}
           </b>
           <p className="muted" style={{ fontSize: 14, marginBottom: 8 }}>
             Engine: {bot.engine}. Head to the <Link href="/">lobby</Link>, pick a time control or
-            join an open challenge — your bot plays the seat while you watch live.
+            join an open challenge, and your bot plays the seat while you watch live.
           </p>
 
           {bot.options.length > 0 && (
             <details>
               <summary className="muted" style={{ cursor: "pointer", fontSize: 14 }}>
-                Engine settings ({bot.options.length} options) — applied to every game your bot
+                Engine settings ({bot.options.length} options), applied to every game your bot
                 plays
               </summary>
               <div style={{ display: "grid", gap: 6, marginTop: 10, maxHeight: 320, overflowY: "auto" }}>
@@ -183,7 +183,7 @@ export function ConnectEngine() {
           <div className="panel" style={{ marginBottom: 16 }}>
             <b style={{ color: "var(--text-strong)" }}>1 · Get the client</b>
             <p className="muted" style={{ fontSize: 14 }}>
-              A single small binary that drives any UCI engine — Stockfish, Lc0, or your own. No
+              A single small binary that drives any UCI engine: Stockfish, Lc0, or your own. No
               Rust toolchain needed.
             </p>
             {(() => {
@@ -200,7 +200,7 @@ export function ConnectEngine() {
                 </p>
               ) : (
                 <p className="muted" style={{ fontSize: 14 }}>
-                  📱 The client runs on a desktop or server — grab the right build from your
+                  📱 The client runs on a desktop or server. Grab the right build from your
                   computer:
                 </p>
               );
@@ -220,7 +220,7 @@ export function ConnectEngine() {
                 : "tar -xzf chess-client-*.tar.gz   # then run ./chess-client from that folder"}
             </pre>
             <p className="muted" style={{ fontSize: 13 }}>
-              You also need a UCI engine on your machine —{" "}
+              You also need a UCI engine on your machine.{" "}
               {isWindows ? (
                 <>
                   download Stockfish from <a href="https://stockfishchess.org/download/">
@@ -238,7 +238,7 @@ export function ConnectEngine() {
               .
             </p>
             <p className="muted" style={{ fontSize: 13 }}>
-              If the download 404s, the first release hasn't been cut yet — build from source
+              If the download 404s, the first release hasn’t been cut yet, so build from source
               below. If macOS blocks the app ("developer cannot be verified"), run{" "}
               <code>xattr -d com.apple.quarantine chess-client</code> or right-click → Open once.
             </p>
@@ -256,7 +256,7 @@ export function ConnectEngine() {
             <b style={{ color: "var(--text-strong)" }}>2 · Run it</b>
             {!token && (
               <p className="muted" style={{ fontSize: 14 }}>
-                <b>Sign in with your wallet first</b> (top right) — bots are wallet-bound, so your
+                <b>Sign in with your wallet first</b> (top right). Bots are wallet-bound, so your
                 games count toward your profile and can carry stakes. A single-use pairing code is
                 added to the command automatically.
               </p>
@@ -267,7 +267,7 @@ export function ConnectEngine() {
                 <input value={enginePath} onChange={(e) => setEnginePath(e.target.value)} />
               </label>
               <label className="muted" style={{ fontSize: 13 }}>
-                Opening book — optional Polyglot .bin, consulted before the engine
+                Opening book: optional Polyglot .bin, consulted before the engine
                 <input
                   placeholder="./book.bin (optional)"
                   value={bookPath}

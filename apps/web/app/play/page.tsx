@@ -71,7 +71,7 @@ export default function PlayPage() {
       await Promise.all([white.whenReady(), black.whenReady()]);
       if (cancelled) return;
       // Warm the uploaded book. Note: the book is a shared cache, so both seats
-      // follow it through the opening — "vs the house" diverges once out of book.
+      // follow it through the opening — the OpenChess bot diverges once out of book.
       await ensureBookLoaded();
 
       setStatus("creating game…");
@@ -81,7 +81,7 @@ export default function PlayPage() {
         body: JSON.stringify({ initial_secs: tc.initial, increment_secs: tc.inc }),
       });
       if (!resp.ok) {
-        setStatus(`server error (${resp.status}) — is the game server running?`);
+        setStatus(`Server error (${resp.status}). Is the game server running?`);
         return;
       }
       const game = await resp.json();
@@ -194,7 +194,7 @@ export default function PlayPage() {
               Test Engine
             </div>
             <div className="muted" style={{ fontSize: 14 }}>
-              Two Stockfish engines playing in your browser — your CPU, not our servers.
+              Two Stockfish engines playing in your browser, on your CPU rather than our servers.
             </div>
             <div className="tc-row" role="group" aria-label="Time control">
               {TIME_CONTROLS.map((t) => (
@@ -220,7 +220,7 @@ export default function PlayPage() {
               {winnerText} · {result.reason}
               {verified?.signed && (
                 <div className="verified">
-                  ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                  ✓ Verified, signed by oracle {shortAddr(verified.oracle)}
                 </div>
               )}
             </div>

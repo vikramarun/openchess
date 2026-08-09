@@ -5,7 +5,7 @@ import { useAccount, useReadContract } from "wagmi";
 import { ESCROW_ABI } from "./escrow";
 
 /** Read the connected wallet's available (unlocked) escrow balance in USDC base
- *  units. Used to gate wager actions before they fail on-chain. Returns
+ *  units. Used to gate wager actions before they fail onchain. Returns
  *  `undefined` while loading / when no escrow or wallet. */
 export function useAvailable(
   escrow?: `0x${string}` | null,

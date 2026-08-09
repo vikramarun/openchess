@@ -166,7 +166,7 @@ pub enum OutcomeAction {
 }
 
 /// Consumes game outcomes and updates mode standings; drives tournament rounds
-/// and settles finished tournaments on-chain.
+/// and settles finished tournaments onchain.
 pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) {
     while let Some(o) = rx.recv().await {
         // Free any bots seated in the finished game NOW, deterministically, before
@@ -1290,7 +1290,7 @@ struct TourneyGame {
     // Launch tokens are seat capabilities — never serialize them into the public
     // tournament view. Each entrant fetches only its own via GET
     // /tournaments/{id}/my-games (authenticated). Leaking them lets anyone play
-    // (and throw) any game, steering the on-chain pool payout.
+    // (and throw) any game, steering the onchain pool payout.
     #[serde(skip)]
     white_token: String,
     #[serde(skip)]
@@ -1357,7 +1357,7 @@ async fn tourney_create(
     headers: HeaderMap,
     Json(req): Json<TourneyCreateReq>,
 ) -> Result<Json<IdResp>, StatusCode> {
-    // Drain: reject before opening an on-chain pool (burns oracle gas) for a
+    // Drain: reject before opening an onchain pool (burns oracle gas) for a
     // tournament that couldn't be started (tourney_start is also drained).
     state.reject_if_draining()?;
     state.reject_if_rate_limited_create(&headers)?;
@@ -1366,7 +1366,7 @@ async fn tourney_create(
     // The creating wallet (if authenticated) — only they may start it later.
     let organizer = state.authed_wallet(&headers);
 
-    // A buy-in tournament opens its on-chain pool now (fail-closed). Require an
+    // A buy-in tournament opens its onchain pool now (fail-closed). Require an
     // authenticated caller so an anonymous request can't burn oracle gas.
     if let Some(buy_in_str) = &req.buy_in {
         let creator = state
@@ -1489,7 +1489,7 @@ async fn tourney_join(
     headers: HeaderMap,
     Json(req): Json<JoinReq>,
 ) -> StatusCode {
-    // Drain: reject before locking a buy-in on-chain for a tournament that
+    // Drain: reject before locking a buy-in onchain for a tournament that
     // couldn't be started (this handler returns a bare StatusCode).
     if state.maintenance_on() {
         return StatusCode::SERVICE_UNAVAILABLE;
@@ -1517,18 +1517,18 @@ async fn tourney_join(
     }
 
     let bot = is_bot_seat(&req.seat);
-    // Buy-in tournament: entrant is the authenticated wallet; lock on-chain.
+    // Buy-in tournament: entrant is the authenticated wallet; lock onchain.
     if let Some(buy_in_str) = buy_in {
         let wallet = match state.authed_wallet(&headers) {
             Some(w) => w,
             None => return StatusCode::UNAUTHORIZED,
         };
-        // A bot entrant must be online BEFORE we lock the buy-in on-chain — never
+        // A bot entrant must be online BEFORE we lock the buy-in onchain — never
         // stake USDC for an engine that can't show up.
         if bot && state.0.agents.view(&wallet).is_none() {
             return StatusCode::FAILED_DEPENDENCY; // 424: bot offline
         }
-        // Already entered? (avoid a duplicate on-chain entry).
+        // Already entered? (avoid a duplicate onchain entry).
         {
             let t = state.0.lobby.tournaments.lock();
             if let Some(t) = t.get(&id) {
@@ -1541,7 +1541,7 @@ async fn tourney_join(
             (Ok(a), Ok(b)) => (a, b),
             _ => return StatusCode::BAD_REQUEST,
         };
-        let _ = buy_in; // amount is enforced on-chain from the tournament record
+        let _ = buy_in; // amount is enforced onchain from the tournament record
         if state.0.settlement.enter_tournament(id, addr).await.is_err() {
             return StatusCode::BAD_GATEWAY;
         }
@@ -1953,7 +1953,7 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
 }
 
 /// Settle a finished tournament: rank all entrants, compute a top-heavy payout
-/// split of the pool, and (for a buy-in tournament) distribute on-chain.
+/// split of the pool, and (for a buy-in tournament) distribute onchain.
 async fn settle_tournament(state: &AppState, tid: Uuid) {
     // Snapshot terms + final standings (all entrants, including 0-score).
     let (buy_in, standings) = {
@@ -1988,7 +1988,7 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
 
 /// Recover tournaments after a restart. A `running` tournament whose games all
 /// finished is settled by result; one with games still in flight is marked
-/// `abandoned` (their rooms are gone) — entrants recover via on-chain
+/// `abandoned` (their rooms are gone) — entrants recover via onchain
 /// `claimRefund` after the timeout.
 pub async fn recover_tournaments(state: &AppState) {
     let Some(db) = &state.0.db else { return };
@@ -2083,7 +2083,7 @@ async fn distribute_pool(
 
     // Large fields settle via a Merkle root (O(1) per winner claim); small
     // fields settle directly. Settlement is enqueued to a DURABLE outbox (a
-    // worker drains it on-chain, with retry); with no DB we settle inline.
+    // worker drains it onchain, with retry); with no DB we settle inline.
     if n > ROOT_SETTLE_THRESHOLD {
         // Only winners (amount > 0) become leaves; losers already paid at entry.
         let leaves: Vec<(Address, U256)> = addrs

@@ -9,7 +9,7 @@ import { SERVER_HTTP } from "./config";
 export type MaintenanceState = {
   /** Server is draining: no new games start; games in progress finish. */
   maintenance: boolean;
-  /** The wallet allowed to toggle maintenance (on-chain escrow owner), lowercased. */
+  /** The wallet allowed to toggle maintenance (onchain escrow owner), lowercased. */
   adminWallet: string | null;
 };
 

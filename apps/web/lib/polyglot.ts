@@ -56,7 +56,7 @@ export type BookEntry = { key: bigint; move: number; weight: number };
 
 /** Parse a Polyglot `.bin`: 16-byte big-endian entries sorted by key. */
 export function parseBook(buf: ArrayBuffer): BookEntry[] {
-  if (buf.byteLength % 16 !== 0) throw new Error("not a Polyglot book (size % 16 != 0)");
+  if (buf.byteLength % 16 !== 0) throw new Error("That isn’t a Polyglot book (size % 16 != 0).");
   const view = new DataView(buf);
   const entries: BookEntry[] = [];
   for (let off = 0; off < buf.byteLength; off += 16) {

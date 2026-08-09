@@ -19,7 +19,7 @@ if (!projectId && typeof window !== "undefined") {
   // static prerender). Injected wallets still work without WalletConnect.
   // eslint-disable-next-line no-console
   console.warn(
-    "NEXT_PUBLIC_WC_PROJECT_ID is not set — WalletConnect pairing will not work. Set it for production.",
+    "NEXT_PUBLIC_WC_PROJECT_ID is not set, so WalletConnect pairing will not work. Set it for production.",
   );
 }
 

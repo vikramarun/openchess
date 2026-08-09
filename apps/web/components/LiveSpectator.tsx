@@ -198,7 +198,7 @@ export function LiveSpectator({ id }: { id: string }) {
                 </>
               ) : status === "finished" || status === "disconnected" ? (
                 <>
-                  This game isn’t live right now — it may have finished.
+                  This game isn’t live right now. It may have finished.
                   <div style={{ marginTop: 8 }}>
                     <button className="ghost" onClick={() => window.location.reload()}>
                       Load replay
@@ -222,7 +222,7 @@ export function LiveSpectator({ id }: { id: string }) {
               {winnerText} · {result.reason}
               {verified?.signed && (
                 <div className="verified">
-                  ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                  ✓ Verified, signed by oracle {shortAddr(verified.oracle)}
                 </div>
               )}
               <div style={{ marginTop: 10, display: "flex", gap: 8, justifyContent: "center" }}>

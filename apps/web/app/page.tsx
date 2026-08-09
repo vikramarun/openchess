@@ -15,7 +15,7 @@ export default function Home() {
   const banner =
     status === "ready" ? (
       <span>
-        Your engine is <b>ready</b> — Stockfish,{" "}
+        Your engine is <b>ready</b>. Stockfish,{" "}
         <span className="free">running in your browser for free</span>. No download, no
         server cost.
       </span>
@@ -23,7 +23,7 @@ export default function Home() {
       <span>Loading Stockfish in your browser…</span>
     ) : status === "error" ? (
       <span>
-        Couldn’t load the in-browser engine — you can still bring your own with the native
+        Couldn’t load the in-browser engine. You can still bring your own with the native
         client.
       </span>
     ) : (
@@ -37,8 +37,8 @@ export default function Home() {
           <span className="king">♞</span> OpenChess
         </h1>
         <p>
-          Machines play, you wager. Bring your own engine — or use the one in your browser —
-          post a game, join an open one, or watch bots battle live.
+          Machines play. You back yours. Bring your own engine or use the one already in
+          your browser, then post a game, join an open one, or watch other bots go at it.
         </p>
       </div>
 
@@ -54,11 +54,11 @@ export default function Home() {
           <div className="mc-top">
             <span className="mc-icon">🔥</span>
             <span className="mc-title">Gauntlet</span>
-            <span className="mc-tag">wager</span>
+            <span className="mc-tag">stakes</span>
           </div>
           <div className="mc-desc">
             Your engine plays back-to-back games at a fixed tier until you stop. Lock a
-            bankroll once, net-settle on-chain.
+            balance once, net-settle onchain.
           </div>
         </Link>
 
@@ -66,11 +66,11 @@ export default function Home() {
           <div className="mc-top">
             <span className="mc-icon">🏆</span>
             <span className="mc-title">Tournament</span>
-            <span className="mc-tag">wager</span>
+            <span className="mc-tag">stakes</span>
           </div>
           <div className="mc-desc">
-            Buy in to a prize pool. Round-robin now (Swiss & knockout soon). Pool distributed
-            on-chain by final standings.
+            Pay one entry into a prize pool. Round-robin now, Swiss and knockout soon. The
+            pool is distributed onchain by final standings.
           </div>
         </Link>
       </div>
@@ -78,30 +78,31 @@ export default function Home() {
       <Leaderboard />
 
       <div className="how-it-works">
-        <div className="how-title">How wagering works</div>
+        <div className="how-title">How stakes work</div>
         <div className="how-steps">
           <div className="how-step">
             <div className="how-num">1</div>
             <div className="how-h">Deposit USDC</div>
             <div className="muted">
-              Fund your bankroll in the escrow contract on Base. It stays yours — withdraw any
+              Fund your balance in the escrow contract on Base. It stays yours. Withdraw any
               time it isn’t locked in a game.
             </div>
           </div>
           <div className="how-step">
             <div className="how-num">2</div>
-            <div className="how-h">Play a wager</div>
+            <div className="how-h">Play for stakes</div>
             <div className="muted">
-              Post or join a staked game, run a Gauntlet, or buy into a Tournament. Your engine
-              plays; both stakes lock on-chain.
+              Post or join a staked game, run a Gauntlet, or enter a Tournament. Your engine
+              plays and both stakes lock onchain.
             </div>
           </div>
           <div className="how-step">
             <div className="how-num">3</div>
-            <div className="how-h">Settle on-chain</div>
+            <div className="how-h">Settle onchain</div>
             <div className="muted">
-              The oracle signs the result and the escrow pays the winner their opponent’s stake,
-              less a 1% fee (your own stake comes back). A draw or no-show returns your stake.
+              The oracle signs the result and the escrow pays the winner their opponent’s
+              stake, less a 1% fee. Your own stake comes back either way, and a draw or
+              no-show returns it untouched.
             </div>
           </div>
         </div>

@@ -31,7 +31,7 @@ export default function GauntletPage() {
         <h1>🔥 Gauntlet</h1>
         <p>
           Your engine keeps playing back-to-back games at a fixed tier until you stop. Lock a
-          bankroll once; every game settles against it on-chain.
+          balance once and every game settles against it onchain.
         </p>
       </div>
       {mounted ? <GauntletClient /> : null}
@@ -115,8 +115,8 @@ function GauntletClient() {
           }
           setErr(
             r.status === 424
-              ? "Your bot went offline — reconnect the chess-client window."
-              : `Couldn't join the queue (${r.status}).`,
+              ? "Your bot went offline. Reconnect the chess-client window."
+              : `Couldn’t join the queue (${r.status}).`,
           );
           setSearching(false);
           // Don't give up — retry shortly (the bot may reconnect, the server may
@@ -220,7 +220,7 @@ function GauntletClient() {
           increment_secs: tc.inc,
         }),
       });
-      if (!r.ok) return setErr(`Couldn't start (${r.status}).`);
+      if (!r.ok) return setErr(`Couldn’t start (${r.status}).`);
       const j = await r.json();
       setSession(j.session_id);
       setStats({ status: "running", games: 0, wins: 0, losses: 0, draws: 0, stake: stakeBase ?? null });
@@ -292,7 +292,7 @@ function GauntletClient() {
             Watch live ↗
           </a>
           <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-            Re-queues automatically when this game finishes — leave this tab open.
+            Re-queues automatically when this game finishes. Leave this tab open.
           </div>
         </div>
       </>
@@ -325,7 +325,7 @@ function GauntletClient() {
         <div className="panel" style={{ textAlign: "center" }}>
           <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>Gauntlet stopped</div>
           <div className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
-            Your engine forfeited a game without making a move — it may be offline or
+            Your engine forfeited a game without making a move, so it may be offline or
             misconfigured. The gauntlet stopped so it can’t keep losing your stake.
             Reconnect your bot, then start a new run.
           </div>
@@ -355,7 +355,7 @@ function GauntletClient() {
           <li>Pick a tier and time control; deposit USDC once.</li>
           <li>Your engine is paired with the next arrival at that tier and plays in-browser.</li>
           <li>Win/lose/draw is tracked; it re-queues automatically until you stop.</li>
-          <li>Each game settles on-chain against your bankroll.</li>
+          <li>Each game settles onchain against your balance.</li>
         </ol>
       </div>
 
@@ -413,15 +413,15 @@ function GauntletClient() {
           </button>
           {botPlays && (
             <p className="muted" style={{ fontSize: 13, margin: "6px 0 0" }}>
-              🤖 Your connected bot will play every game unattended — leave the tab open and it
+              🤖 Your connected bot will play every game unattended. Leave the tab open and it
               climbs the tier on its own.
             </p>
           )}
         </div>
         {startUnderfunded && stakeBig != null && (
           <div style={{ color: "#e0a96c", fontSize: 13, marginTop: 6 }}>
-            Available balance {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(stakeBig)} per game —
-            deposit more from the wallet menu (top right).
+            Available balance {fmtUsdc(available)} USDC is under the {fmtUsdc(stakeBig)} stake per
+            game. Deposit more from the wallet menu (top right).
           </div>
         )}
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
