@@ -167,12 +167,14 @@ on the pool's existence, `pool_refresh_task` polling the pool sponsorship makes
 underivable, and a guard against starting an unfunded free event.
 
 Web: `kindOf` + a shared `Terms` component so a free event doesn't render as
-"0 USDC entry, Ranked", and no refund button where the contract refuses one.
+"0 USDC entry, Ranked"; `SponsorPool` to fund a pool from the sponsor's own
+bankroll; a local record of sponsored ids so the claim panel can offer
+`refundSponsorship` (the server's claimable list is entrants-only, and a sponsor
+is not an entrant); and no refund button where the contract refuses one.
 
 **Nothing is deployed** — see the warning at the top of
-[DEPLOYMENTS.md](DEPLOYMENTS.md). Remaining: the sponsor flow in the web app (a
-"fund this pool" button calling `sponsorTournament`, like `deposit`), Part 3,
-and the audit + bankroll migration.
+[DEPLOYMENTS.md](DEPLOYMENTS.md). Remaining: Part 3 (admission control), and the
+audit + bankroll migration.
 
 ### Contract changes
 
