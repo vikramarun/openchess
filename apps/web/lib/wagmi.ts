@@ -42,7 +42,9 @@ const POPULAR_WALLETS = [
 // static prerender.
 export function makeWagmiConfig() {
   return getDefaultConfig({
-    appName: "Chess Wager",
+    // Shown in the WalletConnect pairing prompt inside the user's wallet app,
+    // so it has to be the product name they see everywhere else.
+    appName: "OpenChess",
     projectId: projectId || "dev-only-no-walletconnect",
     chains: [base, baseSepolia],
     wallets: [{ groupName: "Popular", wallets: POPULAR_WALLETS }],

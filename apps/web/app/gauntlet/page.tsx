@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
@@ -115,8 +116,10 @@ function GauntletClient() {
           }
           setErr(
             r.status === 424
-              ? "Your bot went offline. Reconnect the chess-client window."
-              : `Couldn’t join the queue (${r.status}).`,
+              ? BOT_OFFLINE_MSG
+              : r.status === 503
+                ? MAINTENANCE_MSG
+                : `Couldn’t join the queue (${r.status}).`,
           );
           setSearching(false);
           // Don't give up — retry shortly (the bot may reconnect, the server may
@@ -220,7 +223,10 @@ function GauntletClient() {
           increment_secs: tc.inc,
         }),
       });
-      if (!r.ok) return setErr(`Couldn’t start (${r.status}).`);
+      if (!r.ok)
+        return setErr(
+          r.status === 503 ? MAINTENANCE_MSG : `Couldn’t start (${r.status}).`,
+        );
       const j = await r.json();
       setSession(j.session_id);
       setStats({ status: "running", games: 0, wins: 0, losses: 0, draws: 0, stake: stakeBase ?? null });

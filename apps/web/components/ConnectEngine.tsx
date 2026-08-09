@@ -220,7 +220,7 @@ export function ConnectEngine() {
                 : "tar -xzf chess-client-*.tar.gz   # then run ./chess-client from that folder"}
             </pre>
             <p className="muted" style={{ fontSize: 13 }}>
-              You also need a UCI engine on your machine.{" "}
+              You also need a UCI engine on your machine:{" "}
               {isWindows ? (
                 <>
                   download Stockfish from <a href="https://stockfishchess.org/download/">

@@ -58,7 +58,7 @@ sleep 2
 siwe_login() { # key addr
   local NONCE MSG SIG
   NONCE=$(curl -s --retry 15 --retry-connrefused $H/auth/nonce | jget "['nonce']")
-  MSG=$(printf 'chess.local wants you to sign in with your Ethereum account:\n%s\n\nSign in to Chess Wager.\n\nURI: http://chess.local\nVersion: 1\nChain ID: 8453\nNonce: %s\nIssued At: 2026-05-30T00:00:00Z' "$2" "$NONCE")
+  MSG=$(printf 'chess.local wants you to sign in with your Ethereum account:\n%s\n\nSign in to OpenChess.\n\nURI: http://chess.local\nVersion: 1\nChain ID: 8453\nNonce: %s\nIssued At: 2026-05-30T00:00:00Z' "$2" "$NONCE")
   SIG=$(cast wallet sign --private-key "$1" "$MSG")
   python3 - "$MSG" "$SIG" <<'PY'
 import sys,json,urllib.request

@@ -7,7 +7,7 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
-import { BOT_OFFLINE } from "@/lib/copy";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import {
   fetchTournament,
@@ -137,7 +137,10 @@ function TournamentClient() {
           increment_secs: tc.inc,
         }),
       });
-      if (!r.ok) return setErr(`Couldn’t create (${r.status}).`);
+      if (!r.ok)
+        return setErr(
+          r.status === 503 ? MAINTENANCE_MSG : `Couldn’t create (${r.status}).`,
+        );
       setName("");
       setBuyIn("");
     } catch {
@@ -166,11 +169,13 @@ function TournamentClient() {
       });
       if (!r.ok) {
         setErr(
-          r.status === 502
-            ? "Couldn’t move your entry into the pool. Check your deposited balance."
-            : r.status === 424
-              ? BOT_OFFLINE
-              : `Couldn’t join (${r.status}).`,
+          r.status === 503
+            ? MAINTENANCE_MSG
+            : r.status === 502
+              ? "Couldn’t move your entry into the pool. Check your deposited balance."
+              : r.status === 424
+                ? BOT_OFFLINE_MSG
+                : `Couldn’t join (${r.status}).`,
         );
         return;
       }
@@ -191,11 +196,13 @@ function TournamentClient() {
       });
       if (!r.ok)
         setErr(
-          r.status === 409
-            ? "Need at least 2 players."
-            : r.status === 403
-              ? "Only the organizer can start this tournament."
-              : `Couldn’t start (${r.status}).`,
+          r.status === 503
+            ? MAINTENANCE_MSG
+            : r.status === 409
+              ? "Need at least 2 players."
+              : r.status === 403
+                ? "Only the organizer can start this tournament."
+                : `Couldn’t start (${r.status}).`,
         );
     } catch {
       setErr("Server unreachable.");

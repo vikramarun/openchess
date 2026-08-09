@@ -11,7 +11,7 @@ import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
-import { BOT_OFFLINE, MAINTENANCE } from "@/lib/copy";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
@@ -213,9 +213,9 @@ export function Lobby() {
           r.status === 401
             ? SESSION_EXPIRED
             : r.status === 503
-              ? MAINTENANCE
+              ? MAINTENANCE_MSG
               : r.status === 424
-                ? BOT_OFFLINE
+                ? BOT_OFFLINE_MSG
                 : `Couldn’t post the game (${r.status}).`,
         );
       const j = await r.json();
@@ -252,11 +252,11 @@ export function Lobby() {
       if (!r.ok)
         return setErr(
           r.status === 503
-            ? MAINTENANCE
+            ? MAINTENANCE_MSG
             : r.status === 502
               ? "Couldn’t lock the stakes onchain. Check that both players have deposited enough."
               : r.status === 424
-                ? BOT_OFFLINE
+                ? BOT_OFFLINE_MSG
                 : r.status === 410
                   ? "That challenger’s bot went offline, so the offer is gone."
                   : `Couldn’t join (${r.status}).`,
