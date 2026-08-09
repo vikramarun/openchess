@@ -1239,6 +1239,8 @@ struct Tournament {
     /// Entrants whose seat is played by their connected agent (player id ->
     /// dispatch info). In-memory only — a restart abandons in-flight tournaments.
     entrant_bots: HashMap<String, BotEntry>,
+    /// Self-declared engine per entrant (player id -> sanitized label).
+    entrant_engines: HashMap<String, String>,
     /// For a root-settled (large) tournament: the payout leaves, so the server
     /// can serve Merkle proofs to claimers. (addr, amount in base units)
     payout_leaves: Vec<(String, u128)>,
@@ -1400,6 +1402,7 @@ async fn tourney_create(
             current_round: 0,
             round_remaining: 0,
             entrant_bots: HashMap::new(),
+            entrant_engines: HashMap::new(),
             payout_leaves: Vec::new(),
             created_at: Instant::now(),
         },
@@ -1453,6 +1456,10 @@ struct JoinReq {
     seat: Option<String>,
     /// UCI option overrides for a bot entrant (applied per game).
     uci_options: Option<HashMap<String, String>>,
+    /// Self-declared engine for a BROWSER entrant. Without it a browser seat in
+    /// a tournament declared nothing, so its games recorded no engine while the
+    /// same browser's park games did.
+    engine: Option<String>,
 }
 
 async fn tourney_join(
@@ -1523,6 +1530,9 @@ async fn tourney_join(
                 if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
                     t.players.push(wallet.clone());
                 }
+                if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
+                    t.entrant_engines.insert(wallet.clone(), e);
+                }
                 if bot {
                     t.entrant_bots.insert(
                         wallet.clone(),
@@ -1567,6 +1577,9 @@ async fn tourney_join(
                     return StatusCode::CONFLICT; // 409: display name already taken
                 }
                 t.players.push(name.clone());
+                if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
+                    t.entrant_engines.insert(name.clone(), e);
+                }
                 if let Some(wallet) = bot_wallet {
                     t.entrant_bots.insert(
                         name,
@@ -1797,14 +1810,14 @@ async fn dispatch_from_current(state: &AppState, tid: Uuid) {
 /// `round_remaining` to (and returns) the number of real games created.
 async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize {
     // Snapshot pairings + tc + bot entrants (never hold the lock across .await).
-    let (pairings, tc, bots) = {
+    let (pairings, tc, bots, engines) = {
         let ts = state.0.lobby.tournaments.lock();
         let Some(t) = ts.get(&tid) else { return 0 };
         let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
         let Ok(tc) = validate_tc(t.initial_secs, t.increment_secs) else {
             return 0;
         };
-        (pairings, tc, t.entrant_bots.clone())
+        (pairings, tc, t.entrant_bots.clone(), t.entrant_engines.clone())
     };
 
     let seat_meta = |p: &str| SeatMeta {
@@ -1813,7 +1826,9 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
         } else {
             p.to_string()
         }),
-        engine: None,
+        // A bot entrant's engine comes from its agent registration; a browser
+        // entrant declares its own at join time.
+        engine: engines.get(p).cloned(),
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
     // A claimed wallet is pushed onto `claimed` for rollback.
@@ -2537,6 +2552,7 @@ mod tests {
                     player: Some(names[i].into()),
                     seat: Some("bot".into()),
                     uci_options: None,
+                    engine: None,
                 }),
             )
             .await;
@@ -2662,7 +2678,7 @@ mod tests {
                 State(state.clone()),
                 Path(tid),
                 bearer(&tok_a),
-                Json(JoinReq { player: Some("Alpha".into()), seat: Some("bot".into()), uci_options: None }),
+                Json(JoinReq { player: Some("Alpha".into()), seat: Some("bot".into()), uci_options: None, engine: None }),
             )
             .await,
             StatusCode::OK
@@ -2672,7 +2688,7 @@ mod tests {
                 State(state.clone()),
                 Path(tid),
                 bearer(&tok_b),
-                Json(JoinReq { player: Some("Bravo".into()), seat: Some("bot".into()), uci_options: None }),
+                Json(JoinReq { player: Some("Bravo".into()), seat: Some("bot".into()), uci_options: None, engine: None }),
             )
             .await,
             StatusCode::FAILED_DEPENDENCY,
@@ -2684,7 +2700,7 @@ mod tests {
                 State(state.clone()),
                 Path(tid),
                 HeaderMap::new(),
-                Json(JoinReq { player: Some("Bravo".into()), seat: None, uci_options: None }),
+                Json(JoinReq { player: Some("Bravo".into()), seat: None, uci_options: None, engine: None }),
             )
             .await,
             StatusCode::OK
@@ -2728,6 +2744,7 @@ mod tests {
                     player: Some(name.to_string()),
                     seat: None,
                     uci_options: None,
+                    engine: None,
                 }),
             )
         };

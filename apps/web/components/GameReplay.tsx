@@ -129,6 +129,7 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
           <PlayerBar
             color="black"
             name={seatName(detail.black)}
+            engine={detail.black_engine ?? undefined}
             clockMs={clock.black_ms}
             captured={mat.blackCaptured}
             edge={-mat.advantage}
@@ -144,6 +145,7 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
           <PlayerBar
             color="white"
             name={seatName(detail.white)}
+            engine={detail.white_engine ?? undefined}
             clockMs={clock.white_ms}
             captured={mat.whiteCaptured}
             edge={mat.advantage}

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
+import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
@@ -160,7 +161,7 @@ function TournamentClient() {
         },
         body: JSON.stringify({
           player,
-          ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : {}),
+          ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : { engine: browserSeat().engine }),
         }),
       });
       if (!r.ok) {

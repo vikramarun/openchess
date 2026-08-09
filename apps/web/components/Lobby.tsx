@@ -8,7 +8,7 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
-import { browserEngineLabel, ensureRepertoireLoaded, getBrowserBotConfig } from "@/lib/browserBot";
+import { browserSeat, ensureRepertoireLoaded } from "@/lib/browserBot";
 import { prewarmPlayerEngine } from "@/lib/playerEngine";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
@@ -56,16 +56,6 @@ type Pending = {
   stakeBase: string | null;
   bot: boolean;
 };
-
-/** Offer body for a browser-driven seat: the user's configured bot name +
- *  engine label, declared to opponents (unverified). */
-function browserSeat(): { name?: string; engine: string } {
-  const cfg = getBrowserBotConfig();
-  return {
-    ...(cfg.name.trim() ? { name: cfg.name.trim() } : {}),
-    engine: browserEngineLabel(),
-  };
-}
 
 /** One seat's display: name if declared, else shortened wallet, else fallback. */
 const seatLabel = (name: string | null, addr: string | null, fallback: string) =>

@@ -134,6 +134,10 @@ pub struct GameDetailRow {
     pub time_initial_ms: i64,
     pub time_increment_ms: i64,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Self-declared engines, [white, black]. Null for games recorded before
+    /// migration 0012, and for seats that declared none.
+    pub white_engine: Option<String>,
+    pub black_engine: Option<String>,
 }
 
 /// One played move (for replaying a finished game move-by-move).
@@ -215,13 +219,16 @@ impl Db {
         black_wallet: Option<&str>,
         tc: Tc,
         wager: Option<&Wager>,
+        // Self-declared engine per seat, [white, black]. Informational only —
+        // never verified, so nothing may branch on it (ARCHITECTURE.md).
+        engines: [Option<&str>; 2],
     ) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO games
                (id, mode, status, white_wallet, black_wallet,
                 time_initial_ms, time_increment_ms, white_addr, black_addr, stake,
-                settlement_status)
-               VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10)"#,
+                settlement_status, white_engine, black_engine)
+               VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)"#,
         )
         .bind(id)
         .bind(mode)
@@ -233,6 +240,8 @@ impl Db {
         .bind(wager.map(|w| w.black_addr.clone()))
         .bind(wager.map(|w| w.stake))
         .bind(if wager.is_some() { "pending" } else { "none" })
+        .bind(engines[0])
+        .bind(engines[1])
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -555,7 +564,8 @@ impl Db {
         let row = sqlx::query_as::<_, GameDetailRow>(
             r#"SELECT id, mode, status, white_wallet, black_wallet, stake, result,
                       result_reason, result_hash, result_sig, settlement_status,
-                      time_initial_ms, time_increment_ms, finished_at
+                      time_initial_ms, time_increment_ms, finished_at,
+                      white_engine, black_engine
                FROM games WHERE id=$1"#,
         )
         .bind(game_id)
@@ -829,6 +839,7 @@ mod tests {
             Some("0xblack"),
             Tc { initial_ms: 60000, increment_ms: 1000 },
             None,
+            [Some("Stockfish 18 · Sharp"), None],
         )
         .await?;
         db.set_game_active(id).await?;
@@ -836,6 +847,12 @@ mod tests {
         db.append_move(id, 2, "e7e5", "e5", 60000, 60000).await?;
         db.finish_and_enqueue(id, "white", "checkmate", "deadbeef", None, "1. e4 e5", None, false)
             .await?;
+
+        // Engines must survive to the public detail view — the whole point of
+        // migration 0012 is that a finished game can say what played it.
+        let detail = db.game_detail(id).await?.expect("detail exists");
+        assert_eq!(detail.white_engine.as_deref(), Some("Stockfish 18 · Sharp"));
+        assert_eq!(detail.black_engine, None);
 
         let g = db.get_game(id).await?.expect("game exists");
         assert_eq!(g.status, "finished");
@@ -879,6 +896,7 @@ mod tests {
                     Some(&black),
                     Tc { initial_ms: 60000, increment_ms: 1000 },
                     None,
+                    [None, None],
                 )
                 .await?;
                 db.set_game_active(id).await?;
@@ -900,6 +918,7 @@ mod tests {
             Some(&bob),
             Tc { initial_ms: 60000, increment_ms: 1000 },
             None,
+            [None, None],
         )
         .await?;
 

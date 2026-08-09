@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { SeatGame } from "@/components/SeatGame";
+import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
@@ -98,7 +99,7 @@ function GauntletClient() {
             initial_secs: tc.initial,
             increment_secs: tc.inc,
             session_id: session,
-            ...(botPlays ? { seat: "bot", uci_options: loadBotOptions() } : {}),
+            ...(botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat()),
           }),
         });
         if (!r.ok) {

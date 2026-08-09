@@ -88,6 +88,21 @@ export function browserEngineLabel(cfg: BrowserBotConfig = getBrowserBotConfig()
   return parts.length ? `Stockfish 18 · ${parts.join(" · ")}`.slice(0, 48) : "Stockfish 18 (browser)";
 }
 
+/** The identity a BROWSER seat declares when creating or joining a game.
+ *
+ *  Lives here rather than in the lobby because all three modes need it. The
+ *  gauntlet and tournament pages used to send nothing, so a browser bot's games
+ *  in those modes recorded no engine at all while its park games did. */
+export function browserSeat(cfg: BrowserBotConfig = getBrowserBotConfig()): {
+  name?: string;
+  engine: string;
+} {
+  return {
+    ...(cfg.name.trim() ? { name: cfg.name.trim() } : {}),
+    engine: browserEngineLabel(cfg),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Uploaded opening book (IndexedDB) + in-memory probe cache
 // ---------------------------------------------------------------------------
