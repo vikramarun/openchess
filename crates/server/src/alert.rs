@@ -3,7 +3,8 @@
 //! When `ALERT_WEBHOOK_URL` is set, [`fire`] POSTs a short JSON message to it —
 //! fire-and-forget, on a detached task, with a timeout, so it never blocks or
 //! panics the caller. Unset ⇒ no-op; the `tracing::error!` at every call site
-//! remains the record of truth. The body carries both `text` (Slack) and
+//! remains the record of truth. The body carries both `text` (Slack, and
+//! Telegram's sendMessage with the chat encoded in the URL's query string) and
 //! `content` (Discord) keys so the common webhooks work without extra config.
 //!
 //! This exists because the two loudest failure logs — an escrow refund failing
@@ -28,10 +29,21 @@ pub fn fire(text: impl Into<String>) {
             .json(&body)
             .send()
             .await;
-        if let Err(e) = res {
+        // Both halves matter. A transport error is a network problem; a non-2xx
+        // is the webhook REFUSING the message (a Telegram bot kicked from its
+        // group answers 403, Slack a revoked hook 404) — and swallowing that
+        // turns the stuck-funds alarm into a silent no-op, the exact failure
+        // mode this module exists to prevent.
+        match res {
             // `without_url()` strips the URL from the error: the webhook URL's
-            // path IS a secret (Slack/Discord tokens), so it must not hit logs.
-            tracing::warn!("alert webhook POST failed: {}", e.without_url());
+            // path IS a secret (Slack/Discord/Telegram tokens), so it must not
+            // hit logs.
+            Err(e) => tracing::warn!("alert webhook POST failed: {}", e.without_url()),
+            Ok(r) if !r.status().is_success() => {
+                // Status only — the response body can echo request details.
+                tracing::warn!("alert webhook rejected the message: HTTP {}", r.status());
+            }
+            Ok(_) => {}
         }
     });
 }

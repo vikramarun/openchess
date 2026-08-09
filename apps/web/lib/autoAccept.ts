@@ -1,7 +1,9 @@
 "use client";
 
+import { KEYS } from "./storage";
+
 /** localStorage key for "skip the pre-game confirmation". */
-const PREF_KEY = "openchess.autoAccept";
+const PREF_KEY = KEYS.autoAccept;
 
 /** Is the player opting out of the pre-game stakes confirmation?
  *

@@ -210,6 +210,14 @@ pub trait SettlementSink: Send + Sync {
         false
     }
 
+    /// A wallet's deposited escrow balance (total, including anything currently
+    /// locked in a game). `None` off-chain or if the view call fails, so a
+    /// caller can tell "no balance" apart from "couldn't ask" — the difference
+    /// between rejecting a request and failing open on an RPC blip.
+    async fn bankroll_of(&self, _who: Address) -> Option<U256> {
+        None
+    }
+
     // -- tournaments -------------------------------------------------------
 
     async fn open_tournament(&self, tid: Uuid, buy_in: U256) -> anyhow::Result<()> {
@@ -401,6 +409,16 @@ impl SettlementSink for OnchainSettlement {
         match self.contract().games(gid).call().await {
             Ok(g) => g.settled,
             Err(_) => false,
+        }
+    }
+
+    async fn bankroll_of(&self, who: Address) -> Option<U256> {
+        match self.contract().bankroll(who).call().await {
+            Ok(b) => Some(b),
+            Err(e) => {
+                tracing::warn!("escrow bankroll() call failed: {e:#}");
+                None
+            }
         }
     }
 

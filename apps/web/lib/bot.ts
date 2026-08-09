@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import { authedFetch } from "./authedFetch";
 import { SERVER_HTTP } from "./config";
+import { readMigrated, writeKey } from "./storage";
 
 export type UciOptionInfo = {
   name: string;
@@ -67,14 +68,11 @@ export function useBotStatus(token: string | null, intervalMs = 5000): BotStatus
   return bot;
 }
 
-const OPTS_KEY = "bot_uci_options";
-
 /** User-configured UCI option overrides, persisted locally and sent with each
  *  bot game so the agent applies them (Threads, Hash, Skill Level, …). */
 export function loadBotOptions(): Record<string, string> {
-  if (typeof window === "undefined") return {};
   try {
-    return JSON.parse(localStorage.getItem(OPTS_KEY) ?? "{}");
+    return JSON.parse(readMigrated("botOptions") ?? "{}");
   } catch {
     return {};
   }
@@ -84,5 +82,5 @@ export function saveBotOptions(opts: Record<string, string>) {
   const cleaned = Object.fromEntries(
     Object.entries(opts).filter(([k, v]) => k.trim() && v.trim()),
   );
-  localStorage.setItem(OPTS_KEY, JSON.stringify(cleaned));
+  writeKey("botOptions", JSON.stringify(cleaned));
 }

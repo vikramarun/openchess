@@ -147,6 +147,8 @@ pub struct OpenTournamentRow {
     /// Signed-in wallet per casual entrant (name -> wallet), so games
     /// dispatched after a restart stay attributed (migration 0016).
     pub entrant_wallets: serde_json::Value,
+    /// Self-declared engine per entrant (migration 0017), display only.
+    pub entrant_engines: serde_json::Value,
     /// How long ago the tournament was created, so the caller can restore its
     /// TTL clock instead of restarting it on every deploy. Computed by the
     /// database — the server has no chrono of its own.
@@ -509,15 +511,17 @@ impl Db {
         players: &serde_json::Value,
         bots: &serde_json::Value,
         entrant_wallets: &serde_json::Value,
+        entrant_engines: &serde_json::Value,
     ) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO tournaments
                  (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
-                  entrant_wallets)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                  entrant_wallets, entrant_engines)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
                  players=EXCLUDED.players, bots=EXCLUDED.bots,
-                 entrant_wallets=EXCLUDED.entrant_wallets"#,
+                 entrant_wallets=EXCLUDED.entrant_wallets,
+                 entrant_engines=EXCLUDED.entrant_engines"#,
         )
         .bind(id)
         .bind(name)
@@ -529,6 +533,7 @@ impl Db {
         .bind(players)
         .bind(bots)
         .bind(entrant_wallets)
+        .bind(entrant_engines)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -543,7 +548,7 @@ impl Db {
     pub async fn open_tournaments(&self, limit: i64) -> Result<Vec<OpenTournamentRow>> {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
-                      players, bots, entrant_wallets,
+                      players, bots, entrant_wallets, entrant_engines,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,
