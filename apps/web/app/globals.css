@@ -191,8 +191,8 @@ a:hover {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  width: 340px;
-  max-width: 90vw;
+  width: 360px;
+  max-width: calc(100vw - 24px);
   z-index: 50;
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -204,6 +204,9 @@ a:hover {
   margin: 0;
   border: none;
   background: transparent;
+  /* The panel's own 18px is tuned for a full-width page section; in here it is
+     36px of a 360px popover. */
+  padding: 14px;
 }
 
 /* account chip (signed-in state of the single auth button) */
@@ -690,6 +693,11 @@ select {
   border-radius: var(--radius);
   padding: 8px 10px;
   font-size: 14px;
+  /* A <select>'s intrinsic width is its LONGEST OPTION, so a long option label
+     silently blows out whatever lays it out (a grid track sizes to min-content
+     by default). Cap it here rather than per-widget; the layout decides the
+     width, the option list never does. */
+  max-width: 100%;
 }
 
 .panel {
@@ -1171,28 +1179,34 @@ pre {
 }
 
 /* ---------- bankroll + wager forms ---------- */
+/* The bankroll lives in a 360px popover, so these are ROWS, not tiles: three
+   columns left "Locked in games" stacked three words deep next to a USDC
+   balance with six decimals that had nowhere to go. Label left, figure right. */
 .bankroll-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  gap: 6px;
   margin-top: 10px;
 }
 .bankroll-stats .bk {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
 .bankroll-stats .bk-v {
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 800;
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
+  /* Six decimals of USDC beats any label for the leftover room. */
+  white-space: nowrap;
 }
 .bankroll-stats .bk-l {
+  order: -1;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
@@ -1205,6 +1219,12 @@ pre {
 }
 .bankroll-actions input {
   flex: 1;
+  min-width: 0;
+}
+.bankroll-actions button {
+  white-space: nowrap;
+  padding-left: 14px;
+  padding-right: 14px;
 }
 .offer-form {
   display: flex;
@@ -1761,6 +1781,14 @@ select:focus-visible,
 .rep-slot {
   display: grid;
   gap: 4px;
+  /* Grid items default to min-width:auto, so the widest book title
+     ("Hypermodern — Indian defences (21 KB)") pushed the fourth slot off the
+     right edge of the page. Let the track win. */
+  min-width: 0;
+}
+.rep-slot select {
+  width: 100%;
+  text-overflow: ellipsis;
 }
 
 /* ---------- book tree (repertoire preview) ---------- */
