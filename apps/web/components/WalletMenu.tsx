@@ -1,10 +1,12 @@
 "use client";
 
+import { useDynamicContext, useOpenFundingOptions } from "@dynamic-labs/sdk-react-core";
 import { useEffect, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { BankrollPanel } from "@/components/BankrollPanel";
 import { ClaimWinnings } from "@/components/ClaimWinnings";
+import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { fmtUsdc } from "@/lib/escrow";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
@@ -15,6 +17,34 @@ import { useOnchainConfig } from "@/lib/useOnchainConfig";
 export function WalletMenu() {
   if (!useMounted()) return null;
   return <WalletMenuInner />;
+}
+
+/** Separate component so WalletMenuInner itself calls no Dynamic hooks: when
+ *  there's no environment id the provider is absent from the tree entirely, and
+ *  a hook reading its undefined context would throw. */
+function AddFunds({ closeMenu }: { closeMenu: () => void }) {
+  const { primaryWallet } = useDynamicContext();
+  const { openFundingOptions } = useOpenFundingOptions();
+
+  // Someone who signed in with Google or email arrives with an empty wallet and
+  // no obvious way to fill it, so they get Dynamic's funding sheet (card onramp,
+  // transfer from an exchange or another wallet). An external-wallet user
+  // already has their own route to USDC, so for them this is just noise.
+  if (!primaryWallet?.connector?.isEmbeddedWallet) return null;
+
+  return (
+    <button
+      className="fund-btn"
+      onClick={() => {
+        // Close the popover first: the funding sheet is Dynamic's own modal, and
+        // leaving this open behind it stacks two overlays.
+        closeMenu();
+        openFundingOptions();
+      }}
+    >
+      Add funds
+    </button>
+  );
 }
 
 /** Top-right balance widget: a balance pill you refill. Clicking it opens the
@@ -64,6 +94,7 @@ function WalletMenuInner() {
       </button>
       {open && (
         <div className="wallet-pop">
+          {dynamicConfigured && <AddFunds closeMenu={() => setOpen(false)} />}
           <BankrollPanel escrow={config.escrow} chainId={config.chainId} />
           <ClaimWinnings escrow={config.escrow} chainId={config.chainId} />
         </div>
