@@ -62,7 +62,7 @@ docs.
   `SeatDelivery` plumbing means adding them is a per-endpoint claim, not a
   re-implementation.
 - **Personalizable browser bot (no download):** the in-browser engine is now
-  **Stockfish 18** (NNUE, `apps/web/public/stockfish-18-lite-single.*`, single-
+  **Stockfish 18** (NNUE, `apps/web/public/engines/sf18-lite-single-*/`, single-
   threaded 7 MB, so no COOP/COEP headers are needed; see `public/ENGINE.md`). The
   lobby "Your browser bot" panel lets a visitor set a display name and **upload
   a Polyglot `.bin` opening book**, parsed + probed entirely in the browser
@@ -93,10 +93,51 @@ docs.
   if it was contested, with both sides making ≥1 move** (`ply >= 2`); a no-show, or an
   engine that connects then hangs and flags without moving, loses the game/stake
   but its **Elo is untouched**. Single guard in `room.rs finish()`.
-- **Tests:** 73 Rust + 25 Foundry (incl. a 128k-call solvency invariant) + three
-  web suites (`test:book` polyglot vectors, `test:eval` eval bar, `test:auth`
-  session expiry). CI in `.github/workflows/ci.yml` runs all of them; releases in
-  `release.yml`.
+- **Tests:** 126 Rust + 25 Foundry (incl. a 128k-call solvency invariant) + 20
+  web suites (the full `pnpm test:*` list lives in `apps/web/package.json`; the
+  build/test reference in CLAUDE.md names each one). CI in
+  `.github/workflows/ci.yml` runs all of them; releases in `release.yml`.
+  Counts drift as tests land — trust `cargo test` / CI over this line.
+
+## Shipped 2026-08-09: the launch-eve sweep (PRs #29–#47 + launch-cleanup)
+
+Nineteen PRs merged in one day, then a full-repo launch review. The short list,
+newest context first — details live in each PR:
+
+- **Casual games count, on their own ladder (PR #46).** Seat wallets are
+  recorded for unstaked games; `games.rated` (stake OR buy-in tournament)
+  decides which of two Elo ladders moves (`users.casual_rating` is new,
+  migration 0015). Profiles grew an All/Casual/Ranked switcher; the lobby
+  leaderboard is ranked-only ON PURPOSE (free games are farmable) and shows an
+  empty-state invite until the first ranked game settles.
+- **Launch-cleanup branch (this sweep):** `/config` fetch failure no longer
+  cached (one blip used to hide every staking surface for the tab session); the
+  lobby CTA seats you against the House Bot's real offer instead of the
+  self-play demo; the 7 MB engine lazy-loads; footer no longer claims an
+  "audited" contract and now renders on every route; dead game links get a real
+  not-found state; tournament money paths fail closed (join-after-start refused
+  + alerted, persist errors 500 on buy-in joins); `cleanup`/`results` workers
+  supervised; alerts fire when a wagered result can't be persisted or a pool
+  can't settle; matchmaking polling GETs throttled (`RL_POLLS_*`) and lobby
+  tournaments capped (`RL_MAX_TOURNAMENTS`); tournament names sanitized;
+  park stakes validated at post; a post-flag move is no longer echoed/persisted;
+  native gauntlet re-authenticates mid-run instead of aborting.
+- **Board/piece themes + vendored chessground (PR #37), the site mark +
+  metadata/OG surfaces (PR #42), Noto Sans actually loading (PR #44), profile
+  photos (PR #41), eval bar on every board (PR #39), per-game colour by coin
+  flip (PR #43), engine-per-seat recording (PR #38), tournament round/standings
+  fixes (PRs #30/#31), tied entrants paid equally (PR #31), house bot
+  Stockfish 17 + book + 2 GB memory (PRs #29/#45), sticky header + post-game
+  nav (PR #40), offer grouping + `SEATS` per tile (PR #33).**
+
+**Deploy state to verify at launch:** the server was deployed post-#46 during
+the 2026-08-09 migration incident (prod DB carries 0012–0015). Still pending
+after the launch-cleanup merge: `./scripts/deploy-server.sh` (for the sweep's
+server fixes), the house-bot deploy (`fly deploy --config fly.housebot.toml
+--ha=false` — picks up 2 GB memory, the colour-flip client, gauntlet re-auth),
+and the **v0.1.1 client tag** (v0.1.0 predates agent re-auth `18967d0`, so every
+downloaded client 401-loops after a deploy voids sessions; the crate version is
+already bumped, so `git tag v0.1.1 && git push origin v0.1.1` is the whole job).
 
 ## Shipped 2026-08-08: the first-visitor path is open
 
@@ -186,7 +227,7 @@ docs.
   already installed (`apps/web/lib/wagmi.ts` now spells the group out).
 - **"Quick Play" is now "Test Engine".** That covers the tab, the page heading, and the
   cross-links from gauntlet/tournament.
-- **Sessions expire gracefully** *(PR #27, not yet merged)*. A stale token is
+- **Sessions expire gracefully** (PR #27, merged 2026-08-08). A stale token is
   dropped client-side (`apps/web/lib/authedFetch.ts`) instead of dead-ending on a
   401. Without it, every returning user hits an unrecoverable error the day after
   a deploy, since sessions are in-memory with a 24h TTL.

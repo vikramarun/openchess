@@ -75,8 +75,12 @@ export function ProfileStats({ address, editable }: { address: string; editable?
     (async () => {
       try {
         const seg = encodeURIComponent(me);
-        const pr = await fetch(`${SERVER_HTTP}/players/${seg}`).then((r) => r.json());
-        if (live) setP(pr);
+        const r = await fetch(`${SERVER_HTTP}/players/${seg}`);
+        // A 500 carries a JSON error body; parsing it as a profile renders a
+        // header full of blanks with no explanation.
+        if (!r.ok) throw new Error(`profile ${r.status}`);
+        const pr = await r.json();
+        if (live) setP(pr && typeof pr === "object" ? pr : null);
       } catch {
         if (live) setErr("Couldn’t load the profile. Is the server running?");
       }
@@ -212,7 +216,9 @@ export function ProfileStats({ address, editable }: { address: string; editable?
           Game History
         </div>
         {!rows ? (
-          <div className="muted">Loading…</div>
+          // A failed fetch never fills `rows`, so without the `err` branch this
+          // read "Loading…" forever next to the error panel above.
+          <div className="muted">{err ? "Couldn’t load the game history." : "Loading…"}</div>
         ) : rows.length === 0 ? (
           <div className="muted">
             {bucket === "ranked"

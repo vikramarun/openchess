@@ -54,10 +54,16 @@ export type EvalState = {
  *  take CPU from the engine whose move quality, and stake, is on the line. All
  *  callers share the `useEvalPref` switch, so the bar follows the viewer. */
 export function useEval(fen: string | null, enabled: boolean): EvalState {
-  const { engine, status } = useEngine();
+  const { engine, status, load } = useEngine();
   const [score, setScore] = useState<EvalScore | null>(null);
   const [thinking, setThinking] = useState(false);
   const [visible, setVisible] = useState(true);
+
+  // The shared engine is lazy (see engineContext); an enabled bar is a real
+  // consumer, so it triggers the download.
+  useEffect(() => {
+    if (enabled) load();
+  }, [enabled, load]);
 
   useEffect(() => {
     const sync = () => setVisible(!document.hidden);

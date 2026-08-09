@@ -43,17 +43,25 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
 
     let book = opts.book.clone();
 
-    let auth = |rb: reqwest::RequestBuilder| match &opts.auth_token {
+    // Mutable: a server deploy voids every in-memory session mid-run, and the
+    // queue loop below re-authenticates rather than aborting the whole session
+    // on the first 401 (the same lesson the agent loop learned in connect.rs).
+    let mut auth_token = opts.auth_token.clone();
+
+    let with_auth = |rb: reqwest::RequestBuilder, tok: &Option<String>| match tok {
         Some(t) => rb.bearer_auth(t),
         None => rb,
     };
 
     // Start the session.
-    let start = auth(client.post(format!("{http}/gauntlet/start")).json(&json!({
-        "stake": opts.stake,
-        "initial_secs": opts.initial_secs,
-        "increment_secs": opts.increment_secs,
-    })));
+    let start = with_auth(
+        client.post(format!("{http}/gauntlet/start")).json(&json!({
+            "stake": opts.stake,
+            "initial_secs": opts.initial_secs,
+            "increment_secs": opts.increment_secs,
+        })),
+        &auth_token,
+    );
     let resp: Value = start
         .send()
         .await?
@@ -80,14 +88,45 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
             break;
         }
 
-        // Join the tier queue, attributing the game to this session.
-        let q = auth(client.post(format!("{http}/queue")).json(&json!({
-            "stake": opts.stake,
-            "initial_secs": opts.initial_secs,
-            "increment_secs": opts.increment_secs,
-            "session_id": session_id,
-        })));
-        let ticket: Value = q.send().await?.error_for_status()?.json().await?;
+        // Join the tier queue, attributing the game to this session. On a 401,
+        // re-authenticate once and retry: the session lives in the server's
+        // process memory, so a mid-run deploy voids it — aborting a staked
+        // session over that would strand the whole run.
+        let ticket: Value = loop {
+            let q = with_auth(
+                client.post(format!("{http}/queue")).json(&json!({
+                    "stake": opts.stake,
+                    "initial_secs": opts.initial_secs,
+                    "increment_secs": opts.increment_secs,
+                    "session_id": session_id,
+                })),
+                &auth_token,
+            );
+            match q.send().await?.error_for_status() {
+                Ok(resp) => break resp.json().await?,
+                Err(e)
+                    if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED)
+                        && auth_token.is_some() =>
+                {
+                    eprintln!("session rejected; re-authenticating...");
+                    match crate::auth::resolve_session(&client, &http, None, None).await? {
+                        Some(s) => {
+                            println!("signed in as {}", s.address);
+                            auth_token = Some(s.token);
+                        }
+                        // A pasted --auth-token or claimed --code can't be
+                        // re-minted here; only OPENCHESS_WALLET_KEY can.
+                        None => {
+                            return Err(anyhow!(
+                                "session expired and no OPENCHESS_WALLET_KEY set to \
+                                 re-authenticate; restart with a fresh token"
+                            ))
+                        }
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
         let ticket_id = ticket["ticket_id"]
             .as_str()
             .ok_or_else(|| anyhow!("no ticket_id"))?
@@ -137,9 +176,12 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
     }
 
     // Stop the session.
-    let _ = auth(client.post(format!("{http}/gauntlet/{session_id}/stop")))
-        .send()
-        .await;
+    let _ = with_auth(
+        client.post(format!("{http}/gauntlet/{session_id}/stop")),
+        &auth_token,
+    )
+    .send()
+    .await;
     println!("gauntlet finished");
     Ok(())
 }

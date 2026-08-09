@@ -11,6 +11,7 @@ import { Providers } from "./providers";
 import { BoardPrefsSync } from "@/components/BoardPrefsSync";
 import { Header } from "@/components/Header";
 import { MaintenanceBanner } from "@/components/MaintenanceBanner";
+import { SiteFooter } from "@/components/SiteFooter";
 import { boardBootstrapScript } from "@/lib/boardBootstrap";
 import {
   BRAND_NAME,
@@ -102,9 +103,9 @@ export default function RootLayout({
 }) {
   return (
     // suppressHydrationWarning is for the bootstrap script below: it stamps a
-    // style attribute on <html> before React hydrates, which the server render
-    // has no way to predict. It suppresses one level only, so a real mismatch
-    // anywhere inside the page still reports.
+    // style attribute (and data-coords) on <html> before React hydrates, which
+    // the server render has no way to predict. It suppresses one level only, so
+    // a real mismatch anywhere inside the page still reports.
     // The font class only defines --font-sans; globals.css is what applies it,
     // so the whole cascade (including the vendored chessground CSS) picks it up
     // from one place. Safe alongside the bootstrap script below, which writes a
@@ -122,6 +123,10 @@ export default function RootLayout({
           <Header />
           <MaintenanceBanner />
           {children}
+          {/* On every route, not just the homepage: the escrow link and the
+              "stakes are real money" line must reach people who land straight
+              on a shared game, a profile, or the gauntlet. */}
+          <SiteFooter />
         </Providers>
       </body>
     </html>

@@ -48,23 +48,38 @@ export type GameDetail = {
  *  and so cannot import it. Change both. */
 export const GAME_REVALIDATE_SECS = 300;
 
-/** Fetch full game detail; returns null on 404 / network error / bad shape.
+export type GameLookup = {
+  detail: GameDetail | null;
+  /** The server definitively answered 404: no game with this id exists. A
+   *  network error leaves this false, so callers can still try the live room —
+   *  "couldn't ask" and "asked, and it isn't there" need different UX. */
+  missing: boolean;
+};
+
+/** Fetch full game detail, and say WHY when there is none.
  *  The `next` option is server-only and ignored by the browser, so the client
  *  components calling this are unaffected. */
-export async function fetchGame(id: string): Promise<GameDetail | null> {
+export async function lookupGame(id: string): Promise<GameLookup> {
   try {
     const r = await fetch(`${SERVER_HTTP}/games/${encodeURIComponent(id)}`, {
       next: { revalidate: GAME_REVALIDATE_SECS },
     });
-    if (!r.ok) return null;
+    if (r.status === 404) return { detail: null, missing: true };
+    if (!r.ok) return { detail: null, missing: false };
     const d = await r.json();
     // Validate the shape the replay depends on rather than trusting the body —
     // a 200 with an unexpected payload must not crash the board.
-    if (!d || typeof d.status !== "string" || !Array.isArray(d.moves)) return null;
-    return d as GameDetail;
+    if (!d || typeof d.status !== "string" || !Array.isArray(d.moves))
+      return { detail: null, missing: false };
+    return { detail: d as GameDetail, missing: false };
   } catch {
-    return null;
+    return { detail: null, missing: false };
   }
+}
+
+/** Fetch full game detail; returns null on 404 / network error / bad shape. */
+export async function fetchGame(id: string): Promise<GameDetail | null> {
+  return (await lookupGame(id)).detail;
 }
 
 export function isFinished(status: string): boolean {

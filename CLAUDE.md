@@ -14,9 +14,13 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
 (cd contracts && forge test)       # Foundry: 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
+(cd apps/web && pnpm test:books)   # every uploadable book walks clean (incl. castling)
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
 (cd apps/web && pnpm test:move)   # what a seat sends: never an illegal move
 (cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
+(cd apps/web && pnpm test:seatengine) # the seat engine's prewarm/refcount lifecycle
+(cd apps/web && pnpm test:time)    # per-move clock budgeting (movetime ceilings)
+(cd apps/web && pnpm test:candidates) # style picks never trade away a forced mate
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 (cd apps/web && pnpm test:nav)     # move nav (following the live tip vs. parked on a ply)
@@ -191,7 +195,7 @@ wallet.
   leaves the engine a ply behind (usually on the wrong side to move) for the
   rest of the game, so every `bestmove` it returns is illegal, the server
   rejects it, and `play.ts` resigns. A level position, seconds on the clock, no
-  error anywhere. That shipped: `scripts/build-book.mjs` used chessops'
+  error anywhere. That shipped: `scripts/build-book.mjs` (since deleted) used chessops'
   `makeUci`, so 553 of 1817 lines in `public/book.json` carried it. Anything
   reaching an engine or the wire goes through `lib/uci.ts` first;
   `pnpm test:openings` fails if a king-takes-rook move lands in the book again,

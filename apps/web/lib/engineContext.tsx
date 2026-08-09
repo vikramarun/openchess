@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useRef, useState } from "react";
 
 import { BrowserEngine } from "@/lib/engine";
 
@@ -10,14 +10,18 @@ type Ctx = { status: Status; engine: BrowserEngine | null; load: () => void };
 const EngineCtx = createContext<Ctx>({ status: "idle", engine: null, load: () => {} });
 export const useEngine = () => useContext(EngineCtx);
 
-/** Provides a singleton in-browser engine ("your engine"). Auto-loads on mount
- *  because it's free — it runs on the user's CPU, not our servers. */
+/** Provides a singleton in-browser engine ("your engine"), loaded on demand via
+ *  `load()` — NOT on mount. The download is ~7 MB, and most routes never
+ *  search: a visitor browsing the lobby, or a phone opening a shared game
+ *  link, shouldn't pay for it. The eval bar calls `load()` when it's actually
+ *  on. Seat play warms its own engine (lib/playerEngine.ts, before money is
+ *  committed), so no money path depends on this one. */
 export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>("idle");
   const [engine, setEngine] = useState<BrowserEngine | null>(null);
   const started = useRef(false);
 
-  const load = () => {
+  const load = useCallback(() => {
     if (started.current) return;
     started.current = true;
     setStatus("loading");
@@ -32,11 +36,6 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     } catch {
       setStatus("error");
     }
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

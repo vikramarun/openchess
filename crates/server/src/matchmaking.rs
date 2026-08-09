@@ -11,6 +11,7 @@
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
@@ -172,7 +173,11 @@ pub enum OutcomeAction {
 
 /// Consumes game outcomes and updates mode standings; drives tournament rounds
 /// and settles finished tournaments onchain.
-pub async fn results_task(state: AppState, mut rx: mpsc::Receiver<GameOutcome>) {
+///
+/// The receiver arrives in an Arc-Mutex because `supervise` re-invokes this on
+/// panic, and an owned receiver would die with the first incarnation.
+pub async fn results_task(state: AppState, rx: Arc<tokio::sync::Mutex<mpsc::Receiver<GameOutcome>>>) {
+    let mut rx = rx.lock().await;
     while let Some(o) = rx.recv().await {
         // Free any bots seated in the finished game NOW, deterministically, before
         // a tournament round-advance re-claims them for the next round. The room
@@ -390,6 +395,16 @@ async fn park_create(
         state.authed_wallet_strict(&headers)?
     };
 
+    // Validate the stake NOW, not at accept: an unparseable or absurd stake
+    // would otherwise stand in the public lobby, and every join would die with
+    // a bare 400 from build_wager while the poster wonders why nobody bites.
+    if let Some(s) = &req.stake {
+        let stake = s.parse::<U256>().map_err(|_| StatusCode::BAD_REQUEST)?;
+        if stake == U256::ZERO || stake > U256::from(MAX_STAKE) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
     let mut poster_name = req.name.as_deref().and_then(sanitize_label);
     let mut poster_engine = req.engine.as_deref().and_then(sanitize_label);
     if bot {
@@ -492,9 +507,13 @@ struct OfferSummary {
     increment_secs: u64,
 }
 
-async fn park_list(State(state): State<AppState>) -> Json<Vec<OfferSummary>> {
+async fn park_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OfferSummary>>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
     let park = state.0.lobby.park.lock();
-    Json(
+    Ok(Json(
         park.iter()
             .filter(|(_, o)| o.status == "open")
             .map(|(id, o)| OfferSummary {
@@ -507,7 +526,7 @@ async fn park_list(State(state): State<AppState>) -> Json<Vec<OfferSummary>> {
                 increment_secs: o.increment_secs,
             })
             .collect(),
-    )
+    ))
 }
 
 #[derive(Serialize)]
@@ -546,8 +565,10 @@ async fn park_accept(
     // Drain: reject before claiming the offer so it isn't consumed on a 503.
     state.reject_if_draining()?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    // Throttle accept attempts per-IP (same budget as offer creation).
-    if state.0.limits.offers.check(&client_ip(&headers)).is_some() {
+    // Throttle per-IP on the CREATE budget, not the offers one: a successful
+    // accept locks escrow onchain and spawns a room actor, which is exactly
+    // the cost class that bucket meters (posting an offer commits nothing).
+    if state.0.limits.create.check(&client_ip(&headers)).is_some() {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let acceptor_bot = is_bot_seat(&req.seat);
@@ -773,7 +794,8 @@ async fn park_get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-) -> Json<ParkGetResp> {
+) -> Result<Json<ParkGetResp>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
     // For a wagered offer, only the authenticated poster may retrieve the white
     // launch token (else anyone polling the id could grab it and throw the
     // staked game). Casual offers carry no stake, so the token is returned freely.
@@ -787,7 +809,7 @@ async fn park_get(
                     .unwrap_or(false),
                 None => true, // casual offer
             };
-            Json(ParkGetResp {
+            Ok(Json(ParkGetResp {
                 status: o.status.clone(),
                 game_id: o.game_id,
                 token: if authorized {
@@ -808,16 +830,16 @@ async fn park_get(
                 // chose to publish in a public lobby (it is already in
                 // GET /park/offers). A wagered offer stays wallet-gated.
                 opponent: o.opponent.clone().filter(|_| authorized),
-            })
+            }))
         }
-        None => Json(ParkGetResp {
+        None => Ok(Json(ParkGetResp {
             status: "not_found".into(),
             game_id: None,
             token: None,
             color: None,
             seat: None,
             opponent: None,
-        }),
+        })),
     }
 }
 
@@ -1167,9 +1189,20 @@ struct TicketResp {
     seat: Option<String>,
 }
 
-async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<TicketResp> {
+/// The ticket id is deliberately the ONLY credential here — a v4 UUID handed
+/// over TLS to the joiner and nobody else, i.e. a capability. park_get grew a
+/// wallet gate on top of that; this must NOT copy it: shipped native clients
+/// (chess-client ≤ v0.1.x run_gauntlet) poll this route without a bearer, so a
+/// wallet gate would filter their launch token and reap their STAKED seats as
+/// forfeits. Revisit only once authenticated-poll clients are the installed base.
+async fn queue_get(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<TicketResp>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
     let tickets = state.0.lobby.tickets.lock();
-    match tickets.get(&id) {
+    Ok(match tickets.get(&id) {
         Some(t) => Json(TicketResp {
             status: t.status.clone(),
             game_id: t.game_id,
@@ -1184,7 +1217,7 @@ async fn queue_get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Json<
             color: None,
             seat: None,
         }),
-    }
+    })
 }
 
 // --------------------------------------------------------------------------
@@ -1278,7 +1311,9 @@ struct GauntletView {
 async fn gauntlet_get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<GauntletView>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
     let g = state.0.lobby.gauntlets.lock();
     let s = g.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(GauntletView {
@@ -1469,6 +1504,19 @@ async fn tourney_create(
     state.reject_if_draining()?;
     state.reject_if_rate_limited_create(&headers)?;
     validate_tc(req.initial_secs, req.increment_secs)?;
+    // The name flows raw into the lobby view every client polls, Postgres, and
+    // the logs — the same reasons every other user-supplied label here goes
+    // through sanitize_label (control chars out, length capped).
+    let name = sanitize_label(&req.name).ok_or(StatusCode::BAD_REQUEST)?;
+    // Global ceiling, casual included: every tournament in the map is walked by
+    // every `GET /tournaments` under the lobby mutex, and a casual one costs
+    // nothing to create and lives a day — unbounded, the map is a DoS surface.
+    {
+        let ts = state.0.lobby.tournaments.lock();
+        if ts.len() >= state.0.limits.max_lobby_tournaments {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
     let id = Uuid::new_v4();
     // The creating wallet (if authenticated) — only they may start it later.
     let organizer = state.authed_wallet(&headers);
@@ -1517,10 +1565,11 @@ async fn tourney_create(
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
     }
 
+    let has_buy_in = req.buy_in.is_some();
     state.0.lobby.tournaments.lock().insert(
         id,
         Tournament {
-            name: req.name,
+            name,
             buy_in: req.buy_in,
             organizer,
             initial_secs: req.initial_secs,
@@ -1540,7 +1589,16 @@ async fn tourney_create(
         },
     );
     // Persist so a restart can recover this tournament (see recover_tournaments).
-    persist_tournament(&state, id).await;
+    // Best-effort at creation: no money is locked yet (the organizer stakes
+    // nothing), and the first successful join re-writes the whole snapshot. But
+    // a buy-in pool IS open onchain, so say so out loud rather than silently.
+    if persist_tournament(&state, id).await.is_err() && has_buy_in {
+        crate::alert::fire(format!(
+            "⚠️ OpenChess: buy-in tournament {id} opened its onchain pool but could not \
+             be persisted; a restart before the first successful join loses it from the \
+             lobby while the pool stays open."
+        ));
+    }
     Ok(Json(IdResp { tournament_id: id }))
 }
 
@@ -1585,8 +1643,14 @@ fn bots_from_json(v: &serde_json::Value) -> HashMap<String, BotEntry> {
 }
 
 /// Re-persist a tournament's row from its in-memory state (players + status).
-async fn persist_tournament(state: &AppState, tid: Uuid) {
-    let Some(db) = &state.0.db else { return };
+/// Snapshot a tournament into Postgres so a restart can recover it. `Err`
+/// means the WRITE failed and the durable row now disagrees with memory — a
+/// caller that just locked money onchain must surface that, because a restart
+/// would rehydrate the tournament WITHOUT the entrant while their buy-in stays
+/// locked (`recover_tournaments`). No DB configured is `Ok`: nothing to
+/// disagree with.
+async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
+    let Some(db) = &state.0.db else { return Ok(()) };
     let snap = {
         let ts = state.0.lobby.tournaments.lock();
         ts.get(&tid).map(|t| {
@@ -1603,20 +1667,23 @@ async fn persist_tournament(state: &AppState, tid: Uuid) {
         })
     };
     if let Some((name, buy_in, organizer, init, inc, status, players, bots)) = snap {
-        let _ = db
-            .upsert_tournament(
-                tid,
-                &name,
-                buy_in.as_deref(),
-                organizer.as_deref(),
-                init,
-                inc,
-                &status,
-                &players,
-                &bots,
-            )
-            .await;
+        db.upsert_tournament(
+            tid,
+            &name,
+            buy_in.as_deref(),
+            organizer.as_deref(),
+            init,
+            inc,
+            &status,
+            &players,
+            &bots,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(tournament = %tid, "tournament persist failed: {e}");
+        })?;
     }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1686,14 +1753,20 @@ async fn tourney_join(
         if bot && state.0.agents.view(&wallet).is_none() {
             return Err(StatusCode::FAILED_DEPENDENCY); // 424: bot offline
         }
-        // Already entered? (avoid a duplicate onchain entry).
-        {
+        // Already entered? (avoid a duplicate onchain entry). Re-persist before
+        // answering: this is the retry path for a join that 500'd on the
+        // durable write, and an early return without the write would leave that
+        // hole open forever.
+        let already = {
             let t = state.0.lobby.tournaments.lock();
-            if let Some(t) = t.get(&id) {
-                if t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
-                    return Ok(Json(JoinResp { player: wallet }));
-                }
+            t.get(&id)
+                .is_some_and(|t| t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)))
+        };
+        if already {
+            if persist_tournament(&state, id).await.is_err() {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
+            return Ok(Json(JoinResp { player: wallet }));
         }
         let (addr, buy_in) = match (wallet.parse::<Address>(), buy_in_str.parse::<U256>()) {
             (Ok(a), Ok(b)) => (a, b),
@@ -1705,25 +1778,60 @@ async fn tourney_join(
         }
         {
             let mut t = state.0.lobby.tournaments.lock();
-            if let Some(t) = t.get_mut(&id) {
-                if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
-                    t.players.push(wallet.clone());
+            // Re-check under the lock: the join awaited an onchain tx, and the
+            // organizer can start (or the sweep can close) the tournament in
+            // that gap. The buy-in is already locked; seating the wallet anyway
+            // would enter a player the schedule doesn't know, who finishes on
+            // zero games and gets paid nothing. Refuse loudly instead — the
+            // entrant's funds need a manual return (or the contract's
+            // claimRefund once the settle window lapses), and the operator has
+            // to hear about it now, not from a support ticket.
+            // The player-cap re-check rides the same guard: `full` was read
+            // before the await, and concurrent joins past MAX_TOURNAMENT_PLAYERS
+            // would break the O(n²) bounds the round-robin math relies on.
+            match t.get_mut(&id) {
+                Some(t) if t.status == "open" && t.players.len() < MAX_TOURNAMENT_PLAYERS => {
+                    if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
+                        t.players.push(wallet.clone());
+                    }
+                    if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
+                        t.entrant_engines.insert(wallet.clone(), e);
+                    }
+                    if bot {
+                        t.entrant_bots.insert(
+                            wallet.clone(),
+                            BotEntry {
+                                wallet: wallet.clone(),
+                                uci_options: clean_uci_options(req.uci_options),
+                            },
+                        );
+                    }
                 }
-                if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
-                    t.entrant_engines.insert(wallet.clone(), e);
-                }
-                if bot {
-                    t.entrant_bots.insert(
-                        wallet.clone(),
-                        BotEntry {
-                            wallet: wallet.clone(),
-                            uci_options: clean_uci_options(req.uci_options),
-                        },
-                    );
+                _ => {
+                    drop(t);
+                    tracing::error!(tournament = %id, wallet = %wallet, "buy-in landed after start/close/fill; entrant NOT seated");
+                    crate::alert::fire(format!(
+                        "🚨 OpenChess: wallet {wallet} paid a buy-in to tournament {id} that \
+                         started, closed, or filled during the join. They are NOT in the \
+                         schedule; their entry needs a manual return (or claimRefund after \
+                         the settle timeout)."
+                    ));
+                    return Err(StatusCode::CONFLICT);
                 }
             }
         }
-        persist_tournament(&state, id).await;
+        // The wallet's money is locked onchain; if the durable row can't record
+        // them, a restart recovers this tournament WITHOUT them. Fail the join
+        // (memory keeps them seated, and a retry re-persists) rather than
+        // shrugging — this is a money path, and money paths fail closed.
+        if persist_tournament(&state, id).await.is_err() {
+            crate::alert::fire(format!(
+                "🚨 OpenChess: could not persist tournament {id} after wallet {wallet} \
+                 entered onchain. A restart before a successful persist rehydrates the \
+                 tournament without them while their buy-in stays locked."
+            ));
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
         Ok(Json(JoinResp { player: wallet }))
     } else {
         // Casual tournament: a display name (sanitized — it flows into lobby
@@ -1755,6 +1863,11 @@ async fn tourney_join(
                 if t.players.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
                     return Err(StatusCode::CONFLICT); // 409: display name taken
                 }
+                // Re-checked under the lock (the pre-await `full` read can race
+                // concurrent joins past the cap the pairing math relies on).
+                if t.players.len() >= MAX_TOURNAMENT_PLAYERS {
+                    return Err(StatusCode::CONFLICT);
+                }
                 t.players.push(name.clone());
                 if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
                     t.entrant_engines.insert(name.clone(), e);
@@ -1770,7 +1883,9 @@ async fn tourney_join(
                 }
             }
         }
-        persist_tournament(&state, id).await;
+        // Casual: no money locked, so a failed persist costs at worst a lobby
+        // entry on restart — best-effort is fine here.
+        let _ = persist_tournament(&state, id).await;
         Ok(Json(JoinResp { player: name }))
     }
 }
@@ -1968,7 +2083,9 @@ fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
 async fn tourney_get(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Json<TourneyView>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
     let t = state.0.lobby.tournaments.lock();
     Ok(Json(view_of(
         t.get(&id).ok_or(StatusCode::NOT_FOUND)?,
@@ -1990,7 +2107,14 @@ struct TourneySummary {
     view: TourneyView,
 }
 
-async fn tourney_list(State(state): State<AppState>) -> Json<Vec<TourneySummary>> {
+async fn tourney_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TourneySummary>>, StatusCode> {
+    // The heaviest poll on the router: standings_of is O(entrants²) per
+    // tournament and the whole walk holds the lobby mutex — hence the throttle
+    // and the max_lobby_tournaments cap at creation.
+    state.reject_if_rate_limited_polls(&headers)?;
     let t = state.0.lobby.tournaments.lock();
     let mut out: Vec<TourneySummary> = t
         .iter()
@@ -2002,7 +2126,7 @@ async fn tourney_list(State(state): State<AppState>) -> Json<Vec<TourneySummary>
     // Newest first — the map's iteration order is arbitrary, and a lobby that
     // reshuffles on every 3s poll is unusable.
     out.sort_by_key(|s| s.view.age_secs);
-    Json(out)
+    Ok(Json(out))
 }
 
 #[derive(Serialize)]
@@ -2038,6 +2162,7 @@ async fn tourney_my_games(
     Query(q): Query<MyGamesQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<MyGame>>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
     let t = state.0.lobby.tournaments.lock();
     let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
     let me = if t.buy_in.is_some() {
@@ -2366,7 +2491,17 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
     if let Some(buy_in_str) = buy_in {
         if let Err(e) = distribute_pool(state, tid, &buy_in_str, &standings).await {
             tracing::error!(tournament = %tid, "tournament settlement failed: {e:#}");
-            // leave status 'complete' so it can be retried / inspected
+            // Leave status 'complete' so it can be inspected — but nothing
+            // automatically retries this (the schedule is exhausted, so no
+            // round-advance ever runs again). Without the alert, the pool sits
+            // unsettled until the contract's settle window closes and entrants
+            // are pushed to claimRefund.
+            crate::alert::fire(format!(
+                "🚨 OpenChess: tournament {tid} finished but its pool was NOT settled \
+                 ({e:#}). It is parked at status 'complete' with no automatic retry; \
+                 entrants' buy-ins stay locked until this is settled manually or the \
+                 settle window lapses into claimRefund."
+            ));
             return;
         }
     }
@@ -2603,10 +2738,15 @@ async fn distribute_pool(
     standings: &[(String, f64)],
 ) -> anyhow::Result<()> {
     let n = standings.len();
-    let buy_in = buy_in_str
-        .parse::<U256>()
-        .map_err(|_| anyhow::anyhow!("bad buy-in"))?
-        .to::<u128>();
+    // try_from, not `to::<u128>()`: this string can come back from Postgres via
+    // recover_tournaments with no revalidation, and `to()` PANICS on overflow —
+    // inside the supervised results worker, taking round dispatch down with it.
+    let buy_in = u128::try_from(
+        buy_in_str
+            .parse::<U256>()
+            .map_err(|_| anyhow::anyhow!("bad buy-in"))?,
+    )
+    .map_err(|_| anyhow::anyhow!("buy-in overflows u128"))?;
     let pool = buy_in
         .checked_mul(n as u128)
         .ok_or_else(|| anyhow::anyhow!("pool overflow"))?;
@@ -2710,7 +2850,12 @@ fn parse_leaves(v: &serde_json::Value) -> Vec<(String, u128)> {
 async fn tourney_claim_proof(
     State(state): State<AppState>,
     Path((id, address)): Path<(Uuid, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<ClaimProof>, StatusCode> {
+    // The one tournament GET that can hit Postgres (the outbox fallback below)
+    // — throttled for the same reason players.rs parks its DB reads behind a
+    // rate-limit layer.
+    state.reject_if_rate_limited_polls(&headers)?;
     // Prefer in-memory leaves; fall back to the durable outbox payload so
     // proofs survive a server restart.
     let mem = {
@@ -2867,7 +3012,7 @@ mod tests {
         );
 
         // B's ticket is matched, holds NO launch token (its bot has it), seat=bot.
-        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id)).await.0;
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new()).await.expect("ticket").0;
         assert_eq!(tr.status, "matched");
         assert!(tr.token.is_none(), "a bot seat's token stays server-side");
         assert_eq!(tr.seat.as_deref(), Some("bot"));
@@ -2967,7 +3112,7 @@ mod tests {
             .expect("accept")
             .0;
 
-            let posted = park_get(State(state.clone()), Path(offer_id), headers).await.0;
+            let posted = park_get(State(state.clone()), Path(offer_id), headers).await.expect("offer").0;
             let poster_color = posted.color.expect("a matched offer reports a colour");
             assert_ne!(poster_color, acc.color, "the two seats can't share a colour");
 
@@ -3026,8 +3171,8 @@ mod tests {
                 .0
                 .ticket_id;
 
-            let ta = queue_get(State(state.clone()), Path(a)).await.0;
-            let tb = queue_get(State(state.clone()), Path(b)).await.0;
+            let ta = queue_get(State(state.clone()), Path(a), HeaderMap::new()).await.expect("ticket").0;
+            let tb = queue_get(State(state.clone()), Path(b), HeaderMap::new()).await.expect("ticket").0;
             assert_eq!(ta.status, "matched");
             assert_eq!(tb.status, "matched");
             let (ca, cb) = (ta.color.expect("A colour"), tb.color.expect("B colour"));
@@ -3228,7 +3373,7 @@ mod tests {
         let r2 = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
             .await
             .expect("p2");
-        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id)).await.0;
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new()).await.expect("ticket").0;
         assert_eq!(tr.status, "matched");
         assert!(tr.token.is_some(), "a browser seat gets a launch token");
         assert_eq!(tr.seat.as_deref(), Some("browser"));
@@ -3409,7 +3554,7 @@ mod tests {
             t.scores.insert("Third".into(), 1.0);
         }
 
-        let view = tourney_get(State(state.clone()), Path(tid)).await.expect("view").0;
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
         let ranks: Vec<usize> = view.standings.iter().map(|s| s.rank).collect();
         assert_eq!(ranks, vec![1, 1, 3], "level entrants share the place");
         assert!(view.standings[0].tied && view.standings[1].tied, "both level rows are flagged");
@@ -3640,7 +3785,7 @@ mod tests {
         // next round can re-claim them. If that freeing regresses (the T1 race),
         // round 1+ pairings forfeit, no real games get created, and the
         // per-round wait below times out — this test is the regression guard.
-        tokio::spawn(results_task(state.clone(), results_rx));
+        tokio::spawn(results_task(state.clone(), Arc::new(tokio::sync::Mutex::new(results_rx))));
         let tx = state.0.results_tx.clone();
         let _ = &mut rxs; // agents keep receiving AssignSeat; we don't assert on it here
 
@@ -3729,7 +3874,7 @@ mod tests {
         let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
             .await
             .expect("start");
-        tokio::spawn(results_task(state.clone(), results_rx));
+        tokio::spawn(results_task(state.clone(), Arc::new(tokio::sync::Mutex::new(results_rx))));
         let tx = state.0.results_tx.clone();
 
         let round_games = |round: usize| -> Vec<GameId> {
@@ -3786,7 +3931,7 @@ mod tests {
         }
         assert!(settled, "tournament settled after the last round");
 
-        let view = tourney_get(State(state.clone()), Path(tid)).await.expect("view").0;
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
         assert_eq!(view.games.len(), 3, "every pairing is visible");
         assert!(view.games.iter().all(|g| g.result.is_some() && !g.forfeit));
         let total: f64 = view.standings.iter().map(|s| s.score).sum();
@@ -3928,10 +4073,10 @@ mod tests {
             });
         }
 
-        let detail = tourney_get(State(state.clone()), Path(tid)).await.expect("detail").0;
+        let detail = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("detail").0;
         assert_eq!(detail.games.len(), 3, "the detail route still serves every pairing");
 
-        let list = tourney_list(State(state.clone())).await.0;
+        let list = tourney_list(State(state.clone()), HeaderMap::new()).await.expect("list").0;
         let row = list.iter().find(|r| r.tournament_id == tid).expect("in the lobby");
         assert_eq!(row.view.games.len(), 1, "the lobby carries only the live round");
         assert!(row.view.games.iter().all(|g| g.round == 1));
@@ -4013,7 +4158,7 @@ mod tests {
         .await
         .expect("bravo joins");
 
-        let view = tourney_get(State(state.clone()), Path(tid)).await.expect("view").0;
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
         assert_eq!(view.standings.len(), 2, "an open tournament still has a table");
         assert!(view.standings.iter().all(|s| s.score == 0.0 && s.played == 0));
         assert!(
@@ -4027,7 +4172,7 @@ mod tests {
             .await
             .expect("start");
 
-        let view = tourney_get(State(state.clone()), Path(tid)).await.expect("view").0;
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
         assert_eq!(view.games.len(), 1, "the forfeited pairing is still a visible row");
         assert!(view.games[0].forfeit && view.games[0].game_id.is_none());
         assert_eq!(view.games[0].result.as_deref(), Some("black"), "Bravo awarded it");

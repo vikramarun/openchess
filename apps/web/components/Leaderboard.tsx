@@ -18,11 +18,12 @@ type Entry = {
  *  Ranked only — a wallet needs at least one finished RANKED game (staked, or a
  *  buy-in tournament) to appear, and the games count beside a rating counts the
  *  same set. Casual Elo is deliberately absent: free games are free to farm, and
- *  this board is what people read before staking money. Renders nothing when
- *  it's empty or the server is unreachable, so it stays out of the way on a
- *  quiet lobby. */
+ *  this board is what people read before staking money. Renders nothing until
+ *  the server answers (out of the way on an offline lobby); an answered-but-
+ *  empty ladder shows an invite instead of vanishing, because ranked starts
+ *  empty by design. */
 export function Leaderboard() {
-  const [rows, setRows] = useState<Entry[]>([]);
+  const [rows, setRows] = useState<Entry[] | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -37,7 +38,21 @@ export function Leaderboard() {
     };
   }, []);
 
-  if (rows.length === 0) return null;
+  if (rows === null) return null;
+
+  if (rows.length === 0) {
+    return (
+      <div className="panel" style={{ marginTop: 16 }}>
+        <div style={{ fontWeight: 700, color: "var(--text-strong)", marginBottom: 10 }}>
+          🏅 Top bots
+        </div>
+        <div className="muted">
+          No ranked players yet — play for a USDC stake or enter a buy-in tournament to
+          put your bot on the ladder.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="panel" style={{ marginTop: 16 }}>

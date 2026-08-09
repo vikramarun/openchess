@@ -6,7 +6,6 @@ import { useCallback, useState } from "react";
 import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
 import { Logo } from "@/components/Logo";
-import { SiteFooter } from "@/components/SiteFooter";
 import { useEngine } from "@/lib/engineContext";
 import { useMounted } from "@/lib/useMounted";
 
@@ -39,7 +38,10 @@ export default function Home() {
         client.
       </span>
     ) : (
-      <span>Preparing your engine…</span>
+      <span>
+        Stockfish, <span className="free">running in your browser for free</span>. No
+        download until you play or turn on the eval bar.
+      </span>
     );
 
   return (
@@ -136,8 +138,6 @@ export default function Home() {
           </div>
         </>
       )}
-
-      <SiteFooter />
     </div>
   );
 }

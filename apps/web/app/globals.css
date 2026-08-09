@@ -614,42 +614,6 @@ a:hover {
   }
 }
 
-/* lobby header row: title left, "play now" on the right */
-.lobby-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-a.play-now {
-  font-weight: 700;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-/* read-only time-control chips (staked mode pages) */
-.tc-chips-wrap {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-}
-.tc-chips {
-  display: inline-flex;
-  gap: 6px;
-}
-.tc-chip {
-  padding: 3px 9px;
-  font-size: 13px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-strong);
-}
-
 /* ---------- buttons ---------- */
 button.primary,
 a.primary {
@@ -766,8 +730,12 @@ pre {
   border-color: var(--accent);
 }
 /* Coordinates off. chessground only builds its coord elements at construction,
- * so hiding them here is what keeps this toggle from rebuilding the board. */
-.board-wrap[data-coords="off"] coords {
+ * so hiding them here is what keeps this toggle from rebuilding the board.
+ * The html-level twin covers the pre-hydration frame: the bootstrap script
+ * stamps data-coords on <html> before first paint, so a board server-rendered
+ * with the default prefs can't flash labels the user turned off. */
+.board-wrap[data-coords="off"] coords,
+html[data-coords="off"] .board-wrap coords {
   display: none;
 }
 
@@ -978,14 +946,6 @@ pre {
 .player-sub {
   font-size: 12px;
   color: var(--muted);
-}
-.player-rating {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text);
-  background: var(--bg-2);
-  padding: 1px 7px;
-  border-radius: 999px;
 }
 .player-captured {
   font-size: 14px;
@@ -1313,11 +1273,26 @@ pre {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* The meta line ("0.50 USDC entry · 4 entrants · round 2/3 · leader …") can
+     outgrow a phone. It has to shrink and the card wrap — the alternative is
+     the Join/View buttons pushed out of the panel. */
+  flex-wrap: wrap;
   gap: 12px;
   padding: 12px 14px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+.tourney-card .tc-main {
+  min-width: 0;
+  flex: 1 1 240px;
+}
+.tourney-card .tc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 .tourney-card .tc-name {
   font-weight: 700;
@@ -1679,8 +1654,11 @@ table.standings tr.me td {
   margin-bottom: 4px;
 }
 .site-footer {
-  margin-top: 32px;
-  padding-top: 20px;
+  /* Rendered at body level by the root layout (it's on every route), so it
+     carries the .container geometry itself instead of inheriting it. */
+  max-width: 1040px;
+  margin: 32px auto 0;
+  padding: 20px 24px 40px;
   border-top: 1px solid var(--border);
   font-size: 13px;
   color: var(--text);

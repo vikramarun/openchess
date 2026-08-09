@@ -48,21 +48,26 @@ export type OnchainConfig = {
 
 let configCache: OnchainConfig | undefined;
 
-/** Fetch the server's onchain config (escrow address + expected chain). */
-export async function fetchConfig(): Promise<OnchainConfig> {
+/** Fetch the server's onchain config (escrow address + expected chain).
+ *  Success is memoized for the tab's lifetime; failure returns `null` and is
+ *  NOT cached — caching a failure would disable every staking surface (wallet
+ *  menu, stake input, auto-SIWE) for the whole session over one blip, e.g. a
+ *  page load during a server deploy. */
+export async function fetchConfig(): Promise<OnchainConfig | null> {
   if (configCache !== undefined) return configCache;
   try {
     const r = await fetch(`${SERVER_HTTP}/config`);
+    if (!r.ok) return null;
     const j = await r.json();
     configCache = {
       escrow: j.escrow ? (j.escrow as `0x${string}`) : null,
       chainId: Number(j.chain_id ?? 8453),
       wagerEnabled: !!j.wager_enabled,
     };
+    return configCache;
   } catch {
-    configCache = { escrow: null, chainId: 8453, wagerEnabled: false };
+    return null;
   }
-  return configCache;
 }
 
 /** Fired (same-tab) whenever the stored session changes, so useAuthToken

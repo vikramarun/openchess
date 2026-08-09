@@ -21,6 +21,9 @@ contracts/cache/
 
 # OS
 .DS_Store
+
+# Agent worktrees (session-local checkouts; never commit)
+.claude/worktrees/
 contracts/broadcast/
 apps/web/scripts/gen-polyglot-table/target/
 apps/web/scripts/gen-polyglot-table/Cargo.lock

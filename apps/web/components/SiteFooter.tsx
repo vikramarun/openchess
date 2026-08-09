@@ -16,7 +16,8 @@ export function SiteFooter() {
       <div className="footer-cols">
         <div>
           <div className="footer-h">Non-custodial</div>
-          Your USDC sits in an audited escrow contract on Base, never in a platform wallet.
+          Your USDC sits in an open-source, non-custodial escrow contract on Base, never in
+          a platform wallet.
           You deposit and withdraw directly, and results are settled onchain by a signed
           oracle.
         </div>

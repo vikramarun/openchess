@@ -30,10 +30,11 @@ honest checklist.
   limits, state eviction, `/health` + `/ready`, request tracing, and a
   `REQUIRE_ONCHAIN` boot profile that refuses to start half-configured.
 - **Frontend**: in-browser WASM engine with load-failure handling, resilient
-  play client (resign instead of stall on engine/move failure), SRI on CDN CSS,
-  client-only wagmi config.
+  play client (resign instead of stall on engine/move failure), vendored
+  chessground CSS (no CDN origin in `style-src` at all — supersedes the old
+  SRI-on-CDN approach), client-only wagmi config.
 - **CI** (`.github/workflows/ci.yml`): Postgres + `forge test` + `cargo test` +
-  the three web suites (`test:book`, `test:eval`, `test:auth`) + web build.
+  all 20 web suites (`pnpm test:*`, enumerated in CLAUDE.md) + web build.
 
 ## Action items only you can do (before mainnet)
 
@@ -199,8 +200,9 @@ then point the web app at it.
    - `NEXT_PUBLIC_SERVER_HTTP` = `https://<your-game-server-host>`
    - `NEXT_PUBLIC_SERVER_WS`   = `wss://<your-game-server-host>`
    - `NEXT_PUBLIC_WC_PROJECT_ID` = your WalletConnect Cloud project id
-4. Deploy. `public/stockfish.js` is served as a static asset, so the in-browser
-   engine works with no extra config (single-threaded build, no COOP/COEP).
+4. Deploy. The engine under `public/engines/sf18-lite-single-*/` is served as
+   static assets, so the in-browser engine works with no extra config
+   (single-threaded build, no COOP/COEP).
 
 On the **game server** side, set `WEB_ORIGIN=https://<your-app>.vercel.app` (CORS)
 and `SIWE_DOMAIN=<your-app>.vercel.app` (must equal the browser origin host), plus
