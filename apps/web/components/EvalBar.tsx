@@ -53,22 +53,22 @@ export function EvalToggle({
   onChange,
   loading,
   failed,
+  note = "· runs in your browser",
 }: {
   on: boolean;
   onChange: (on: boolean) => void;
   loading?: boolean;
   failed?: boolean;
+  /** Overrides the idle note. A seat reads the eval off the engine already
+   *  playing its move, which is a different (and free) thing to say. */
+  note?: string;
 }) {
   return (
     <label className="eval-toggle">
       <input type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked)} />
       <span>Eval bar</span>
       <span className="muted">
-        {failed
-          ? "· engine unavailable"
-          : on && loading
-            ? "· loading engine…"
-            : "· runs in your browser"}
+        {failed ? "· engine unavailable" : on && loading ? "· loading engine…" : note}
       </span>
     </label>
   );
