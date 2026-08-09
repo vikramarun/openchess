@@ -6,9 +6,12 @@ import type { Color, Key } from "chessground/types";
 import { useEffect, useRef } from "react";
 
 import { EvalBar } from "@/components/EvalBar";
+import { displayConfig } from "@/lib/boardPrefs";
 import type { EvalScore } from "@/lib/evalScore";
-// chessground stylesheets are loaded via <link> CDN tags in app/layout.tsx
-// (the published npm package does not vendor its CSS assets).
+import { useBoardPrefs } from "@/lib/useBoardPrefs";
+// The board's look (squares, piece art) is CSS custom properties on <html> —
+// see app/board.css and lib/boardPrefs.ts. Nothing about the theme reaches this
+// component; only the behavioural preferences below do.
 
 /** Read-only chessground board driven by a FEN string. Optionally highlights the
  *  last move (from/to squares) and flags the side in check — the standard cues
@@ -23,6 +26,7 @@ export function Chessboard({
   evalScore,
   showEval,
   evalThinking,
+  onFlip,
 }: {
   fen: string;
   orientation?: "white" | "black";
@@ -36,27 +40,44 @@ export function Chessboard({
    *  board doesn't jump sideways when the engine reports). */
   showEval?: boolean;
   evalThinking?: boolean;
+  /** Show a flip control. The caller owns the flip (see lib/useFlip.ts) because
+   *  the player name-plates have to swap with the board. */
+  onFlip?: () => void;
 }) {
   const el = useRef<HTMLDivElement>(null);
   const api = useRef<Api | null>(null);
+  const [prefs] = useBoardPrefs();
+
+  // chessground builds the coordinate elements once, in its initial wrap render,
+  // and api.set() never rebuilds them. "Every square" is a different DOM shape
+  // from the rank/file strips, so that one switch has to recreate the board —
+  // hence the dep. Hiding coordinates entirely is done in CSS instead (see the
+  // data-coords rule in globals.css), which keeps the common toggle free.
+  const coordsOnSquares = prefs.coords === "all";
+
+  // Latest values, so recreating the board doesn't restore a stale position.
+  const latest = useRef({ fen, orientation, lastMove, check });
+  latest.current = { fen, orientation, lastMove, check };
 
   useEffect(() => {
-    if (el.current && !api.current) {
-      api.current = Chessground(el.current, {
-        viewOnly: true,
-        coordinates: true,
-        orientation,
-        fen,
-        lastMove: (lastMove as Key[] | undefined) ?? undefined,
-        check: check ?? undefined,
-      });
-    }
+    if (!el.current) return;
+    const now = latest.current;
+    api.current = Chessground(el.current, {
+      viewOnly: true,
+      coordinates: true,
+      coordinatesOnSquares: coordsOnSquares,
+      orientation: now.orientation,
+      fen: now.fen,
+      lastMove: (now.lastMove as Key[] | undefined) ?? undefined,
+      check: now.check ?? undefined,
+      ...displayConfig(prefs),
+    });
     return () => {
       api.current?.destroy();
       api.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [coordsOnSquares]);
 
   useEffect(() => {
     api.current?.set({
@@ -70,14 +91,33 @@ export function Chessboard({
     api.current?.set({ orientation });
   }, [orientation]);
 
+  // Animation speed and the highlight toggles apply live — chessground reads
+  // these from state on every render, so no rebuild and no flicker.
+  useEffect(() => {
+    const { animation, highlight } = displayConfig(prefs);
+    api.current?.set({ animation, highlight });
+  }, [prefs]);
+
   return (
-    <div className="board-row">
-      {showEval && (
-        <EvalBar score={evalScore ?? null} orientation={orientation} thinking={evalThinking} />
-      )}
-      <div className="board-wrap">
-        <div ref={el} style={{ width: "100%", aspectRatio: "1 / 1" }} />
+    <div className="board-stack">
+      <div className="board-row">
+        {showEval && (
+          <EvalBar score={evalScore ?? null} orientation={orientation} thinking={evalThinking} />
+        )}
+        <div className="board-wrap" data-coords={prefs.coords}>
+          <div ref={el} style={{ width: "100%", aspectRatio: "1 / 1" }} />
+        </div>
       </div>
+      {onFlip && (
+        // Outside .board-row on purpose: that row stretches the eval bar to the
+        // board's height, so anything added inside it would leave the bar taller
+        // than the board and its readings misaligned.
+        <div className="board-tools">
+          <button type="button" className="flip-btn" onClick={onFlip} title="Flip board">
+            ⇅ Flip
+          </button>
+        </div>
+      )}
     </div>
   );
 }

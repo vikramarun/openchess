@@ -8,7 +8,8 @@ import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
 import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
 import { ensureBookLoaded } from "@/lib/browserBot";
-import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
+import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
@@ -228,6 +229,32 @@ export function SeatGame({
   const myCaptured = color === "white" ? mat.whiteCaptured : mat.blackCaptured;
   const oppCaptured = color === "white" ? mat.blackCaptured : mat.whiteCaptured;
   const myEdge = color === "white" ? mat.advantage : -mat.advantage;
+  // Defaults to your own color at the bottom, which is what a seated player wants.
+  const { orientation, flip } = useFlip(color);
+
+  // Name-plates follow perspective, not color — the side you are looking from
+  // sits at the bottom, so flipping the board has to move them too.
+  const bar = (side: Side) =>
+    side === color ? (
+      <PlayerBar
+        color={color}
+        name="You"
+        clockMs={myClock}
+        active={live && turn === color}
+        captured={myCaptured}
+        edge={myEdge}
+      />
+    ) : (
+      <PlayerBar
+        color={oppColor}
+        name={opponent?.name ?? "Opponent"}
+        engine={opponent?.declared_engine}
+        clockMs={oppClock}
+        active={live && turn === oppColor}
+        captured={oppCaptured}
+        edge={-myEdge}
+      />
+    );
 
   // Memoised: StakeConfirm's auto-decline effect lists onDecline as a
   // dependency, and a fresh identity each render would re-run it every render.
@@ -261,29 +288,15 @@ export function SeatGame({
         />
       )}
       <div className="board-col">
-        <PlayerBar
-          color={oppColor}
-          name={opponent?.name ?? "Opponent"}
-          engine={opponent?.declared_engine}
-          clockMs={oppClock}
-          active={live && turn === oppColor}
-          captured={oppCaptured}
-          edge={-myEdge}
-        />
+        {bar(other(orientation))}
         <Chessboard
           fen={view.fen}
-          orientation={color}
+          orientation={orientation}
           lastMove={lastMoveFromUci(view.lastUci)}
           check={view.check}
+          onFlip={flip}
         />
-        <PlayerBar
-          color={color}
-          name="You"
-          clockMs={myClock}
-          active={live && turn === color}
-          captured={myCaptured}
-          edge={myEdge}
-        />
+        {bar(orientation)}
         {nav.total > 0 && (
           <MoveNav
             at={nav.at}

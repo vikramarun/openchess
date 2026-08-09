@@ -86,4 +86,10 @@ jobs:
           # One bestmove answers one `go`. Broadcasting it let an abandoned
           # search answer for a live one, with a move for the wrong position.
           pnpm test:engine
+          # The board theme is applied twice: an inline script that runs before
+          # first paint, and applyBoardPrefs after React mounts. If the two ever
+          # compute different CSS variables the board visibly changes on load,
+          # which a screenshot of a settled page would never catch. This runs
+          # the script in a sandbox and diffs it against the React path.
+          pnpm test:prefs
           pnpm build
