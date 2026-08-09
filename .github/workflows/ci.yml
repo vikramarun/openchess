@@ -148,4 +148,11 @@ jobs:
           # you can click behind. Both are one-line CSS regressions that nothing
           # else here would see.
           pnpm test:layout
+          # Sign-in depends on origins that appear in no Dynamic documentation —
+          # the wallet list comes from a different domain than the API, and
+          # MetaMask's mobile pairing needs its own relay socket. Dropping either
+          # type-checks, builds and deploys, then fails only in a browser: the
+          # connect modal opens with no wallets in it, or phone wallets stop
+          # pairing while every desktop keeps working.
+          pnpm test:csp
           pnpm build

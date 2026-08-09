@@ -116,19 +116,24 @@ function AuthButtonInner() {
     runSignIn();
   }, [ready, wagerOn, signedIn, busy, address, runSignIn]);
 
-  // Dynamic is still booting. If it wedges here (see useStaleAuthRecovery) the
-  // placeholder below would be the whole header forever, so the escape hatch
-  // replaces it rather than sitting alongside.
-  if (!sdkHasLoaded) {
-    if (showEscapeHatch) {
-      return (
-        <button className="wrong-net" onClick={() => manualLogout()}>
-          Stuck? Sign out
-        </button>
-      );
-    }
-    return <div style={{ width: 1 }} />;
+  // Dynamic says we're logged in but the session never became usable. This is
+  // checked before `sdkHasLoaded` because it covers BOTH stuck states the hook
+  // detects, and only one of them has the SDK still loading — in the other the
+  // SDK is up but the user/wallet never resolve, which would otherwise render a
+  // "Sign in" button that reopens the same broken session. `showEscapeHatch`
+  // already implies staleness (the hook clears it as soon as the session
+  // recovers), so it needs no second condition.
+  if (showEscapeHatch) {
+    return (
+      <button className="wrong-net" onClick={() => manualLogout()}>
+        Stuck? Sign out
+      </button>
+    );
   }
+
+  // Dynamic is still booting. Nothing to show yet, and the branch above is what
+  // stops this placeholder from being the whole header forever.
+  if (!sdkHasLoaded) return <div style={{ width: 1 }} />;
 
   function control() {
     if (!isConnected || !address) {

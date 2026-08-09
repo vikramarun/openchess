@@ -91,5 +91,8 @@ export function useStaleAuthRecovery() {
     return clearTimers;
   }, [isStaleAuth, clearTimers]);
 
-  return { isStaleAuth, showEscapeHatch, manualLogout };
+  // `showEscapeHatch` is only ever true while stale — the effect above clears it
+  // the moment the session recovers — so it doubles as the "is this wedged"
+  // signal and callers need nothing else.
+  return { showEscapeHatch, manualLogout };
 }
