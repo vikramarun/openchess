@@ -3,11 +3,9 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { shortAddress } from "@/lib/address";
+import { isAddress, shortAddress } from "@/lib/address";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, fmtUsdcSigned } from "@/lib/escrow";
-
-const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 type Profile = {
   address: string;
@@ -51,7 +49,7 @@ export function ProfileStats({ address }: { address: string }) {
     let live = true;
     // Validate the wallet before interpolating it into the API path — a route
     // param is user-controlled, so reject anything that isn't a hex address.
-    if (!ADDR_RE.test(me)) {
+    if (!isAddress(me)) {
       setErr("That isn’t a valid wallet address.");
       return;
     }

@@ -7,6 +7,7 @@
 // this file is about what the card says when there is nothing to say.
 import { readFileSync } from "node:fs";
 
+import { isAddress } from "../lib/address";
 import { GAME_REVALIDATE_SECS, type GameDetail } from "../lib/gameApi";
 import {
   gameSubtitle,
@@ -122,6 +123,22 @@ check(
   gameSubtitle(game({ moves: [{ ply: 1, uci: "e2e4", san: "e4", white_ms: 0, black_ms: 0 }] })),
   "10+0 · 1 ply",
 );
+
+// --- address validation ---
+// isAddress gates /player/[address]'s metadata fetch, which interpolates a
+// route param into a server API path, so it is a validation gate and not a
+// display nicety. It lives in lib/address.ts because ProfileStats needs the
+// same check and the two used to keep private copies of the regex.
+check("a lowercase address passes", isAddress(WHITE), true);
+check("nullish fails", isAddress(null), false);
+check("empty fails", isAddress(""), false);
+check("no 0x prefix fails", isAddress("1".repeat(40)), false);
+check("too short fails", isAddress(`0x${"1".repeat(39)}`), false);
+check("too long fails", isAddress(`0x${"1".repeat(41)}`), false);
+check("uppercase fails (callers lowercase first)", isAddress(WHITE.toUpperCase()), false);
+check("non-hex fails", isAddress(`0x${"z".repeat(40)}`), false);
+check("a path traversal attempt fails", isAddress("../../admin"), false);
+check("trailing newline fails", isAddress(`${WHITE}\n`), false);
 
 // --- the title and the picture expire together ---
 // The OG image route repeats this number as a literal, because Next requires a

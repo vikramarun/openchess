@@ -24,7 +24,9 @@ function check(name: string, got: unknown, want: unknown) {
 
 // --- the file on disk agrees with the module ---
 const onDisk = readFileSync(new URL("../app/icon.svg", import.meta.url), "utf8").trim();
-check("app/icon.svg matches rookMarkSvg({tile:true})", onDisk, rookMarkSvg({ tile: true }));
+const wanted = rookMarkSvg({ tile: true });
+if (onDisk !== wanted) console.log("     ^ run `pnpm gen:icon` to regenerate it");
+check("app/icon.svg matches rookMarkSvg({tile:true})", onDisk, wanted);
 
 // --- the halves are true mirrors about x=32 ---
 // Mirroring the right half must reproduce the left exactly. Without this an

@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start -p 3000",
     "build:books": "tsx scripts/build-books.ts",
+    "gen:icon": "tsx scripts/gen-icon.ts",
     "test:book": "tsx scripts/polyglot.test.ts",
     "test:books": "tsx scripts/books.test.ts",
     "test:time": "tsx scripts/time.test.ts",

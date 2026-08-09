@@ -28,6 +28,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
+(cd apps/web && pnpm gen:icon)     # regenerate app/icon.svg from lib/brand.ts
 ```
 - Contract ABIs are **vendored** in `crates/ledger/abi/`, so `cargo build` does
   **not** need a prior `forge build`. Re-vendor after editing the contract
@@ -193,8 +194,8 @@ wallet.
   `apps/web/lib/brand.ts`; `app/icon.svg` is a second copy, because Next's icon
   file convention cannot import from TypeScript. Nothing at runtime compares
   them, so an edit to the path would leave the favicon showing the old mark
-  indefinitely — `pnpm test:brand` is what catches it. Regenerate the file from
-  `rookMarkSvg({ tile: true })` rather than hand-editing it. Two more traps:
+  indefinitely — `pnpm test:brand` is what catches it. Run **`pnpm gen:icon`**
+  after any change to the geometry; never hand-edit the file. Two more traps:
   anything **icon-shaped must use the tiled variant**, since on a light browser
   tab strip the `#ededec` half of a bare mark disappears and leaves half a rook
   (iOS composites transparent app icons badly too); and a segment's
