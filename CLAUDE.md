@@ -31,10 +31,12 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
-(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
+(cd apps/web && pnpm test:layout)  # header/tab bar stay put; coords stay on the board; no orphaned class
 (cd apps/web && pnpm test:tabs)    # mobile tab bar: which tab a route lights up
 (cd apps/web && pnpm test:demo)    # the homepage reel: still mates, still engine-free
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
+(cd apps/web && pnpm test:username) # a username's shape, and what a player is called
+(cd apps/web && pnpm test:csp)     # the CSP origins sign-in depends on
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -174,6 +176,54 @@ wallet.
   `<Lobby view="browse">` — one component owns the live-game session for both
   routes, because both can open a board and splitting that would duplicate the
   money path.
+- **Sign-in is Dynamic, and it has four traps.** Dynamic
+  (`@dynamic-labs/*`, `app/providers.tsx`) replaced RainbowKit so email/Google
+  logins provision an embedded MPC wallet. That wallet is an ordinary EOA whose
+  signature is indistinguishable from MetaMask's, which is the whole reason
+  `crates/server/src/auth.rs` needed **no change**: it still `ecrecover`s a
+  65-byte signature. Keep it that way — a smart-contract account would sign via
+  ERC-1271 and 401 there, with no RPC in the auth path to check it against.
+  (1) **The `@dynamic-labs/*` versions must move together.** Dynamic ships
+  `assert-package-version`, which logs a loud error when the packages in the tree
+  disagree, and a split tree also duplicates the logger/message-transport
+  singletons. Only three packages are imported, but `types`, `logger` and
+  `assert-package-version` are *also* direct dependencies — they are transitive
+  and float to whatever is newest otherwise, which resolved a mixed 4.84.0/4.96.0
+  tree. They look removable and are not. `pnpm.overrides` does **not** fix this
+  (these resolve as auto-installed peers), and pnpm settings live in
+  `pnpm-workspace.yaml`, not the package.json `pnpm` field. The SDK also drags
+  in two packages with **build scripts** (`sharp`, `bigint-buffer`), both
+  declined in `allowBuilds` — a dependency that is neither allowed nor refused
+  fails the install outright on pnpm 11 and only warns on pnpm 10, so add every
+  new one there. That version split is why `packageManager` is pinned:
+  CI's `corepack enable` had no version and drifted onto 11 while local stayed
+  on 10, which made the failure invisible locally and fatal in CI, on an install
+  that never reached a test. The pin stays on the **10.x** line on purpose —
+  pnpm 11 imports `node:sqlite` and so needs Node 24, which neither CI (no
+  `setup-node`) nor Vercel pins, so requiring it would trade one unpinned
+  toolchain for another with the deploy in the blast radius. The strictness that
+  costs us is asserted directly in `ci.yml` instead, by grepping the install log
+  — which is only reliable *because* the version is pinned.
+  (2) **A missing `NEXT_PUBLIC_DYNAMIC_ENV_ID` used to white-screen the site.**
+  `DynamicContextProvider` *throws* on an empty environmentId, and the root error
+  boundary turns that into a blank page — so one unset env var took down
+  spectating, replays, profiles and casual play, none of which need a wallet.
+  Hence `lib/dynamicEnv.ts`: the provider is omitted entirely when unconfigured,
+  and `AuthButton`/`WalletMenu` check `dynamicConfigured` before calling any
+  Dynamic hook (the context defaults to `undefined`, so a hook without the
+  provider throws too). Don't collapse that branch back.
+  (3) **Dynamic's asset CDN is a different origin from its API.** The connect
+  modal fetches its wallet list from `dynamic-static-assets.com`, so with only
+  `app.dynamicauth.com` allowlisted the modal opens with **no wallets in it** and
+  nothing else looks wrong. `pnpm test:csp` pins both.
+  (4) **Never take a signer from wagmi while Dynamic is the connector authority.**
+  `lib/useDynamicSigner.ts` builds it from `primaryWallet.getWalletClient()`,
+  because `runSignIn` switches chain and signs immediately, and wagmi's
+  `getConnectorClient` only re-syncs on the connector's own `chainChanged` event
+  — it can throw `Connector not connected` mid-flow. Always pass `account:`
+  explicitly too (WalletConnect + Ledger clients carry several). The same shape
+  exists in `BankrollPanel`/`TournamentClaim`/`GameRefund`, which still use
+  wagmi; that's the fix if it shows up there.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
@@ -258,7 +308,18 @@ wallet.
   **only when it builds the board**, so passing them through `api.set()` silently
   does nothing. Hiding coordinates is done in CSS
   (`.board-wrap[data-coords="off"]`), and only the "every square" layout
-  recreates the instance. And roughly a third of lichess's piece sets are
+  recreates the instance.
+  A third: **the vendored base CSS positions the a-h/1-8 labels in fixed
+  pixels** (`coords.ranks { top: -20px }`, `coords.files { left: 24px }`) —
+  lichess overrides those in its own stylesheet and we vendored only the base,
+  so every label was offset by an amount that meant nothing at our board sizes
+  (on the 380px settings preview the file letters straddled the boundary with
+  the file to their left, `h` hung off the board, and the row sat 4px BELOW the
+  last rank). `board.css` re-anchors both strips to the board in percentages and
+  sizes the text in `cqw` — which is why `.cg-wrap` carries
+  `container-type: inline-size`: without a query container a `cqw` falls back to
+  the VIEWPORT and the labels render ~3x too big. `pnpm test:layout` pins both
+  halves. And roughly a third of lichess's piece sets are
   CC BY-NC-SA or outright non-free; this repo is MIT and settles real money, so a
   new set needs its license checked and recorded in
   `apps/web/public/piece/CREDITS.md` (`test:prefs` fails if a registered set has
@@ -289,11 +350,14 @@ wallet.
   down the tree, so a canonical set in `app/layout.tsx` declares /gauntlet,
   /tournament and the rest duplicates of the homepage and drops them out of the
   index. There is deliberately none at the root; set one per segment if wanted.
-- **Every page is a Client Component, so metadata lives in a sibling
+- **Almost every page is a Client Component, so metadata lives in a sibling
   `layout.tsx`.** `"use client"` and `export const metadata` are mutually
   exclusive, which is why each route has a three-line server layout next to its
-  page. A new route inherits the root title until you add one. The dynamic
-  routes (`/game/[id]`, `/player/[address]`) use `generateMetadata` there, and
+  page. The two exceptions are `/terms` and `/privacy`, which are static prose
+  with no client state: they are Server Components and export their own
+  metadata, so don't "fix" them by adding a layout. A new route inherits the
+  root title until you add one. The dynamic
+  routes (`/game/[id]`, `/player/[ident]`) use `generateMetadata` there, and
   both must degrade to a generic title rather than throw: a crawler hitting a
   dead id must not 500 the page.
 - **One `bestmove` answers one `go`, in order.** `BrowserEngine` hands each one
@@ -372,6 +436,52 @@ wallet.
   put casual Elo on a public board, and never thread a seat wallet into the
   unauthenticated `POST /games`: that would make a ladder writable with no SIWE
   at all.
+
+- **A seat's display name is the server's to decide, never the client's.** A
+  wallet claims one **username** (`users.username`, unique on
+  `lower(username)`); `start_game`'s `seat_info` (`main.rs`) resolves each seat
+  to that handle, else its short address, and **never reads `SeatMeta.name` for
+  a seat that has a wallet**. That single rule is the whole impersonation
+  defence: while the browser declared its own label, any signed-in player could
+  type somebody else's handle and the board would print it. Only a seat with NO
+  wallet carries a chosen label, and it is `~`-decorated (`username::guest_label`)
+  — `~` is outside `[A-Za-z0-9_]`, so a guest string is *incapable* of equalling
+  a username. `park_create` snapshots `poster_name` from the poster's wallet for
+  the same reason. Anything that reintroduces a client-supplied name on a
+  wallet-bound seat re-opens this; `a_seat_shows_its_wallets_username_not_the_string_the_client_sent`
+  is what fails. The rules live in TWO places by necessity — `crates/server/src/username.rs`
+  enforces, `apps/web/lib/username.ts` mirrors for instant feedback, and the
+  reserved lists are hand-synced (divergence fails soft, in the safe direction).
+  Each side also keeps TWO gates that must not be merged: a SHAPE check for
+  routing (`is_username_shape` / `isUsernameShape`) and the full check for
+  writes. A reserved word has to stay **routable** while being unclaimable —
+  merging them 404s a live profile the server still serves by address, which is
+  exactly what happened to the house bot's own page.
+  Four traps. **`users` could hold two rows per wallet** until migration 0018 —
+  `upsert_user` bound the address raw (checksummed, via `seat_wallets`) while
+  `set_avatar` lowercased it; reads folded through `lower(wallet)` with
+  `fetch_optional` so it silently picked one, which a rating survives and a
+  username does not. `users_wallet_lower_uidx` now makes a mixed-case insert fail
+  loudly; keep `upsert_user`'s `.to_lowercase()`. **A username may not start with
+  `0x`** and must never be reported as an address: `/players/{ident}` resolves
+  BOTH, so an addressish name is unresolvable ambiguity and a lookalike squat.
+  **`_` is both a legal username character and LIKE's wildcard** — the search
+  prefix goes through `username::like_prefix` + `ESCAPE '\'`, and its btree needs
+  `text_pattern_ops` or the typeahead seq-scans `users` per keystroke. And **the
+  cooldown is a 403, not a 429**: this router already answers 429 from two
+  different rate limits, and telling a throttled user "you can change again in 7
+  days" is both wrong and unrecoverable-sounding.
+- **The house bot is identified by WALLET, not by its name.** The lobby's
+  play-now button finds its standing free offer via `house_wallet` on
+  `GET /config` (from the `HOUSE_WALLET` env var). It used to match the literal
+  string `"House Bot"` — impossible now that an offer's label is a resolved
+  username, since that string has a space in it. **Set `HOUSE_WALLET` on Fly
+  before deploying**, or the button silently degrades to its `/play` demo.
+  That var also grants the bot its handle: `ensure_house_username` claims
+  `HOUSE_USERNAME` (default `HouseBot`) for it at boot, because `housebot` is
+  RESERVED to everyone else and so the bot cannot claim it through the API — the
+  server has to hand it over. Idempotent, and cosmetic enough that every failure
+  is a log line rather than a refused boot.
 
 ## Conventions
 - Money is `rust_decimal` / `U256`, never `f64`. USDC has 6 decimals.

@@ -36,6 +36,12 @@ export type Profile = StatBucket & {
   /** Casual Elo. Absent from a server that predates the split. */
   casual_rating?: number;
   avatar_updated_at: string | null;
+  /** The player's handle. Absent from a server that predates usernames, and
+   *  absent for the many wallets that never claim one — so every consumer keeps
+   *  its address fallback. */
+  username?: string | null;
+  /** Earliest this wallet may rename (ISO), or null/absent when it can now. */
+  username_next_change_at?: string | null;
   casual?: StatBucket;
   ranked?: StatBucket;
 };

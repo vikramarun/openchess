@@ -71,27 +71,31 @@ export function groupOffers<T extends OfferLike>(offers: T[]): OfferGroup<T>[] {
   return [...byKey.values()];
 }
 
-/** The name scripts/house-bot.sh posts under (its NAME default). If the house
- *  bot is ever renamed, the lobby's play-now button quietly downgrades to its
- *  fallback — it can never seat anyone at the wrong board. */
-export const HOUSE_BOT_NAME = "House Bot";
-
 /** The house bot's free standing seat for a time control, if one is open.
  *
- *  Free offers only: this feeds a button labeled "free", and a spoofed name is
- *  therefore worth at most a casual game against the spoofer — the same thing
- *  clicking their row in the table would get. `poster_addr` must be present
- *  because the house bot is wallet-bound; anonymous offers never qualify. */
+ *  Identified by WALLET (`house_wallet` from `GET /config`, set from the server's
+ *  `HOUSE_WALLET` env var), not by a display name. It used to match the literal
+ *  string "House Bot", which stopped being possible once an offer's label became
+ *  a server-resolved username — "House Bot" has a space in it and can never be
+ *  one. Matching the address is strictly better regardless: a display string was
+ *  spoofable, and the old code could only mitigate that by restricting this to
+ *  free offers.
+ *
+ *  Still free offers only, and still `null` when the server publishes no house
+ *  wallet: a miss downgrades the lobby's play-now button to its labelled
+ *  fallback, and can never seat anyone at a board the button didn't describe. */
 export function houseOfferGroup<T extends OfferLike>(
   groups: OfferGroup<T>[],
   initialSecs: number,
   incrementSecs: number,
+  houseWallet?: string | null,
 ): OfferGroup<T> | null {
+  const house = houseWallet?.toLowerCase();
+  if (!house) return null;
   return (
     groups.find(
       (g) =>
-        g.offer.poster_name === HOUSE_BOT_NAME &&
-        g.offer.poster_addr != null &&
+        g.offer.poster_addr?.toLowerCase() === house &&
         !g.offer.stake &&
         g.offer.initial_secs === initialSecs &&
         g.offer.increment_secs === incrementSecs,

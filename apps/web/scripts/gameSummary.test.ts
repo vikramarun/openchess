@@ -125,7 +125,7 @@ check(
 );
 
 // --- address validation ---
-// isAddress gates /player/[address]'s metadata fetch, which interpolates a
+// isAddress gates /player/[ident]'s metadata fetch, which interpolates a
 // route param into a server API path, so it is a validation gate and not a
 // display nicety. It lives in lib/address.ts because ProfileStats needs the
 // same check and the two used to keep private copies of the regex.

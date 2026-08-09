@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { shortAddress } from "@/lib/address";
+import { PlayerSearch } from "@/components/PlayerSearch";
+import { playerLabel } from "@/lib/playerLabel";
 import { SERVER_HTTP } from "@/lib/config";
 
 type Entry = {
@@ -11,7 +12,26 @@ type Entry = {
   address: string;
   rating: number;
   games: number;
+  /** Absent from a server that predates usernames, and for a wallet that has
+   *  never claimed one — hence the address fallback everywhere below. */
+  username?: string | null;
 };
+
+/** The lookup box, mounted with the board rather than only on /profile.
+ *
+ *  This is the real "look people up" surface: it's on the homepage, it's
+ *  indexable, and it sits beside the list of people you'd want to look up —
+ *  whereas /profile is `disallow`ed in robots.txt and invisible to anyone not
+ *  already signed in and poking at settings. Deliberately NOT in the header:
+ *  that row already carries brand, five links and two pills, and it is the one
+ *  component with hard CSS constraints (`pnpm test:layout`). */
+function FindPlayer() {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <PlayerSearch placeholder="Find a player…" />
+    </div>
+  );
+}
 
 /** Lobby leaderboard: the ranked ladder, best Elo first.
  *
@@ -46,6 +66,7 @@ export function Leaderboard() {
         <div style={{ fontWeight: 700, color: "var(--text-strong)", marginBottom: 10 }}>
           🏅 Top bots
         </div>
+        <FindPlayer />
         <div className="muted">
           No ranked players yet — play for a USDC stake or enter a buy-in tournament to
           put your bot on the ladder.
@@ -59,6 +80,7 @@ export function Leaderboard() {
       <div style={{ fontWeight: 700, color: "var(--text-strong)", marginBottom: 10 }}>
         🏅 Top bots
       </div>
+      <FindPlayer />
       <table className="history-table">
         <thead>
           <tr>
@@ -74,10 +96,10 @@ export function Leaderboard() {
               <td className="muted">{e.rank}</td>
               <td>
                 <Link
-                  href={`/player/${e.address}`}
+                  href={`/player/${e.username || e.address}`}
                   style={{ color: "var(--text)", fontWeight: 600 }}
                 >
-                  {shortAddress(e.address)}
+                  {playerLabel({ username: e.username, address: e.address })}
                 </Link>
               </td>
               <td style={{ textAlign: "right", fontWeight: 700 }}>{e.rating}</td>

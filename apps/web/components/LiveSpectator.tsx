@@ -4,12 +4,11 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
 import { other, useFlip } from "@/lib/useFlip";
-import { shortAddress } from "@/lib/address";
+import { playerLabel } from "@/lib/playerLabel";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc } from "@/lib/escrow";
@@ -34,12 +33,9 @@ type Meta = {
   increment_secs: number;
 };
 
-/** Best display name for a seat: declared name, else short wallet, else engine. */
-function seatName(name: string | null, addr: string | null): string {
-  if (name) return name;
-  if (addr) return shortAddress(addr);
-  return "Engine";
-}
+/** Best display name for a seat: username, else short wallet, else engine. */
+const seatName = (name: string | null, addr: string | null) =>
+  playerLabel({ name, address: addr, fallback: "Engine" });
 
 /** Watch an in-progress game over a read-only spectator socket. The board is
  *  navigable while the game runs — stepping back doesn't stop the stream, and
@@ -55,7 +51,7 @@ export function LiveSpectator({ id }: { id: string }) {
   // showing the newest position (so clocks and the turn indicator are current).
   const nav = usePlyNav(frames.length - 1);
   const view = frames[nav.at];
-  const [evalOn, setEvalOn] = useEvalPref();
+  const [evalOn] = useEvalPref();
   const engineEval = useEval(view.fen, evalOn);
 
   // Fetch the live-game metadata so the spectator sees who's playing, the stake,
@@ -232,12 +228,6 @@ export function LiveSpectator({ id }: { id: string }) {
                 <>Loading game details…</>
               )}
             </div>
-            <EvalToggle
-              on={evalOn}
-              onChange={setEvalOn}
-              loading={engineEval.loading}
-              failed={engineEval.failed}
-            />
           </div>
 
           {result && (

@@ -1,6 +1,8 @@
 // Pin the layout invariants that are pure CSS, since nothing else in the suite
-// renders a page: two that keep the top nav usable after a game, and two that
-// keep a dropdown from running off the right edge of the screen.
+// renders a page: the ones that keep the top nav usable after a game, keep a
+// dropdown from running off the right edge, keep the board's coordinates on the
+// board, keep the mobile tab bar under a modal and clear of the footer, and
+// keep a route from naming a class no stylesheet defines any more.
 //
 // A game view is several viewports tall — on the pages that still carry
 // content above the board (`/game/[id]`, gauntlet, tournament) "Back to lobby"
@@ -26,10 +28,10 @@ import { join } from "node:path";
 // Comments stripped up front: `ruleBody` ends a block at the first `}`, and
 // `decl` would otherwise read a property named inside a comment as a real
 // declaration (`min-width: 0` is documented one line above itself below).
-const css = readFileSync(join(__dirname, "..", "app", "globals.css"), "utf8").replace(
-  /\/\*[\s\S]*?\*\//g,
-  "",
-);
+const read = (file: string) =>
+  readFileSync(join(__dirname, "..", "app", file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const css = read("globals.css");
+const boardCss = read("board.css");
 
 let failed = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -45,12 +47,12 @@ function check(name: string, ok: boolean, detail = "") {
  *  `.site-header` added later would win in a browser and be invisible here.
  *  Fine for an invariant whose whole point is one declaration in one place —
  *  but it is the assumption to revisit if this file ever grows a second one. */
-function ruleBody(selector: string): string | null {
-  const i = css.indexOf(`\n${selector} {`);
+function ruleBody(selector: string, source: string = css): string | null {
+  const i = source.indexOf(`\n${selector} {`);
   if (i === -1) return null;
-  const start = css.indexOf("{", i);
-  const end = css.indexOf("}", start);
-  return end === -1 ? null : css.slice(start + 1, end);
+  const start = source.indexOf("{", i);
+  const end = source.indexOf("}", start);
+  return end === -1 ? null : source.slice(start + 1, end);
 }
 
 function decl(body: string | null, prop: string): string | null {
@@ -120,7 +122,52 @@ check(
   `max-width is ${decl(field, "max-width") ?? "unset"}`,
 );
 
-// --- half four: the mobile tab bar ---
+// --- half four: the board's coordinates stay on the board ---
+// chessground's vendored base CSS positions the inside labels with FIXED PIXEL
+// offsets (`coords.ranks { top: -20px }`, `coords.files { left: 24px }`) that
+// only line up at one board size — at 380px the file strip was most of a square
+// too far right, `h` hung off the edge, and the whole row sat below the last
+// rank. app/board.css re-anchors both strips to the board itself, and the two
+// declarations below are what that rests on. Both fail SILENTLY if dropped: a
+// `left` reverting to the vendored 24px looks like a rendering quirk rather
+// than a missing rule.
+const ranks = ruleBody(".cg-wrap coords.ranks", boardCss);
+const fileStrip = ruleBody(".cg-wrap coords.files", boardCss);
+const wrap = ruleBody(".cg-wrap", boardCss);
+
+check("board.css overrides the rank strip", ranks !== null);
+check("board.css overrides the file strip", fileStrip !== null);
+check(
+  "the rank strip starts at the top of the board",
+  decl(ranks, "top") === "0",
+  `top is ${decl(ranks, "top") ?? "unset"}`,
+);
+check(
+  "the file strip starts at the left edge",
+  decl(fileStrip, "left") === "0",
+  `left is ${decl(fileStrip, "left") ?? "unset"}`,
+);
+check(
+  "the file strip sits ON the last rank, not below it",
+  decl(fileStrip, "bottom") === "0",
+  `bottom is ${decl(fileStrip, "bottom") ?? "unset"}`,
+);
+// The label size is `clamp(9px, …cqw, …)`, and a cqw with no query container
+// resolves against the VIEWPORT — which silently renders ~27px coordinates on
+// a 380px board rather than ~9px. The containment is the whole load-bearing
+// half of that rule.
+check(
+  ".cg-wrap is a query container for the label size",
+  decl(wrap, "container-type") === "inline-size",
+  `container-type is ${decl(wrap, "container-type") ?? "unset"}`,
+);
+check(
+  "the label size is board-relative",
+  /font-size:[^;]*cqw/.test(ruleBody(".cg-wrap coords", boardCss) ?? ""),
+  "no cqw font-size on .cg-wrap coords",
+);
+
+// --- half five: the mobile tab bar ---
 // Below 720px the header's `.nav` is display:none and this bar is the ONLY way
 // to reach four of the five destinations, so it fails in two silent ways.
 //
@@ -187,16 +234,24 @@ check(
   "no `body { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)) }` in a ≤720px query",
 );
 
-// --- half five: no route styles itself with a class that no longer exists ---
+// --- half six: no route styles itself with a class that no longer exists ---
 // Deleting a rule is invisible: the class stays in the JSX, the page still
 // renders, and it quietly falls back to the browser default. That shipped —
 // removing the homepage's `.hero` rules when the homepage stopped using them
 // also stripped /gauntlet, /tournament and /profile, whose <h1> went from 46px
 // centered to the UA's 30px left-aligned, with nothing to say so.
 //
-// Static `className="…"` literals only: a template literal or a ternary is a
-// runtime value this cannot resolve, and guessing at one would either miss
-// classes or invent them.
+// Two shapes are read. A plain `className="a b"`, and the STATIC SEGMENTS of a
+// template literal — `` className={`tc-pill${on ? " active" : ""}`} `` yields
+// "tc-pill" and "active". That second half matters: 44 of this app's className
+// expressions are template literals, so without it the check would protect the
+// static two-thirds and quietly miss `.tc-pill`, `.dot`, `.active` and the rest
+// of the classes that only ever appear interpolated.
+//
+// What it still cannot see is a class assembled from a VALUE — `dot ${status}`
+// contributes "dot" but never "ready"/"loading"/"error", and a bare
+// `className={cls}` contributes nothing. Those are runtime, and guessing at
+// them would invent classes rather than find them.
 function tsxFiles(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const p = join(dir, entry);
@@ -207,12 +262,50 @@ function tsxFiles(dir: string, out: string[] = []): string[] {
 }
 
 const web = join(__dirname, "..");
-const allCss = ["globals.css", "board.css", "chessground.base.css"]
-  .map((f) => readFileSync(join(web, "app", f), "utf8"))
-  .join("\n");
+// `read` strips comments, which matters here too: a class name mentioned in a
+// CSS comment must not count as defined.
 const definedClasses = new Set(
-  [...allCss.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((m) => m[1]),
+  [...[css, boardCss, read("chessground.base.css")]
+    .join("\n")
+    .matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((m) => m[1]),
 );
+
+/** A class name a file names statically. `whole: false` means an interpolation
+ *  ran straight into it with no space — `` `lands-${side}` `` gives "lands-",
+ *  which is a PREFIX of a real class rather than one itself, so it is matched
+ *  as such. Without that distinction the choice is between losing every
+ *  interpolated class or failing on every concatenated one. */
+type NamedClass = { name: string; whole: boolean };
+
+function classesIn(src: string): NamedClass[] {
+  const found: NamedClass[] = [];
+  for (const m of src.matchAll(/className="([^"{}]+)"/g)) {
+    for (const name of m[1].split(/\s+/)) found.push({ name, whole: true });
+  }
+  // Template literals: the literal text between the `${…}` holes. Split on the
+  // holes rather than matching them, so a ternary containing braces cannot
+  // swallow the rest of the file.
+  for (const m of src.matchAll(/className=\{`([^`]*)`\}/g)) {
+    const segments = m[1].split(/\$\{[^}]*\}/);
+    segments.forEach((segment, i) => {
+      const tokens = segment.split(/\s+/);
+      // A token touching a hole continues past it; one with whitespace between
+      // is finished. `dot ${status}` completes "dot"; `lands-${side}` does not
+      // complete "lands-".
+      const openLeft = i > 0 && !/^\s/.test(segment);
+      const openRight = i < segments.length - 1 && !/\s$/.test(segment);
+      tokens.forEach((name, t) => {
+        const whole = !(t === 0 && openLeft) && !(t === tokens.length - 1 && openRight);
+        found.push({ name, whole });
+      });
+    });
+  }
+  return found.filter((c) => c.name);
+}
+
+const definedList = [...definedClasses];
+const isDefined = (c: NamedClass) =>
+  c.whole ? definedClasses.has(c.name) : definedList.some((d) => d.startsWith(c.name));
 
 // A class that is deliberately a grouping hook with no rule of its own. Keep
 // this list short and say why — every entry is a class the check can no longer
@@ -225,14 +318,10 @@ const UNSTYLED_ON_PURPOSE = new Set([
 
 const orphans: string[] = [];
 for (const file of [...tsxFiles(join(web, "app")), ...tsxFiles(join(web, "components"))]) {
-  const src = readFileSync(file, "utf8");
-  for (const m of src.matchAll(/className="([^"{}]+)"/g)) {
-    for (const cls of m[1].split(/\s+/).filter(Boolean)) {
-      if (definedClasses.has(cls) || UNSTYLED_ON_PURPOSE.has(cls)) continue;
-      const rel = file.slice(web.length + 1);
-      const entry = `${cls} (${rel})`;
-      if (!orphans.includes(entry)) orphans.push(entry);
-    }
+  for (const cls of classesIn(readFileSync(file, "utf8"))) {
+    if (isDefined(cls) || UNSTYLED_ON_PURPOSE.has(cls.name)) continue;
+    const entry = `${cls.name} (${file.slice(web.length + 1)})`;
+    if (!orphans.includes(entry)) orphans.push(entry);
   }
 }
 check(

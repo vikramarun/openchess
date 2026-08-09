@@ -29,8 +29,8 @@ use ledger::{merkle_proof, tournament_leaf, Address, U256};
 use crate::agents::AgentUnavailable;
 use crate::ratelimit::client_ip;
 use crate::{
-    build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, Ladder,
-    SeatDelivery, SeatMeta, MAX_STAKE,
+    build_wager, sanitize_label, validate_tc, AppState, GameOutcome, Ladder, SeatDelivery,
+    SeatMeta, MAX_STAKE,
 };
 
 /// Fields larger than this settle via a Merkle root (winners claim individually)
@@ -318,7 +318,11 @@ fn seats<T>(a_is_white: bool, a: T, b: T) -> [T; 2] {
 
 struct ParkOffer {
     poster_addr: Option<String>, // authenticated wallet (wagered or bot seats)
-    poster_name: Option<String>, // self-declared display name (sanitized)
+    /// The poster's username, resolved from `poster_addr` at create time — never
+    /// a string the client sent. `None` for an anonymous poster, and for a
+    /// signed-in one who has not claimed a handle; the lobby falls back to
+    /// `poster_addr` in both cases.
+    poster_name: Option<String>,
     poster_engine: Option<String>, // self-declared engine (sanitized)
     /// The poster's seat is played by their connected agent, not a browser.
     poster_seat_bot: bool,
@@ -356,7 +360,10 @@ struct ParkCreateReq {
     initial_secs: u64,
     #[serde(default = "dinc")]
     increment_secs: u64,
-    /// Optional self-declared display name (shown in the lobby).
+    /// Deprecated and ignored. The lobby label is resolved from the poster's
+    /// username server-side, because a client-chosen one can name anybody. Kept
+    /// on the struct only so an older client's body still deserializes.
+    #[allow(dead_code)]
     name: Option<String>,
     /// Optional self-declared engine name (shown in the lobby; unverified).
     engine: Option<String>,
@@ -416,16 +423,24 @@ async fn park_create(
         }
     }
 
-    let mut poster_name = req.name.as_deref().and_then(sanitize_label);
+    // The offer's public label is SERVER-RESOLVED from the poster's wallet.
+    // `req.name` is ignored, and so is the bot's `AgentMeta.name`: that string
+    // is the owner's own description of what they run, shown back to them in
+    // the bot panel, and it has no business standing as a public identity in
+    // the lobby — anyone could type anyone's handle into it. An anonymous
+    // poster gets `None`, which the lobby already renders from `poster_addr`.
+    let poster_name = match (&poster_addr, &state.0.db) {
+        (Some(w), Some(db)) => db.username_for(w).await.ok().flatten(),
+        _ => None,
+    };
     let mut poster_engine = req.engine.as_deref().and_then(sanitize_label);
     if bot {
-        // The bot must be online to post as it; default identity from its
+        // The bot must be online to post as it; default the ENGINE from its
         // registration so the lobby shows what it actually runs.
         let wallet = poster_addr.as_deref().unwrap_or_default();
         let Some((meta, _busy)) = state.0.agents.view(wallet) else {
             return Err(StatusCode::FAILED_DEPENDENCY); // 424: bot offline
         };
-        poster_name = poster_name.or(Some(meta.name));
         poster_engine = poster_engine.or(Some(meta.engine));
     }
 
@@ -556,8 +571,11 @@ struct ParkAcceptResp {
 
 #[derive(Deserialize, Default)]
 struct ParkAcceptReq {
-    /// Optional self-declared display name / engine for the acceptor's seat.
+    /// Deprecated and ignored — see `ParkCreateReq::name`. Kept so an older
+    /// client's body still deserializes.
+    #[allow(dead_code)]
     name: Option<String>,
+    /// Optional self-declared engine for the acceptor's seat (unverified).
     engine: Option<String>,
     /// "bot" seats the acceptor's connected agent; anything else = browser.
     seat: Option<String>,
@@ -725,13 +743,13 @@ async fn park_accept(
         (SeatDelivery::Browser, None)
     };
 
-    // Acceptor identity: explicit > their bot's registration > wallet/anon.
+    // Acceptor identity. `name` is left empty on purpose whenever there IS a
+    // wallet: `start_game` resolves that seat's label from its username and
+    // never reads this field, so filling it would be dead weight that a future
+    // edit could turn back into an impersonation surface. Only a genuinely
+    // anonymous acceptor has a label to carry, and there is none to carry here.
     let acceptor_meta = SeatMeta {
-        name: req
-            .name
-            .as_deref()
-            .and_then(sanitize_label)
-            .or_else(|| acceptor_agent_meta.as_ref().map(|m| m.name.clone())),
+        name: None,
         engine: req
             .engine
             .as_deref()
@@ -882,8 +900,11 @@ struct QueueReq {
     increment_secs: u64,
     /// Optional gauntlet session id to attribute the game's result to.
     session_id: Option<Uuid>,
-    /// Optional self-declared display name / engine (shown to the opponent).
+    /// Deprecated and ignored — see `ParkCreateReq::name`. Kept so an older
+    /// client's body still deserializes.
+    #[allow(dead_code)]
     name: Option<String>,
+    /// Optional self-declared engine (shown to the opponent; unverified).
     engine: Option<String>,
     /// "bot" seats the joiner's connected agent; anything else = browser.
     seat: Option<String>,
@@ -916,13 +937,16 @@ async fn queue_join(
         None => None,
     };
 
+    // `name` stays empty: a queued seat is only ever anonymous or wallet-bound,
+    // and `start_game` resolves the wallet-bound case from its username. See
+    // `park_accept` for why filling it would be dead weight at best.
     let mut my_meta = SeatMeta {
-        name: req.name.as_deref().and_then(sanitize_label),
+        name: None,
         engine: req.engine.as_deref().and_then(sanitize_label),
         wallet: addr.clone(),
     };
     if bot {
-        // The bot must be online to queue as it; default its identity from the
+        // The bot must be online to queue as it; default its ENGINE from the
         // registration so the opponent/lobby see what it actually runs.
         let wallet = addr.as_deref().unwrap_or_default();
         let (meta, _busy) = state
@@ -930,7 +954,6 @@ async fn queue_join(
             .agents
             .view(wallet)
             .ok_or(StatusCode::FAILED_DEPENDENCY)?; // 424: bot offline
-        my_meta.name = my_meta.name.or(Some(meta.name));
         my_meta.engine = my_meta.engine.or(Some(meta.engine));
     }
 
@@ -1971,6 +1994,62 @@ async fn tourney_join(
     }
 }
 
+/// Whether an entrant id is itself a wallet (a buy-in entrant) rather than a
+/// chosen nickname (a casual one).
+fn is_wallet_id(p: &str) -> bool {
+    p.starts_with("0x") && p.len() == 42
+}
+
+/// The wallet a tournament seat is bound to.
+///
+/// A bot entrant's games belong to the wallet that registered the agent; a
+/// casual browser entrant's to the session they joined with (recorded in
+/// `entrant_wallets`); a buy-in entrant's id already IS its wallet. One function
+/// because two callers need the identical answer: the seat builder, and the
+/// label resolver that says what the standings table calls that seat. If they
+/// ever disagreed, the crosstable and the board would print different names for
+/// the same person.
+fn entrant_wallet(
+    bots: &HashMap<String, BotEntry>,
+    wallets: &HashMap<String, String>,
+    p: &str,
+) -> Option<String> {
+    match bots.get(p) {
+        Some(be) => Some(be.wallet.clone()),
+        None => wallets
+            .get(p)
+            .cloned()
+            .or_else(|| is_wallet_id(p).then(|| p.to_string())),
+    }
+}
+
+/// Entrant id -> username, for every entrant of these tournaments whose seat is
+/// bound to a wallet that has claimed one.
+///
+/// Resolved after the lobby lock is dropped and in a single batched query — the
+/// tournament list is the heaviest poll on the router and already walks
+/// O(entrants²) under that lock. An entrant who joins between the snapshot and
+/// this read simply has no label for one poll, which is the right failure: a
+/// label is decoration, and the id underneath it is what everything is keyed on.
+async fn entrant_labels(
+    state: &AppState,
+    seats: &[HashMap<String, String>],
+) -> Vec<HashMap<String, String>> {
+    let Some(db) = state.0.db.as_ref() else {
+        return vec![HashMap::new(); seats.len()];
+    };
+    let all: Vec<String> = seats.iter().flat_map(|m| m.values().cloned()).collect();
+    let names = db.usernames_for(&all).await.unwrap_or_default();
+    seats
+        .iter()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(id, w)| Some((id.clone(), names.get(&w.to_lowercase())?.clone())))
+                .collect()
+        })
+        .collect()
+}
+
 /// One row of the standings table, in the order the pool is paid out.
 #[derive(Serialize)]
 struct Standing {
@@ -2036,6 +2115,13 @@ struct TourneyView {
     /// Seconds since creation. Gives the lobby a stable sort order that doesn't
     /// depend on a hash map's iteration order.
     age_secs: u64,
+    /// Entrant id -> username, for entrants who have one. Display only: every id
+    /// in `players`, `standings` and `games` stays the internal key, so a client
+    /// renders `labels[id] ?? id` and nothing downstream has to change. This is
+    /// what keeps the crosstable calling a player what the board calls them, now
+    /// that a seat's name is resolved from its wallet.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    labels: HashMap<String, String>,
 }
 
 /// Scores in half-points. Every result moves a score by 0.5 or 1.0, so this is
@@ -2167,7 +2253,24 @@ fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
         increment_secs: t.increment_secs,
         organizer: t.organizer.clone(),
         age_secs: t.created_at.elapsed().as_secs(),
+        // Filled by the handler after the lobby lock is dropped — see
+        // `entrant_labels`. Empty here so `view_of` stays sync and lock-scoped.
+        labels: HashMap::new(),
     }
+}
+
+/// Entrant id -> wallet for every seat of `t` that has one. Taken under the
+/// lobby lock; resolved to usernames after it is dropped.
+fn entrant_seats(t: &Tournament) -> HashMap<String, String> {
+    t.players
+        .iter()
+        .filter_map(|p| {
+            Some((
+                p.clone(),
+                entrant_wallet(&t.entrant_bots, &t.entrant_wallets, p)?,
+            ))
+        })
+        .collect()
 }
 
 async fn tourney_get(
@@ -2176,11 +2279,15 @@ async fn tourney_get(
     headers: HeaderMap,
 ) -> Result<Json<TourneyView>, StatusCode> {
     state.reject_if_rate_limited_polls(&headers)?;
-    let t = state.0.lobby.tournaments.lock();
-    Ok(Json(view_of(
-        t.get(&id).ok_or(StatusCode::NOT_FOUND)?,
-        Pairings::All,
-    )))
+    let (mut view, seats) = {
+        let t = state.0.lobby.tournaments.lock();
+        let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+        (view_of(t, Pairings::All), entrant_seats(t))
+    };
+    view.labels = entrant_labels(&state, std::slice::from_ref(&seats))
+        .await
+        .swap_remove(0);
+    Ok(Json(view))
 }
 
 /// The lobby, with each tournament's view inlined. `tournament_id` is kept as
@@ -2205,14 +2312,24 @@ async fn tourney_list(
     // tournament and the whole walk holds the lobby mutex — hence the throttle
     // and the max_lobby_tournaments cap at creation.
     state.reject_if_rate_limited_polls(&headers)?;
-    let t = state.0.lobby.tournaments.lock();
-    let mut out: Vec<TourneySummary> = t
-        .iter()
-        .map(|(id, t)| TourneySummary {
-            tournament_id: *id,
-            view: view_of(t, Pairings::CurrentRound),
-        })
-        .collect();
+    let (mut out, seats): (Vec<TourneySummary>, Vec<HashMap<String, String>>) = {
+        let t = state.0.lobby.tournaments.lock();
+        t.iter()
+            .map(|(id, t)| {
+                (
+                    TourneySummary {
+                        tournament_id: *id,
+                        view: view_of(t, Pairings::CurrentRound),
+                    },
+                    entrant_seats(t),
+                )
+            })
+            .unzip()
+    };
+    // One batched query for the whole lobby, with the lock already released.
+    for (s, labels) in out.iter_mut().zip(entrant_labels(&state, &seats).await) {
+        s.view.labels = labels;
+    }
     // Newest first — the map's iteration order is arbitrary, and a lobby that
     // reshuffles on every 3s poll is unusable.
     out.sort_by_key(|s| s.view.age_secs);
@@ -2431,24 +2548,18 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
     };
 
     let seat_meta = |p: &str| SeatMeta {
-        name: Some(if p.starts_with("0x") && p.len() == 42 {
-            short_addr(p)
-        } else {
-            p.to_string()
-        }),
+        // An entrant id is either a wallet (buy-in) or a chosen nickname
+        // (casual). Only the nickname is carried, and only as a fallback:
+        // `start_game` ignores this field entirely for any seat that has a
+        // wallet, resolving that seat's username instead. So a buy-in entrant,
+        // and a casual entrant who signed in, both render as their handle; an
+        // anonymous casual entrant renders their nickname, `~`-decorated so it
+        // cannot be read as one.
+        name: (!is_wallet_id(p)).then(|| p.to_string()),
         // A bot entrant's engine comes from its agent registration; a browser
         // entrant declares its own at join time.
         engine: engines.get(p).cloned(),
-        // A bot entrant's games belong to the wallet that registered the agent;
-        // a casual browser entrant's to the session they joined with (recorded
-        // in entrant_wallets); a buy-in entrant's id already IS its wallet.
-        wallet: match bots.get(p) {
-            Some(be) => Some(be.wallet.clone()),
-            None => wallets
-                .get(p)
-                .cloned()
-                .or_else(|| (p.starts_with("0x") && p.len() == 42).then(|| p.to_string())),
-        },
+        wallet: entrant_wallet(&bots, &wallets, p),
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
     // A claimed wallet is pushed onto `claimed` for rollback.

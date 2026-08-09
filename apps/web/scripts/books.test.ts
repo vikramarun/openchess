@@ -21,7 +21,7 @@ import {
   normalizeRepertoire,
 } from "../lib/books";
 import { bookChildren, bookMainline, positionAfter } from "../lib/bookTree";
-import { browserEngineLabel, parseBrowserBotConfig } from "../lib/browserBot";
+import { browserEngineLabel, DEFAULT_CONFIG, parseBrowserBotConfig } from "../lib/browserBot";
 import { DEFAULT_TIME_POLICY } from "../lib/timePolicy";
 import {
   decodeMove,
@@ -329,15 +329,17 @@ function book(lines: [string[], string, number][]): BookEntry[] {
 
 // --- config migration ------------------------------------------------------
 {
-  // A blob written before repertoires existed must keep its settings.
+  // A blob written before repertoires existed must keep its settings — and one
+  // still carrying the `name` this bot used to declare must simply drop it. A
+  // seat is labelled by the USERNAME of the wallet in it now, resolved
+  // server-side, so there is nothing here to migrate.
   const v1 = parseBrowserBotConfig({ name: "My Bot", bookMaxPly: 12 });
-  check("v1 config keeps its name", v1.name, "My Bot");
   check("v1 config keeps bookMaxPly", v1.bookMaxPly, 12);
+  check("a stale bot name is not carried forward", "name" in v1, false);
   check("v1 config gains a default repertoire", v1.repertoire, DEFAULT_REPERTOIRE);
   check("v1 config gains a default time policy", v1.time, DEFAULT_TIME_POLICY);
 
-  check("garbage config falls back cleanly", parseBrowserBotConfig(null).name, "");
-  check("a long name is truncated", parseBrowserBotConfig({ name: "x".repeat(200) }).name.length, 48);
+  check("garbage config falls back cleanly", parseBrowserBotConfig(null), DEFAULT_CONFIG);
   check(
     "a hostile repertoire blob is sanitized",
     parseBrowserBotConfig({ repertoire: { white: 42, maxPly: Infinity, pick: {} } }).repertoire,
@@ -347,18 +349,18 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   // The declared label names the repertoire, and must survive the server's
   // 48-char sanitize_label cap.
   const sharp = PRESETS.find((p) => p.id === "sharp")!;
-  const label = browserEngineLabel({ name: "", bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: normalizeRepertoire(sharp.rep) });
+  const label = browserEngineLabel({ bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: normalizeRepertoire(sharp.rep) });
   check("label names the style", label, "Stockfish 18 · Sharp");
   check("label fits the 48-char cap", label.length <= 48, true);
   check(
     "no repertoire keeps the plain label",
-    browserEngineLabel({ name: "", bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: DEFAULT_REPERTOIRE }),
+    browserEngineLabel({ bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: DEFAULT_REPERTOIRE }),
     "Stockfish 18 (browser)",
   );
   const mixed = normalizeRepertoire({ white: "w-sharp", vsE4: "b-e4-solid", vsD4: "b-d4-solid", vsOther: "b-other-solid" });
   check(
     "a mixed repertoire names both styles",
-    browserEngineLabel({ name: "", bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: mixed }),
+    browserEngineLabel({ bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: mixed }),
     "Stockfish 18 · Sharp/Solid",
   );
 }

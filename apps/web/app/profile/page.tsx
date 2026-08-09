@@ -7,6 +7,7 @@ import { useAccount } from "wagmi";
 import { BoardSettings } from "@/components/BoardSettings";
 import { BrowserBotPanel } from "@/components/BrowserBotPanel";
 import { ConnectEngine } from "@/components/ConnectEngine";
+import { PlayerSearch } from "@/components/PlayerSearch";
 import { ProfileStats } from "@/components/ProfileStats";
 import { useMounted } from "@/lib/useMounted";
 
@@ -119,18 +120,11 @@ function ProfileClient() {
 
 function ProfileTab() {
   const { address, isConnected } = useAccount();
-  const router = useRouter();
-  const [addr, setAddr] = useState("");
-
-  const lookup = () => {
-    const a = addr.trim();
-    if (a) router.push(`/player/${a}`);
-  };
 
   return (
     <>
       {isConnected && address ? (
-        <ProfileStats address={address} editable />
+        <ProfileStats ident={address} editable />
       ) : (
         <div className="panel">
           <b style={{ color: "var(--text-strong)" }}>Sign in to see your profile</b>
@@ -140,20 +134,10 @@ function ProfileTab() {
         </div>
       )}
 
-      {/* Look up any player by wallet. */}
-      <h2 style={headingStyle}>Look up a player</h2>
-      <div className="panel" style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <span className="muted">Wallet address:</span>
-        <input
-          value={addr}
-          onChange={(e) => setAddr(e.target.value)}
-          placeholder="0x… wallet address"
-          style={{ flex: 1 }}
-          onKeyDown={(e) => e.key === "Enter" && lookup()}
-        />
-        <button className="ghost" onClick={lookup}>
-          View profile
-        </button>
+      {/* Look up any player by username, or paste a wallet. */}
+      <h2 style={headingStyle}>Find a player</h2>
+      <div className="panel">
+        <PlayerSearch />
       </div>
     </>
   );

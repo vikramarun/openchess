@@ -274,8 +274,12 @@ export function ConnectEngine() {
                   onChange={(e) => setBookPath(e.target.value)}
                 />
               </label>
+              {/* NOT "shown to opponents" any more: a seat is labelled by the
+                  USERNAME of the wallet it's bound to, resolved server-side, so
+                  a client-declared name can't name anybody. This one is the
+                  label for your own bot in your own panel. */}
               <label className="muted" style={{ fontSize: 13 }}>
-                Bot name shown to opponents (optional, defaults to the engine's name)
+                A label for this bot in your bot panel (optional)
                 <input
                   placeholder="e.g. TalBot 9000"
                   value={name}

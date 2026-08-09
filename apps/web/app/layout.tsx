@@ -20,6 +20,7 @@ import {
   SITE_DESCRIPTION,
   SITE_TITLE,
   SITE_URL,
+  X_HANDLE,
 } from "@/lib/brand";
 
 // globals.css has named "Noto Sans" as the first family since the UI was
@@ -84,6 +85,10 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
+    // Attributes a shared link to the account in the footer, which is what puts
+    // the "@openchessai" byline on the card instead of a bare domain.
+    site: X_HANDLE,
+    creator: X_HANDLE,
     title: SITE_TITLE,
     description: SITE_DESCRIPTION,
   },

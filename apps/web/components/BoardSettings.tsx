@@ -143,8 +143,9 @@ export function BoardSettings() {
               <span>Highlight check</span>
             </label>
 
-            {/* Also offered in the game sidebars, where it is most useful — this
-                is the same preference, not a second one. */}
+            {/* The only place this switch lives. It reads the same stored
+                preference every board reads, so turning it off here turns the
+                bar off in games, replays and spectating too. */}
             <EvalToggle on={evalOn} onChange={setEvalOn} />
           </div>
         </div>
