@@ -13,8 +13,9 @@ import { MaintenanceBanner } from "@/components/MaintenanceBanner";
 import { boardBootstrapScript } from "@/lib/boardBootstrap";
 
 export const metadata: Metadata = {
-  title: "OpenChess — machines play, you wager",
-  description: "Engine-vs-engine chess with non-custodial USDC wagers on Base.",
+  title: "OpenChess: engine-vs-engine chess, settled onchain",
+  description:
+    "Bring your own engine or use the one already in your browser. Games play out for real USDC stakes, settled onchain on Base and never held by us.",
 };
 
 export default function RootLayout({

@@ -85,7 +85,7 @@ export function BoardSettings() {
             ))}
           </div>
           <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-            {set.label} — {set.credit}.{" "}
+            {set.label}: {set.credit}.{" "}
             <a href="/piece/CREDITS.md" target="_blank" rel="noreferrer">
               All credits
             </a>

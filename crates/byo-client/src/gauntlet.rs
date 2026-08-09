@@ -94,7 +94,7 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
             .to_string();
 
         // Wait for a pairing.
-        println!("game {}/{}: waiting for an opponent…", i + 1, opts.count);
+        println!("game {}/{}: waiting for an opponent...", i + 1, opts.count);
         let (game_id, token) = loop {
             let t: Value = client
                 .get(format!("{http}/queue/{ticket_id}"))

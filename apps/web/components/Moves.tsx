@@ -58,10 +58,38 @@ export function MoveNav({
   );
 }
 
+/** The sidebar "Moves" panel: header + list. All four views that show a game
+ *  render exactly this, so it lives here rather than being copied per view.
+ *  A live view passes `behind` (`!nav.live`) to name the ply being viewed; a
+ *  finished replay doesn't bother — its transport counter already says, and
+ *  "behind" means nothing when there's nothing to be behind. */
+export function MovePanel({
+  sans,
+  at,
+  onSelect,
+  emptyText,
+  behind = false,
+}: {
+  sans: string[];
+  at: number;
+  onSelect: (ply: number) => void;
+  emptyText?: string;
+  behind?: boolean;
+}) {
+  return (
+    <div className="panel">
+      <div className="muted" style={{ marginBottom: 8 }}>
+        Moves {behind && <span className="behind">· viewing move {at}</span>}
+      </div>
+      <MoveList sans={sans} at={at} onSelect={onSelect} emptyText={emptyText} />
+    </div>
+  );
+}
+
 /** Numbered, clickable move list. `at` is a ply index (1 = after white's first
  *  move), matching usePlyNav. Keeps the current move scrolled into view, so a
  *  long live game doesn't leave the highlight off-screen. */
-export function MoveList({
+function MoveList({
   sans,
   at,
   onSelect,

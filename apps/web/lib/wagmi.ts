@@ -19,7 +19,7 @@ if (!projectId && typeof window !== "undefined") {
   // static prerender). Injected wallets still work without WalletConnect.
   // eslint-disable-next-line no-console
   console.warn(
-    "NEXT_PUBLIC_WC_PROJECT_ID is not set — WalletConnect pairing will not work. Set it for production.",
+    "NEXT_PUBLIC_WC_PROJECT_ID is not set, so WalletConnect pairing will not work. Set it for production.",
   );
 }
 
@@ -42,7 +42,9 @@ const POPULAR_WALLETS = [
 // static prerender.
 export function makeWagmiConfig() {
   return getDefaultConfig({
-    appName: "Chess Wager",
+    // Shown in the WalletConnect pairing prompt inside the user's wallet app,
+    // so it has to be the product name they see everywhere else.
+    appName: "OpenChess",
     projectId: projectId || "dev-only-no-walletconnect",
     chains: [base, baseSepolia],
     wallets: [{ groupName: "Popular", wallets: POPULAR_WALLETS }],

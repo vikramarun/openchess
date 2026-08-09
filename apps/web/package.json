@@ -10,6 +10,7 @@
     "test:eval": "tsx scripts/eval.test.ts",
     "test:auth": "tsx scripts/authedFetch.test.ts",
     "test:seat": "tsx scripts/playSeat.test.ts",
+    "test:nav": "tsx scripts/plyNav.test.ts",
     "test:prefs": "tsx scripts/boardPrefs.test.ts"
   },
   "dependencies": {

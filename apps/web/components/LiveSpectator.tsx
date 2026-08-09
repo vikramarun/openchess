@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
-import { MoveList, MoveNav } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
 import { other, useFlip } from "@/lib/useFlip";
@@ -209,7 +209,7 @@ export function LiveSpectator({ id }: { id: string }) {
                 </>
               ) : status === "finished" || status === "disconnected" ? (
                 <>
-                  This game isn’t live right now — it may have finished.
+                  This game isn’t live right now. It may have finished.
                   <div style={{ marginTop: 8 }}>
                     <button className="ghost" onClick={() => window.location.reload()}>
                       Load replay
@@ -233,7 +233,7 @@ export function LiveSpectator({ id }: { id: string }) {
               {winnerText} · {result.reason}
               {verified?.signed && (
                 <div className="verified">
-                  ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                  ✓ Verified, signed by oracle {shortAddr(verified.oracle)}
                 </div>
               )}
               <div style={{ marginTop: 10, display: "flex", gap: 8, justifyContent: "center" }}>
@@ -247,12 +247,13 @@ export function LiveSpectator({ id }: { id: string }) {
             </div>
           )}
 
-          <div className="panel">
-            <div className="muted" style={{ marginBottom: 8 }}>
-              Moves {!nav.live && <span className="behind">· viewing move {nav.at}</span>}
-            </div>
-            <MoveList sans={moves} at={nav.at} onSelect={nav.go} emptyText="waiting…" />
-          </div>
+          <MovePanel
+            sans={moves}
+            at={nav.at}
+            onSelect={nav.go}
+            emptyText="waiting…"
+            behind={!nav.live}
+          />
         </div>
       </div>
     </div>

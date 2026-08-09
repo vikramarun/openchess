@@ -16,7 +16,7 @@ export async function signInWithEthereum(
     `${location.host} wants you to sign in with your Ethereum account:`,
     address,
     "",
-    "Sign in to Chess Wager.",
+    "Sign in to OpenChess.",
     "",
     `URI: ${location.origin}`,
     "Version: 1",

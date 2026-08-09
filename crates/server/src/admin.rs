@@ -1,7 +1,7 @@
 //! Owner-only server administration.
 //!
 //! Currently just the maintenance/drain switch: the escrow owner (proven via a
-//! SIWE session whose wallet matches the on-chain `owner()`) flips it from the
+//! SIWE session whose wallet matches the onchain `owner()`) flips it from the
 //! web app. When on, `AppState::start_game` refuses new games while in-flight
 //! games play out — a manual "drain before deploy" / emergency stop, mirroring
 //! chess.com's maintenance mode. The flag is persisted (`server_settings`) so it

@@ -29,7 +29,7 @@ export function Header() {
         <Link href="/profile">Customize</Link>
       </nav>
       <div className="header-actions">
-        <span className="engine-pill" title="Stockfish runs in your browser — free">
+        <span className="engine-pill" title="Stockfish runs in your browser, free">
           <span className={`dot ${status}`} /> {label}
         </span>
         <WalletMenu />

@@ -1,4 +1,4 @@
-// On-chain wager wiring for the web app. The escrow address + chain are
+// Onchain wager wiring for the web app. The escrow address + chain are
 // single-sourced from the game server's GET /config, so there's no second
 // place to configure them. USDC is read from the contract's token() getter.
 
@@ -48,7 +48,7 @@ export type OnchainConfig = {
 
 let configCache: OnchainConfig | undefined;
 
-/** Fetch the server's on-chain config (escrow address + expected chain). */
+/** Fetch the server's onchain config (escrow address + expected chain). */
 export async function fetchConfig(): Promise<OnchainConfig> {
   if (configCache !== undefined) return configCache;
   try {
@@ -171,7 +171,7 @@ export function parseUsdc(human: string): bigint {
   return parseUnits(human.trim(), USDC_DECIMALS);
 }
 
-/** UUID → on-chain tournament id: the 16 UUID bytes left-aligned in a bytes32
+/** UUID → onchain tournament id: the 16 UUID bytes left-aligned in a bytes32
  *  (right-padded with zeros), matching the server's `game_id_to_bytes32`. */
 export function tidToBytes32(uuid: string): `0x${string}` {
   const hex = uuid.replace(/-/g, "").toLowerCase();

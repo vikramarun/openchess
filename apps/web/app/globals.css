@@ -589,7 +589,7 @@ a.play-now {
   white-space: nowrap;
 }
 
-/* read-only time-control chips (wager mode pages) */
+/* read-only time-control chips (staked mode pages) */
 .tc-chips-wrap {
   display: flex;
   align-items: center;
@@ -970,7 +970,7 @@ pre {
   background: var(--accent);
   color: #fff;
 }
-/* At-a-glance stake/payout disclosure at the point of wager. */
+/* At-a-glance stake/payout disclosure at the point of staking. */
 .stake-callout {
   padding: 9px 11px;
   margin-top: 6px;
@@ -1286,6 +1286,68 @@ pre {
 .status-pill.settled,
 .status-pill.complete {
   color: var(--text);
+}
+.status-pill.abandoned {
+  color: #e06c6c;
+}
+
+/* Standings + pairings, side by side on a wide screen and stacked on a narrow
+   one. Both are readable by anyone — you don't have to be an entrant to look. */
+.tourney-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .tourney-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+table.standings {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 14px;
+}
+table.standings th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 4px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+table.standings td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+table.standings th:last-child,
+table.standings td:last-child {
+  padding-right: 0;
+  text-align: right;
+}
+table.standings tr.me td {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+.pairing {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.pairing.me {
+  background: var(--bg-2);
+}
+.pairing .won {
+  color: var(--accent);
+  font-weight: 600;
+}
+.pairing .lost {
+  color: var(--muted);
 }
 
 /* ---------- profile / stats ---------- */
