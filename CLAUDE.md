@@ -217,6 +217,19 @@ wallet.
   (`app/tournament/page.tsx`, the `leftRound` effect); backing out keeps you out
   of that round only. Anything that reintroduces a "click here to play this
   round" gate re-breaks the mode.
+- **Colour is drawn per game, never handed out by role.** Park and the queue
+  flip a coin (`matchmaking.rs coin_flip`); tournaments alternate on the
+  round-robin's own schedule (`round_robin_rounds`). Role-based colour is the
+  bug this replaced: the poster of an offer took White and the acceptor Black,
+  so a player who only ever joined the house bot's standing offers never once
+  had the first move, in staked games. Two things to keep. The coin is drawn
+  **above `build_wager`**, because that takes `(white, black)` and the EIP-712
+  result the oracle signs is keyed on that pair — flipping any later settles
+  against the wrong seats. And the colour a client is TOLD
+  (`ParkAcceptResp.color`, `park_get`'s `poster_color`, the queue ticket) must
+  be the seat its launch token drives, or the board opens on the opponent's
+  side; `park_colour_is_a_coin_and_matches_the_launch_tokens` pins that, and
+  the web clients now error instead of defaulting to a side.
 - **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a game
   is **rated (Elo) only if both sides made ≥1 move** (`ply >= 2`, guarded in
   `room.rs finish()`). Never ding rating for a game a player didn't play.

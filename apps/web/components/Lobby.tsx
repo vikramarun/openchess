@@ -144,10 +144,20 @@ export function Lobby() {
             setErr("Your sign-in expired while you were waiting. Sign in again to start a new game.");
             return;
           }
+          // Colour is drawn per game now, so posting no longer implies White
+          // and there is no safe default to fall back on: opening the board on
+          // the wrong side would drive the opponent's seat. The server always
+          // sends it alongside the token, so a missing one is a bug, not a
+          // colour — say so rather than guess.
+          if (j.color !== "white" && j.color !== "black") {
+            setPending(null);
+            setErr("The server didn’t say which side you drew. Reload and check your games.");
+            return;
+          }
           setActive({
             gameId: j.game_id,
             token: j.token,
-            color: (j.color as "white" | "black") ?? "white",
+            color: j.color as "white" | "black",
             stake: pending.stakeBase,
             opponent: j.opponent ?? null,
             initialSecs: pending.initialSecs,
@@ -281,10 +291,14 @@ export function Lobby() {
         router.push(`/game/${j.game_id}`);
         return;
       }
+      // Same as the poster's path above: no default side is safe now.
+      if (j.color !== "white" && j.color !== "black") {
+        return setErr("The server didn’t say which side you drew. Reload and check your games.");
+      }
       setActive({
         gameId: j.game_id,
         token: j.token,
-        color: (j.color as "white" | "black") ?? "black",
+        color: j.color as "white" | "black",
         stake: o.stake,
         opponent: j.opponent ?? { name: seatLabel(o.poster_name, o.poster_addr, "casual") },
         initialSecs: o.initial_secs,
