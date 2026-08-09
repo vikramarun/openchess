@@ -109,5 +109,17 @@ fi
 echo "✓ ready"
 
 echo "→ /config sanity:"
-curl -sS -m 15 https://openchess.fly.dev/config
-echo
+# Same `|| true` reasoning as /ready: a connection failure is a curl exit code,
+# not a status, and letting `set -e` take it here would end the deploy on a bare
+# exit 7 with nothing said. Reaching this line means /health and /ready both
+# just answered, so a failure now means the app died in the last few seconds —
+# rare, and worth saying out loud rather than exiting mutely.
+config=$(curl -sS -m 15 https://openchess.fly.dev/config || true)
+if [ -z "$config" ]; then
+  echo >&2
+  echo "FAIL: /config returned nothing — the app stopped answering mid-check." >&2
+  echo "  fly logs" >&2
+  echo "  fly machines list" >&2
+  exit 1
+fi
+echo "$config"
