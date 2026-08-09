@@ -102,6 +102,21 @@ export function useSpectatorBoard() {
     [],
   );
 
+  /** Clear the board back to the pre-game state. For a caller that starts a NEW
+   *  game on the same mounted view (`/play`): `game_start` resets us anyway, but
+   *  it only arrives once both seats are ready, and until then the finished
+   *  game's final position and result banner would sit there under "creating
+   *  game…". The clock goes too — the previous game's last clock is usually
+   *  `0:00` for whoever flagged, and showing that over a game about to start
+   *  reads as a player already out of time. */
+  const reset = useCallback(() => {
+    pos.current = Chess.default();
+    setFrames([START]);
+    setClock(null);
+    setResult(null);
+    setVerified(null);
+  }, []);
+
   const tip = frames[frames.length - 1];
   const moves = useMemo(() => frames.slice(1).map((f) => f.san ?? ""), [frames]);
 
@@ -118,5 +133,6 @@ export function useSpectatorBoard() {
     result,
     verified,
     applyFrame,
+    reset,
   };
 }

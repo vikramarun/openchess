@@ -68,6 +68,10 @@ jobs:
           # Guards the decline path: a seat that closes its socket instead of
           # waiting out the void turns a refund into a forfeit of the stake.
           pnpm test:seat
+          # Added with the ply state machine (#32) but never listed here, so it
+          # had never run. Same trap as the note above; keep this list in step
+          # with package.json.
+          pnpm test:nav
           # Guards the lobby's offer grouping and the join walk over a group's
           # seats. A merge key that is too loose collapses two posters into one
           # row and seats a joiner at the wrong board; the walk is where a

@@ -1,12 +1,9 @@
 "use client";
 
-import { Chess } from "chessops/chess";
-import { INITIAL_FEN, makeFen } from "chessops/fen";
-import { makeSanAndPlay } from "chessops/san";
-import { parseUci } from "chessops/util";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { ensureBookLoaded } from "@/lib/browserBot";
@@ -14,24 +11,19 @@ import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
 import { DEFAULT_TC, TIME_CONTROLS, tcByLabel, type TimeControl } from "@/lib/timeControls";
-import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
-
-type Clock = { white_ms: number; black_ms: number };
-type Result = { winner: "white" | "black" | null; reason: string };
+import { usePlyNav } from "@/lib/usePlyNav";
+import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
+import { shortAddr } from "@/lib/verify";
 
 export default function PlayPage() {
-  const [fen, setFen] = useState(INITIAL_FEN);
-  const [moves, setMoves] = useState<string[]>([]);
-  const [lastUci, setLastUci] = useState<string | null>(null);
-  const [inCheck, setInCheck] = useState<"white" | "black" | null>(null);
-  const [clock, setClock] = useState<Clock | null>(null);
-  const [result, setResult] = useState<Result | null>(null);
-  const [verified, setVerified] = useState<Verification | null>(null);
+  // Shared frame reducer: same board state, same navigation as the wager view
+  // and the spectator page.
+  const { fen, moves, frames, clock, result, verified, applyFrame, reset } = useSpectatorBoard();
+  const nav = usePlyNav(frames.length - 1);
+  const view = frames[nav.at];
   const [status, setStatus] = useState("loading engines…");
   const [nonce, setNonce] = useState(0); // bump to start a new game
   const [tc, setTc] = useState<TimeControl | null>(null); // resolved on mount
-
-  const pos = useRef(Chess.default());
 
   // Resolve the time control from the ?tc= query param (set by the homepage),
   // defaulting to 3+0. Done in an effect so SSR/CSR markup matches.
@@ -43,9 +35,19 @@ export default function PlayPage() {
     setTc(tcByLabel(q ?? DEFAULT_TC.label));
   }, []);
 
+  // Clearing the board is only half of starting over: usePlyNav remembers the
+  // ply you were viewing, and THIS page is not remounted between games (the
+  // gauntlet and tournament views key SeatGame by game id, so they are). Without
+  // re-attaching to the tip, scrubbing back in one game leaves the next one
+  // pinned at that move — it plays on while you watch move 5.
+  const followTip = nav.last;
+  const startOver = useCallback(() => {
+    reset();
+    followTip();
+  }, [reset, followTip]);
+
   const pickTc = (next: TimeControl) => {
-    setResult(null);
-    setVerified(null);
+    startOver();
     setTc(next);
     setNonce((n) => n + 1); // restart even if the same control is re-picked
   };
@@ -59,10 +61,7 @@ export default function PlayPage() {
     const seats: { close: () => void }[] = [];
 
     const run = async () => {
-      pos.current = Chess.default();
-      setFen(INITIAL_FEN);
-      setMoves([]);
-      setResult(null);
+      startOver();
 
       const white = new BrowserEngine();
       const black = new BrowserEngine();
@@ -71,7 +70,7 @@ export default function PlayPage() {
       await Promise.all([white.whenReady(), black.whenReady()]);
       if (cancelled) return;
       // Warm the uploaded book. Note: the book is a shared cache, so both seats
-      // follow it through the opening — "vs the house" diverges once out of book.
+      // follow it through the opening — the OpenChess bot diverges once out of book.
       await ensureBookLoaded();
 
       setStatus("creating game…");
@@ -81,7 +80,7 @@ export default function PlayPage() {
         body: JSON.stringify({ initial_secs: tc.initial, increment_secs: tc.inc }),
       });
       if (!resp.ok) {
-        setStatus(`server error (${resp.status}) — is the game server running?`);
+        setStatus(`Server error (${resp.status}). Is the game server running?`);
         return;
       }
       const game = await resp.json();
@@ -90,48 +89,7 @@ export default function PlayPage() {
       // Spectator socket renders the live board (no token = read-only).
       spectator = new WebSocket(`${SERVER_WS}/ws/game/${game.game_id}`);
       spectator.onopen = () => setStatus("playing");
-      spectator.onmessage = (ev) => {
-        let m: any;
-        try {
-          m = JSON.parse(ev.data);
-        } catch {
-          return;
-        }
-        try {
-          switch (m.type) {
-            case "game_start":
-              pos.current = Chess.default();
-              setFen(INITIAL_FEN);
-              setMoves([]);
-              setLastUci(null);
-              setInCheck(null);
-              if (m.clock) setClock(m.clock);
-              break;
-            case "opponent_moved": {
-              const mv = parseUci(m.uci);
-              if (mv && pos.current.isLegal(mv)) {
-                const san = makeSanAndPlay(pos.current, mv);
-                setFen(makeFen(pos.current.toSetup()));
-                setMoves((x) => [...x, san]);
-                setLastUci(m.uci);
-                setInCheck(pos.current.isCheck() ? pos.current.turn : null);
-              }
-              if (m.clock) setClock(m.clock);
-              break;
-            }
-            case "clock_sync":
-              if (m.clock) setClock(m.clock);
-              break;
-            case "game_over":
-              setResult(m.result);
-              setStatus("finished");
-              verifyResultSig(m.result_hash, m.server_sig).then(setVerified);
-              break;
-          }
-        } catch {
-          /* ignore one bad frame */
-        }
-      };
+      spectator.onmessage = (ev) => applyFrame(ev.data, () => setStatus("finished"));
 
       // Two browser engines play the two seats.
       seats.push(playSeat(game.game_id, game.white_token, white, 300, {}, cancelledFn));
@@ -160,8 +118,10 @@ export default function PlayPage() {
     : null;
 
   const live = !result && status === "playing";
+  // Clocks and the turn indicator describe the live tip; the board and material
+  // follow the ply you're viewing.
   const turn = sideToMoveFromFen(fen);
-  const mat = material(fen);
+  const mat = material(view.fen);
 
   return (
     <div className="container">
@@ -176,7 +136,7 @@ export default function PlayPage() {
             captured={mat.blackCaptured}
             edge={-mat.advantage}
           />
-          <Chessboard fen={fen} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+          <Chessboard fen={view.fen} lastMove={lastMoveFromUci(view.lastUci)} check={view.check} />
           <PlayerBar
             color="white"
             name="Stockfish"
@@ -186,6 +146,18 @@ export default function PlayPage() {
             captured={mat.whiteCaptured}
             edge={mat.advantage}
           />
+          {nav.total > 0 && (
+            <MoveNav
+              at={nav.at}
+              total={nav.total}
+              mode={result ? "replay" : "live"}
+              live={nav.live}
+              onFirst={nav.first}
+              onPrev={nav.prev}
+              onNext={nav.next}
+              onLast={nav.last}
+            />
+          )}
         </div>
 
         <div className="sidebar">
@@ -194,7 +166,7 @@ export default function PlayPage() {
               Test Engine
             </div>
             <div className="muted" style={{ fontSize: 14 }}>
-              Two Stockfish engines playing in your browser — your CPU, not our servers.
+              Two Stockfish engines playing in your browser, on your CPU rather than our servers.
             </div>
             <div className="tc-row" role="group" aria-label="Time control">
               {TIME_CONTROLS.map((t) => (
@@ -220,30 +192,13 @@ export default function PlayPage() {
               {winnerText} · {result.reason}
               {verified?.signed && (
                 <div className="verified">
-                  ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                  ✓ Verified, signed by oracle {shortAddr(verified.oracle)}
                 </div>
               )}
             </div>
           )}
 
-          <div className="panel">
-            <div className="muted" style={{ marginBottom: 8 }}>
-              Moves
-            </div>
-            <div className="moves">
-              {moves.length === 0 && <span className="muted">…</span>}
-              {moves.map((san, i) =>
-                i % 2 === 0 ? (
-                  <span key={i}>
-                    <span className="num">{i / 2 + 1}.</span>
-                    {san}{" "}
-                  </span>
-                ) : (
-                  <span key={i}>{san} </span>
-                ),
-              )}
-            </div>
-          </div>
+          <MovePanel sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" behind={!nav.live} />
 
           <button className="primary" onClick={() => setNonce((n) => n + 1)}>
             New game

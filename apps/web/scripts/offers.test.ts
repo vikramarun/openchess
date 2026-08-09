@@ -3,6 +3,7 @@
 // joiner to a stranger's board, and failing to merge the house bot's identical
 // seats brings back the duplicate-row noise the grouping exists to remove.
 import { SESSION_EXPIRED } from "../lib/authedFetch";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "../lib/copy";
 import {
   acceptFromGroup,
   groupOffers,
@@ -200,26 +201,26 @@ async function main() {
   check(
     "409 with our own bot playing admits both causes",
     joinErrorMessage(409, { botPlays: true }),
-    "Couldn't join — your bot may already be in a game, or the seat was just taken.",
+    "Couldn’t join. Your bot may already be in a game, or the seat was just taken.",
   );
   check(
     "409 with a browser seat is a plain lost race",
     joinErrorMessage(409, { botPlays: false }),
-    "Someone just took that challenge — the lobby will refresh.",
+    "Someone just took that challenge. The lobby will refresh.",
   );
   check(
     "404 reads the same as 409",
     joinErrorMessage(404, { botPlays: false }),
     joinErrorMessage(409, { botPlays: false }),
   );
+  // Shared wording comes from lib/copy.ts rather than a second copy here, so a
+  // reworded drain message can't say one thing in the lobby and another in the
+  // gauntlet. Asserting against the constant is the point: a literal would
+  // re-introduce the duplication copy.ts exists to remove.
+  check("maintenance uses the shared wording", joinErrorMessage(503, { botPlays: false }), MAINTENANCE_MSG);
   check(
-    "maintenance is named",
-    joinErrorMessage(503, { botPlays: false }).includes("maintenance"),
-    true,
-  );
-  check(
-    "a stake that can't be locked is named",
-    joinErrorMessage(502, { botPlays: false }).includes("on-chain"),
+    "a stake that can't be locked is named, spelled the way the code spells it",
+    joinErrorMessage(502, { botPlays: false }).includes("onchain"),
     true,
   );
   check(
@@ -228,10 +229,7 @@ async function main() {
       joinErrorMessage(424, { botPlays: true }),
       joinErrorMessage(410, { botPlays: true }),
     ],
-    [
-      "Your bot is offline — check the chess-client window.",
-      "That challenger's bot went offline — the offer is gone.",
-    ],
+    [BOT_OFFLINE_MSG, "That challenger’s bot went offline, so the offer is gone."],
   );
   // A dead session must not surface as a bare code: every deploy voids them,
   // authedFetch has already cleared the token by the time we get here, and this
@@ -249,7 +247,7 @@ async function main() {
   check(
     "an unexpected status still surfaces its code",
     joinErrorMessage(418, { botPlays: false }),
-    "Couldn't join (418).",
+    "Couldn’t join (418).",
   );
 
   console.log(failed === 0 ? "\nall offer-grouping tests passed" : `\n${failed} FAILED`);

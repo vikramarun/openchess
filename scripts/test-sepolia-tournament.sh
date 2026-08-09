@@ -62,7 +62,7 @@ LEDGER_TEST_TIMEOUT="$LEDGER_TEST_TIMEOUT" \
 
 cat <<'EOF'
 
-== on-chain paths verified. Optional manual web check ==
+== onchain paths verified. Optional manual web check ==
 The automated test covers the contract + Merkle/settlement layer. To also
 click the actual buttons in the web app against a fresh escrow:
   1. Note the escrow_pay address the test printed above.

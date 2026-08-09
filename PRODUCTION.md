@@ -1,7 +1,7 @@
 # Going to production
 
 OpenChess has been **hardened** through four audit rounds plus a production
-incident round (see `AUDIT.md`) — the
+incident round (see `AUDIT.md`). The
 code-level Critical/High findings are fixed, and the money paths fail closed. But
 **this is not yet a turnkey production deployment**: several items are infra /
 ops / legal decisions that only you (the operator) can make. This doc is the
@@ -16,14 +16,14 @@ honest checklist.
 
 ## What's already done for you (hardening)
 
-- **Contract** (`ChessEscrow.sol`, 25 Foundry tests): non-custodial bankroll +
+- **Contract** (`ChessEscrow.sol`, 25 Foundry tests): non-custodial balances +
   per-game escrow + tournament pool (direct + Merkle-claim), `Ownable2Step`,
   `Pausable`, EIP-712 results with `deadline` + fork-safe domain separator,
   SafeERC20-lite + deposit-by-delta, fee snapshot at open, replay guards,
   conservation-tested, timeout/refund safety nets, indexer events, a deploy
   script (`script/Deploy.s.sol`).
-- **Server**: SIWE-gated wagers with seats bound to the authenticated wallet,
-  fail-closed (no wager without on-chain settlement), durable retrying
+- **Server**: SIWE-gated stakes with seats bound to the authenticated wallet,
+  fail-closed (no stake without onchain settlement), durable retrying
   settlement outboxes (per-game + tournament) with reaper + idempotency,
   input bounds, entrant caps, non-poisoning locks (`parking_lot`), supervised
   workers, SIGTERM-aware graceful shutdown, restricted CORS, WS message-size
@@ -42,10 +42,10 @@ honest checklist.
   rounds are not a substitute.
 - [ ] **Deploy via `script/Deploy.s.sol`** to Base, **verify on Basescan** with
   exact constructor args. Use canonical Base USDC
-  (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`) — never `MockUSDC`/`forge create`.
+  (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`), never `MockUSDC`/`forge create`.
 - [ ] Choose parameters deliberately: `feeBps` (rake, ≤ 1000), `settleTimeout`
   (long enough the oracle always settles first; short enough funds aren't locked
-  forever — hours, not the 1h used in demos), `feeRecipient` (a fresh address;
+  forever, so hours rather than the 1h used in demos), `feeRecipient` (a fresh address;
   USDC blacklisting of it strands only rake).
 - [ ] **Owner = a multisig (Safe)**; put `setOracle` behind a `TimelockController`
   (24–48h) so an oracle rotation can't instantly drain locked stakes.
@@ -60,53 +60,53 @@ honest checklist.
 
 ### 3. Infrastructure
 - [ ] **Run exactly one `chess-server` replica.** Multi-replica is *broken* today
-  (rooms, launch tokens, lobby, and SIWE sessions are in-process) — needs the
+  (rooms, launch tokens, lobby, and SIWE sessions are in-process) and needs the
   Redis-backed session/lobby + sharded rooms work first.
-- [x] Managed **Postgres** — attached (`openchess-db`). Confirm backups/PITR are
+- [x] Managed **Postgres**, attached (`openchess-db`). Confirm backups/PITR are
   on. Migrations still run in-process on boot; move them to a **one-shot deploy
   step** before any future destructive migration.
 - [ ] **TLS everywhere**: serve the web over `https` and the server over `wss`
-  (terminate at a reverse proxy). The launch token rides in the WS query string —
-  keep it on TLS and out of logs.
+  (terminate at a reverse proxy). The launch token rides in the WS query string,
+  so keep it on TLS and out of logs.
 - [x] **Per-IP rate limiting in-app** (`crates/server/src/ratelimit.rs`):
   token-bucket throttles on `/auth/*`, park create/accept, WS upgrades, and
   `/players/*`+`/leaderboard`; global + per-IP WS connection caps; a per-owner
   open-offer cap. Env-tunable (`RL_*`), keyed on `Fly-Client-IP`. **Still add
   edge rate limiting** (Cloudflare/gateway) as defense-in-depth for the L3/L4
   floods the app never sees, and pin `Fly-Client-IP` trust to the deploy.
-- [x] `REQUIRE_ONCHAIN=1` set in `fly.toml` — a misconfigured node refuses to
+- [x] `REQUIRE_ONCHAIN=1` set in `fly.toml`, so a misconfigured node refuses to
   boot. This is not belt-and-braces: the server ran for a stretch with no
   `DATABASE_URL`, meaning no persistence and no durable settlement, while still
-  accepting wagers. Takes effect on the next deploy.
+  accepting stakes. Takes effect on the next deploy.
 - [x] **Single-node is enforced, twice.** `deploy-server.sh` asserts the machine
   count and exits non-zero; the server independently watches `<app>.internal` DNS
   and pages on a sibling (`singlenode.rs`). Neither stops a bare `fly deploy`
-  from re-adding the HA machine — they make sure you find out in minutes rather
+  from re-adding the HA machine; they make sure you find out in minutes rather
   than during a debugging session. Always deploy through the wrapper.
 
 ### 4. Observability
 - [ ] Put `/ready` in the load-balancer health check; keep `/health` for
-  liveness. **Caveat — `/ready` cannot detect a *missing* database.** It pings
+  liveness. **Caveat: `/ready` cannot detect a *missing* database.** It pings
   the DB only `if let Some(db)` (`main.rs` `ready()`), so a server booted with
   no `DATABASE_URL` reports `200 ready` while running with no persistence and
   **no settlement outbox worker** (started only when a DB exists). Set
-  `REQUIRE_ONCHAIN=1` — that is the check that actually fails closed on an
-  unset `DATABASE_URL` — and treat a `503` from `/leaderboard` as the real
+  `REQUIRE_ONCHAIN=1`, which is the check that actually fails closed on an
+  unset `DATABASE_URL`, and treat a `503` from `/leaderboard` as the real
   signal that the DB is absent.
 - [~] **Alert on settlement failures and outbox depth/age.** `ALERT_WEBHOOK_URL`
   (unset ⇒ no-op) now fires a best-effort webhook on the two money-critical
   give-ups (escrow-refund-after-abort, settlement-outbox exhausted). Still add
-  real paging + outbox depth/age metrics — a single webhook POST can itself fail.
-- [ ] Monitor on-chain events (`OracleUpdated`, `PausedSet`, `Ownership*`,
+  real paging + outbox depth/age metrics, since a single webhook POST can itself fail.
+- [ ] Monitor onchain events (`OracleUpdated`, `PausedSet`, `Ownership*`,
   `GameSettled`, `Tournament*`) and reconcile `Deposited/Withdrawn` vs the
   contract's USDC balance to detect solvency drift.
 - [ ] Ship structured logs to a collector; add metrics (the `TraceLayer` is
   mounted; add a metrics exporter).
 
-### 5. Legal / compliance (not legal advice — get counsel)
+### 5. Legal / compliance (not legal advice; get counsel)
 - [ ] **Real-money gaming / gambling licensing** review for your jurisdictions.
 - [ ] **AML/KYC** and possible **money-transmitter/MSB** obligations for taking
-  USDC wagers.
+  USDC stakes.
 - [ ] Terms of service, geofencing, and responsible-play controls as required.
 
 ### 6. Frontend config
@@ -119,44 +119,44 @@ honest checklist.
 ## Known limitations (not production-ready as-is)
 
 - **Single-node only** (see Infra #1). Detected automatically now, but not
-  prevented — a bare `fly deploy` still re-adds the HA machine.
+  prevented, and a bare `fly deploy` still re-adds the HA machine.
 - **Tournament restart**: tournament entrants/standings are now persisted. On
   restart, a tournament whose games all finished is **settled by result**; one
   with games still in flight is marked `abandoned` (their rooms are gone) and
-  entrants recover via on-chain `claimRefund`. Resuming *in-flight* games across
+  entrants recover via onchain `claimRefund`. Resuming *in-flight* games across
   a restart still requires the room-resumption work (single-node limitation).
 - **Results are signed + client-verifiable** (the oracle signs `result_hash`;
-  clients recover the signer vs `/oracle`). A full **on-chain dispute window**
-  (optimistic settlement with fraud proofs) is still a TODO — today a malicious
+  clients recover the signer vs `/oracle`). A full **onchain dispute window**
+  (optimistic settlement with fraud proofs) is still a TODO. Today a malicious
   operator could sign an incorrect result, matching a standard result-oracle
   trust model.
 - **No anti-collusion / wash-trading controls** (rating/Sybil) yet.
-- **In-browser wagering**: all three wager modes run fully in-browser — connect a
+- **In-browser staking**: all three staked modes run fully in-browser. Connect a
   wallet, deposit USDC into the escrow (approve + `deposit`), and your in-browser
-  engine plays your seat while settlement runs on-chain:
-  - **Park / Patzer** — post or accept a staked offer.
-  - **Gauntlet** — pick a tier; auto-queue, play, re-queue, with a live tally.
-  - **Tournament** — create/join (buy-in → pool), start a round-robin, auto-play
+  engine plays your seat while settlement runs onchain:
+  - **Park / Patzer.** Post or accept a staked offer.
+  - **Gauntlet.** Pick a tier; auto-queue, play, re-queue, with a live tally.
+  - **Tournament.** Create/join (entry → pool), start a round-robin, auto-play
     your bracket; the pool pays out by standings (small fields credit the
-    bankroll directly; large fields settle a Merkle root, claimed on-chain).
+    balance directly; large fields settle a Merkle root, claimed onchain).
   The escrow address + chain are single-sourced from the server's `GET /config`.
   The native client remains for headless / custom engines.
 
 ## Deploying the game server (Fly.io / Railway / any Docker host)
 
-The Rust `chess-server` is a long-lived, stateful WebSocket process — host it on
+The Rust `chess-server` is a long-lived, stateful WebSocket process, so host it on
 a platform that runs persistent containers (Fly.io, Railway, Render, a VM), **not
 Vercel**. A `Dockerfile` (multi-stage; builds the `chess-server` binary, runs it
 as non-root) and a `fly.toml` are in the repo root. Migrations are embedded and
 run on boot; queries are runtime sqlx, so the image builds without a database.
 
-**Fly.io (recommended — handles WebSockets + has managed Postgres):**
+**Fly.io (recommended; handles WebSockets and has managed Postgres):**
 
 ```bash
 fly launch --no-deploy --copy-config --name openchess-server   # uses the repo Dockerfile + fly.toml
 fly postgres create --name openchess-db                        # managed Postgres
 fly postgres attach openchess-db                               # sets the DATABASE_URL secret
-# On-chain wagering (omit for a casual-only server):
+# Onchain stakes (omit for a casual-only server):
 fly secrets set RPC_URL="https://..." ESCROW_ADDR="0x..." ORACLE_KEY="0x..."
 # Edit SIWE_DOMAIN + WEB_ORIGIN in fly.toml to your Vercel domain, then:
 fly deploy
@@ -169,25 +169,25 @@ redeploy the web app.
 
 **Railway / Render / VM:** they auto-detect the root `Dockerfile`. Set the same
 env (`DATABASE_URL`, `BIND=0.0.0.0:8080`, `SIWE_DOMAIN`, `WEB_ORIGIN`, and the
-on-chain vars), expose port 8080, and run a **single** instance. Use the
+onchain vars), expose port 8080, and run a **single** instance. Use the
 platform's health check on `/ready`.
 
 Critical reminders (see "Known limitations"): **one instance only**, don't
 auto-stop the machine (it holds live games in memory), set `WEB_ORIGIN` +
 `SIWE_DOMAIN` to the exact Vercel host, and set `REQUIRE_ONCHAIN=1` once the
-on-chain vars are in so a misconfigured node refuses to boot.
+onchain vars are in so a misconfigured node refuses to boot.
 
 **Drain before deploying** so a redeploy doesn't kill live games: as the escrow
 owner, sign in on the web app and flip **maintenance mode** on (the banner's
 "Pause new games" toggle, or `POST /admin/maintenance {"on":true}` with the
 owner's bearer token). New games stop starting; let in-flight games finish, then
 `deploy-server.sh`. The flag is DB-persisted, so the node comes back up still
-paused — flip it off once the new build is healthy.
+paused, so flip it off once the new build is healthy.
 
 ## Deploying the web app to Vercel
 
 Vercel hosts the **Next.js frontend only** (`apps/web`). The Rust game server is
-a long-lived, stateful WebSocket process — it **cannot** run on Vercel's
+a long-lived, stateful WebSocket process and **cannot** run on Vercel's
 serverless functions. Host it on a VM / Fly.io / Railway / Render (anything that
 runs a persistent process, accepts WebSockets, and reaches Postgres + an RPC),
 then point the web app at it.
@@ -199,7 +199,7 @@ then point the web app at it.
    - `NEXT_PUBLIC_SERVER_HTTP` = `https://<your-game-server-host>`
    - `NEXT_PUBLIC_SERVER_WS`   = `wss://<your-game-server-host>`
    - `NEXT_PUBLIC_WC_PROJECT_ID` = your WalletConnect Cloud project id
-4. Deploy. `public/stockfish.js` is served as a static asset — the in-browser
+4. Deploy. `public/stockfish.js` is served as a static asset, so the in-browser
    engine works with no extra config (single-threaded build, no COOP/COEP).
 
 On the **game server** side, set `WEB_ORIGIN=https://<your-app>.vercel.app` (CORS)
@@ -207,10 +207,10 @@ and `SIWE_DOMAIN=<your-app>.vercel.app` (must equal the browser origin host), pl
 `DATABASE_URL`, `RPC_URL`, `ESCROW_ADDR`, `ORACLE_KEY`, `REQUIRE_ONCHAIN=1`.
 Terminate TLS in front of it so the browser can reach it over `https`/`wss`.
 
-## Enabling on-chain wagering (Base Sepolia testnet)
+## Enabling onchain stakes (Base Sepolia testnet)
 
 This turns the casual-only deployment into a real *staked* one you can test with
-a wallet, on testnet (no real money — defers the legal review).
+a wallet, on testnet (no real money, which defers the legal review).
 
 **1. Make the oracle keypair.** The server signs results with this key; the
 contract is told its *address*. They must match.
@@ -221,7 +221,7 @@ cast wallet new            # prints an Address (= ORACLE) and a Private Key (= O
 
 **2. Fund a deployer + get test USDC.**
 - Base Sepolia ETH for the deployer wallet (Coinbase / Alchemy / QuickNode faucet).
-- Test USDC for each player wallet — Circle faucet (https://faucet.circle.com),
+- Test USDC for each player wallet, from the Circle faucet (https://faucet.circle.com),
   Base Sepolia. USDC there is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`.
 
 **3. Deploy `ChessEscrow`** (the script auto-picks Base Sepolia USDC at chain
@@ -248,13 +248,13 @@ fly deploy
 ```
 
 **5. No frontend change.** `GET /config` now reports `wager_enabled` + the escrow
-+ chain 84532; the web app already bundles Base Sepolia, and the bankroll panel
++ chain 84532; the web app already bundles Base Sepolia, and the balance panel
 prompts the wallet to switch networks. Just keep `NEXT_PUBLIC_SERVER_*` pointed
 at the server.
 
 **6. Test the loop.** Connect a wallet on Base Sepolia → deposit test USDC in the
-bankroll panel → post a staked Park game → accept from a second wallet → watch it
-settle and the winner's bankroll grow. (Mainnet is the same flow with real USDC —
+balance panel → post a staked Park game → accept from a second wallet → watch it
+settle and the winner's balance grow. (Mainnet is the same flow with real USDC,
 but do the contract audit + oracle-key hardening + legal review first.)
 
 ## Environment variables
@@ -265,14 +265,14 @@ but do the contract audit + oracle-key hardening + legal review first.)
 |---|---|---|
 | `BIND` | no (`127.0.0.1:8080`) | listen address |
 | `DATABASE_URL` | prod yes | Postgres; without it, in-memory + no durable settlement |
-| `RPC_URL` / `ESCROW_ADDR` / `ORACLE_KEY` | prod yes | on-chain settlement; missing ⇒ log-only sink (wagers refused) |
+| `RPC_URL` / `ESCROW_ADDR` / `ORACLE_KEY` | prod yes | onchain settlement; missing ⇒ log-only sink (stakes refused) |
 | `SIWE_DOMAIN` | prod yes | must equal the web origin host |
 | `SIWE_CHAIN_ID` | no (`8453`) | expected chain in SIWE messages |
 | `WEB_ORIGIN` | prod yes | CORS allow-origin |
 | `REQUIRE_ONCHAIN` | recommended | `1` ⇒ fail boot unless fully configured |
 | `ALERT_WEBHOOK_URL` | recommended | Slack/Discord/generic webhook; best-effort alert on money-critical failures (unset ⇒ no-op) |
 | `RL_*` | no | rate-limit tuning (per-bucket burst/rate, WS conn caps, open-offer cap); sane defaults in `ratelimit.rs` |
-| `ADMIN_WALLET` | no | who may toggle maintenance/drain mode; defaults to the on-chain escrow `owner()`, so only set to override (e.g. local dev without a chain) |
+| `ADMIN_WALLET` | no | who may toggle maintenance/drain mode; defaults to the onchain escrow `owner()`, so only set to override (e.g. local dev without a chain) |
 
 **Web** (`apps/web`): `NEXT_PUBLIC_SERVER_HTTP`, `NEXT_PUBLIC_SERVER_WS`,
 `NEXT_PUBLIC_WC_PROJECT_ID`.

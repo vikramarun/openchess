@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
 import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
@@ -14,6 +15,7 @@ import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
 import { fetchGame } from "@/lib/gameApi";
+import { usePlyNav } from "@/lib/usePlyNav";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
 import { shortAddr } from "@/lib/verify";
@@ -22,7 +24,7 @@ type Opponent = { name: string; declared_engine: string | null };
 
 /** Play ONE seat of a server game in the browser (the opponent runs theirs).
  *  Renders the live board from a spectator socket; drives the user's seat with
- *  an in-browser Stockfish. Used by the wager modes. */
+ *  an in-browser Stockfish. Used by the staked modes. */
 export function SeatGame({
   gameId,
   token,
@@ -55,7 +57,13 @@ export function SeatGame({
   initialSecs?: number | null;
   incrementSecs?: number | null;
 }) {
-  const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
+  const { fen, moves, frames, clock, result, verified, applyFrame } = useSpectatorBoard();
+  // Your own game is navigable while you play it, exactly as it is when you
+  // spectate one: stepping back doesn't pause the stream or your engine (it only
+  // drives its seat over its own socket), and `nav.live` means we're showing the
+  // newest position, so the clocks and turn indicator still apply.
+  const nav = usePlyNav(frames.length - 1);
+  const view = frames[nav.at];
   const [opponent, setOpponent] = useState<Opponent | null>(null);
   const [status, setStatus] = useState("loading engine…");
   const [settleStatus, setSettleStatus] = useState<string | null>(null);
@@ -98,7 +106,7 @@ export function SeatGame({
       await ensureBookLoaded();
 
       // The spectator socket renders the live board (shared reducer); it
-      // reconnects with backoff so a dropped connection mid-wager shows
+      // reconnects with backoff so a dropped connection mid-game shows
       // "reconnecting…" and recovers rather than freezing the board while money
       // is on the line.
       spectator = connectSpectator({
@@ -205,12 +213,16 @@ export function SeatGame({
     ? `you won +${fmtUsdc(profitForStake(stake ?? 0))} USDC`
     : youLost
       ? `you lost ${fmtUsdc(stake)} USDC`
-      : "draw — your stake was returned";
+      : "draw, so your stake was returned";
 
   const oppColor = color === "white" ? "black" : "white";
   const live = !result && status === "playing";
+  // Name-plates describe the LIVE game — clock and whose turn it is — and stay
+  // put while you scrub; only the board and material follow the ply you're
+  // looking at. (Same split as LiveSpectator; the live stream carries no clock
+  // history, so a per-ply clock here would be fiction.)
   const turn = sideToMoveFromFen(fen);
-  const mat = material(fen);
+  const mat = material(view.fen);
   const myClock = clock ? (color === "white" ? clock.white_ms : clock.black_ms) : null;
   const oppClock = clock ? (color === "white" ? clock.black_ms : clock.white_ms) : null;
   const myCaptured = color === "white" ? mat.whiteCaptured : mat.blackCaptured;
@@ -258,7 +270,12 @@ export function SeatGame({
           captured={oppCaptured}
           edge={-myEdge}
         />
-        <Chessboard fen={fen} orientation={color} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+        <Chessboard
+          fen={view.fen}
+          orientation={color}
+          lastMove={lastMoveFromUci(view.lastUci)}
+          check={view.check}
+        />
         <PlayerBar
           color={color}
           name="You"
@@ -267,6 +284,18 @@ export function SeatGame({
           captured={myCaptured}
           edge={myEdge}
         />
+        {nav.total > 0 && (
+          <MoveNav
+            at={nav.at}
+            total={nav.total}
+            mode={result ? "replay" : "live"}
+            live={nav.live}
+            onFirst={nav.first}
+            onPrev={nav.prev}
+            onNext={nav.next}
+            onLast={nav.last}
+          />
+        )}
       </div>
 
       <div className="sidebar">
@@ -275,7 +304,7 @@ export function SeatGame({
             {subtitle ?? `Your game · ${color === "white" ? "White" : "Black"}`}
           </div>
           <div className="muted" style={{ fontSize: 14 }}>
-            Your engine plays your seat in your browser; your opponent runs theirs.
+            Your engine plays your seat in your browser. Your opponent runs theirs.
           </div>
           {stake && (
             <div className="stake-callout" style={{ marginTop: 10 }}>
@@ -284,8 +313,8 @@ export function SeatGame({
                 <b>+{fmtUsdc(profitForStake(stake))} USDC</b>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                Win to take your opponent’s stake, less a 1% fee; a draw or no-show returns your
-                stake. Non-custodial — settled on-chain.
+                Win and you take your opponent’s stake, less a 1% fee. A draw or a no-show
+                returns yours. Non-custodial, settled onchain.
               </div>
             </div>
           )}
@@ -300,7 +329,7 @@ export function SeatGame({
             <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
               Stay on this page for a moment while the game is called off
               {stake ? " and your stake comes back" : ""}. Leaving now hands your opponent a
-              forfeit{stake ? " — and the stake with it" : ""}.
+              forfeit{stake ? ", and the stake with it" : ""}.
             </div>
           </div>
         )}
@@ -312,12 +341,12 @@ export function SeatGame({
               <div style={{ fontSize: 13, marginTop: 6 }}>
                 {settleStatus === "settled" ? (
                   <span style={{ color: youWon ? "var(--accent)" : "var(--text)" }}>
-                    Settled on-chain ✓ — {settledText}
+                    Settled onchain ✓ · {settledText}
                   </span>
                 ) : settleStatus === "failed" ? (
                   <span className="muted">
-                    Settlement delayed — your funds are safe and recoverable on-chain after the
-                    settle window.{" "}
+                    Settlement is delayed. Your funds are safe and recoverable onchain once
+                    the settle window opens.{" "}
                     {escrowUrl && (
                       <a href={escrowUrl} target="_blank" rel="noopener noreferrer">
                         View escrow ↗
@@ -326,37 +355,20 @@ export function SeatGame({
                   </span>
                 ) : (
                   <span className="muted">
-                    Settling on-chain — your bankroll updates once the oracle posts the result.
+                    Settling onchain. Your balance updates once the oracle posts the result.
                   </span>
                 )}
               </div>
             )}
             {verified?.signed && (
               <div className="verified">
-                ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                ✓ Verified, signed by oracle {shortAddr(verified.oracle)}
               </div>
             )}
           </div>
         )}
 
-        <div className="panel">
-          <div className="muted" style={{ marginBottom: 8 }}>
-            Moves
-          </div>
-          <div className="moves">
-            {moves.length === 0 && <span className="muted">…</span>}
-            {moves.map((san, i) =>
-              i % 2 === 0 ? (
-                <span key={i}>
-                  <span className="num">{i / 2 + 1}.</span>
-                  {san}{" "}
-                </span>
-              ) : (
-                <span key={i}>{san} </span>
-              ),
-            )}
-          </div>
-        </div>
+        <MovePanel sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" behind={!nav.live} />
 
         {/* No early exit after declining, staked or not: leaving closes the
             socket, and the server only voids a game whose seats are both still

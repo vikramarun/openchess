@@ -37,4 +37,4 @@ export async function authedFetch(url: string, init: RequestInit = {}): Promise<
 
 /** Message for a rejected session, so every caller says the same thing and it
  *  points at the fix instead of showing a bare status code. */
-export const SESSION_EXPIRED = "Your session expired — sign in again to continue.";
+export const SESSION_EXPIRED = "Your session expired. Sign in again to continue.";

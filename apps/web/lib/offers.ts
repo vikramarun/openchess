@@ -10,6 +10,7 @@
 // the race for the first seat can take the next one instead of erroring.
 
 import { SESSION_EXPIRED } from "./authedFetch";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "./copy";
 
 export type OfferLike = {
   offer_id: string;
@@ -121,19 +122,19 @@ export function joinErrorMessage(status: number, opts: { botPlays: boolean }): s
     case 401:
       return SESSION_EXPIRED;
     case 503:
-      return "The server is in maintenance — no new games can be started right now.";
+      return MAINTENANCE_MSG;
     case 502:
-      return "Couldn't lock stakes on-chain — check both players have deposited enough.";
+      return "Couldn’t lock the stakes onchain. Check that both players have deposited enough.";
     case 424:
-      return "Your bot is offline — check the chess-client window.";
+      return BOT_OFFLINE_MSG;
     case 410:
-      return "That challenger's bot went offline — the offer is gone.";
+      return "That challenger’s bot went offline, so the offer is gone.";
     case 404:
     case 409:
       return opts.botPlays
-        ? "Couldn't join — your bot may already be in a game, or the seat was just taken."
-        : "Someone just took that challenge — the lobby will refresh.";
+        ? "Couldn’t join. Your bot may already be in a game, or the seat was just taken."
+        : "Someone just took that challenge. The lobby will refresh.";
     default:
-      return `Couldn't join (${status}).`;
+      return `Couldn’t join (${status}).`;
   }
 }

@@ -81,8 +81,8 @@ export function StakeConfirm({
   return (
     <div className="modal-overlay">
       <div className="modal confirm-modal" role="dialog" aria-modal="true" aria-label="Confirm the game">
-        <div className="confirm-hero">{wagered ? "💰" : "♟"}</div>
-        <div className="modal-title">{wagered ? "Money on the board" : "Game on"}</div>
+        <div className="confirm-hero">{wagered ? "⚔" : "♟"}</div>
+        <div className="modal-title">{wagered ? "Stakes are locked" : "Game on"}</div>
 
         <div className="confirm-facts">
           <div>
@@ -109,17 +109,17 @@ export function StakeConfirm({
           <div className="stake-callout confirm-stake">
             <div className="confirm-stake-amount">{fmtUsdc(stake)} USDC</div>
             <div>
-              Win and you take <b>+{fmtUsdc(profitForStake(stake))} USDC</b> — their stake, less a
-              1% fee. A draw returns yours.
+              Win and you take <b>+{fmtUsdc(profitForStake(stake))} USDC</b>. That’s their
+              stake, less a 1% fee. A draw returns yours.
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-              Rated · already locked in the escrow contract, settled on-chain when the game ends.
+              Rated. Locked in the escrow contract, settled onchain when the game ends.
             </div>
           </div>
         ) : (
           <div className="stake-callout confirm-stake">
             <div className="confirm-stake-amount">Free</div>
-            <div>Casual game — nothing staked, and your rating doesn’t move.</div>
+            <div>Casual game. Nothing staked and your rating doesn’t move.</div>
           </div>
         )}
 
@@ -137,17 +137,18 @@ export function StakeConfirm({
           <>
             <label className="confirm-auto">
               <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-              <span>Auto-accept from now on — skip this and jump straight in</span>
+              <span>Auto-accept from now on and skip this prompt</span>
             </label>
             <button className="primary modal-play" onClick={() => onAccept(auto)}>
-              {wagered ? "I’m in — play for it ⚔" : "Let’s play ♟"}
+              {wagered ? "Play for it ⚔" : "Let’s play ♟"}
             </button>
             <button className="modal-cancel muted" onClick={onDecline}>
               Not this one
             </button>
             <div className="muted confirm-countdown">
-              Both players have to accept. {left > 0 ? `${left}s left` : "Time’s up"} — after that
-              the game is called off{wagered ? " and your stake comes back" : ""}.
+              Both players have to accept. {left > 0 ? `${left}s left` : "Time’s up"}, and
+              after that the game is called off
+              {wagered ? " and your stake comes back" : ""}.
             </div>
           </>
         )}

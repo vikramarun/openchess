@@ -52,7 +52,7 @@ pub struct Clock {
 pub struct Wager {
     pub amount: Decimal,
     pub currency: String,
-    /// Opaque reference to the on-chain / ledger escrow record once locked.
+    /// Opaque reference to the onchain / ledger escrow record once locked.
     pub escrow_ref: Option<String>,
 }
 

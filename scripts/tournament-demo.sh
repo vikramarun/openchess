@@ -5,7 +5,7 @@
 # round-by-round flow the server actually implements today (the old inline bash
 # version predated the round-by-round rebuild + organizer-auth on /start +
 # per-entrant token fetch, and no longer works). The Python harness covers both:
-#   Test A  settled tournament  — pool distributed on-chain by standings (65/25/10)
+#   Test A  settled tournament  — pool distributed onchain by standings (65/25/10)
 #   Test B  abandoned tournament — restart -> claimRefund recovers every buy-in
 #
 # Prereqs: anvil/forge/cast, psql + a Postgres at $DATABASE_URL with migrations
