@@ -1,20 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
 import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
 import { ensureBookLoaded } from "@/lib/browserBot";
-import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
+import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
+import { acquirePlayerEngine, fallbackEngine, releasePlayerEngine } from "@/lib/playerEngine";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
+import { toWhiteRelative, type EvalScore } from "@/lib/evalScore";
 import { fetchGame } from "@/lib/gameApi";
+import { useEval, useEvalPref } from "@/lib/useEval";
 import { usePlyNav } from "@/lib/usePlyNav";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
@@ -65,6 +70,7 @@ export function SeatGame({
   const nav = usePlyNav(frames.length - 1);
   const view = frames[nav.at];
   const [opponent, setOpponent] = useState<Opponent | null>(null);
+  const [engineSwapped, setEngineSwapped] = useState(false);
   const [status, setStatus] = useState("loading engine…");
   const [settleStatus, setSettleStatus] = useState<string | null>(null);
   // The seat's `ready` frame, parked until the player answers the prompt. The
@@ -80,6 +86,12 @@ export function SeatGame({
   const [promptDeadlineMs, setPromptDeadlineMs] = useState<number | null>(null);
   const [awaitingOpponent, setAwaitingOpponent] = useState(false);
   const [declined, setDeclined] = useState(false);
+  const [evalOn, setEvalOn] = useEvalPref();
+  // White-relative score per ply, filled in by our OWN seat engine as it thinks
+  // (lib/play.ts `onEval`). Keyed by ply rather than kept as a single "current"
+  // score so scrubbing back shows what the engine actually thought there instead
+  // of the live tip's number pinned next to an old position.
+  const [evalByPly, setEvalByPly] = useState<Record<number, EvalScore>>({});
   const onResultRef = useRef(onResult);
   onResultRef.current = onResult;
 
@@ -94,14 +106,25 @@ export function SeatGame({
     let cancelled = false;
     const cancelledFn = () => cancelled;
     let engine: BrowserEngine | null = null;
+    let released = true;
     let spectator: { close: () => void } | null = null;
     let seat: { close: () => void } | null = null;
     let finished = false;
 
     const run = async () => {
-      engine = new BrowserEngine();
-      await engine.whenReady();
-      if (cancelled) return;
+      setEvalByPly({}); // a new game starts from an empty eval history
+      // Normally already warm: the lobby prewarms before it stakes anything,
+      // precisely so a 7 MB download can't fail with money escrowed.
+      engine = await acquirePlayerEngine();
+      // Release here rather than relying on the cleanup below: if the effect
+      // was torn down DURING the await, cleanup has already run and saw
+      // `released` still true, so nothing would ever give this reference back
+      // and the engine would stay pinned for the life of the tab.
+      if (cancelled) {
+        releasePlayerEngine();
+        return;
+      }
+      released = false;
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
 
@@ -137,6 +160,18 @@ export function SeatGame({
               if (m.opponent) setOpponent(m.opponent);
             }
           },
+          // A dead worker must not forfeit a stake — play on with a fresh one.
+          onEngineFallback: async () => {
+            setEngineSwapped(true);
+            return fallbackEngine();
+          },
+          // Our seat's search, reused. The score is from the side to move's
+          // perspective (UCI), and the side to move at ply N is white when N is
+          // even — so the flip to white-relative needs no board lookup.
+          onEval: (info, ply) => {
+            const score = toWhiteRelative(info, ply % 2 === 0 ? "white" : "black");
+            setEvalByPly((prev) => ({ ...prev, [ply]: score }));
+          },
           // Resolved by the modal below. Skipped entirely when the player has
           // opted out, so auto-accept costs nothing on the hot path.
           confirmStart:
@@ -161,7 +196,12 @@ export function SeatGame({
       cancelled = true;
       spectator?.close();
       seat?.close();
-      engine?.dispose();
+      // Release rather than dispose: the seat engine is shared and stays warm
+      // for a minute, so the next game doesn't re-download 7 MB.
+      if (!released) {
+        released = true;
+        releasePlayerEngine();
+      }
     };
   }, [gameId, token, applyFrame, confirmStakes]);
 
@@ -228,6 +268,69 @@ export function SeatGame({
   const myCaptured = color === "white" ? mat.whiteCaptured : mat.blackCaptured;
   const oppCaptured = color === "white" ? mat.blackCaptured : mat.whiteCaptured;
   const myEdge = color === "white" ? mat.advantage : -mat.advantage;
+  // Defaults to your own color at the bottom, which is what a seated player wants.
+  const { orientation, flip } = useFlip(color);
+
+  // Name-plates follow perspective, not color — the side you are looking from
+  // sits at the bottom, so flipping the board has to move them too.
+  const bar = (side: Side) =>
+    side === color ? (
+      <PlayerBar
+        color={color}
+        name="You"
+        clockMs={myClock}
+        active={live && turn === color}
+        captured={myCaptured}
+        edge={myEdge}
+      />
+    ) : (
+      <PlayerBar
+        color={oppColor}
+        name={opponent?.name ?? "Opponent"}
+        engine={opponent?.declared_engine}
+        clockMs={oppClock}
+        active={live && turn === oppColor}
+        captured={oppCaptured}
+        edge={-myEdge}
+      />
+    );
+
+  // Our seat's engine searches ONLY on our own turns, and not at all for a book
+  // move — with the default 16-ply book that would leave the bar blank for the
+  // whole opening. So the shared observer engine fills the gaps, gated on our
+  // engine being idle: it is a separate worker, but it only ever runs while our
+  // seat is NOT thinking, so it can't take CPU from the search whose move
+  // quality (and stake) is on the line.
+  const myTurn = live && turn === color;
+  const observer = useEval(view.fen, evalOn && !myTurn);
+  // The viewed ply is read through a ref so this fires ONLY when a score
+  // arrives, never when the viewer moves. useEval deliberately holds the last
+  // position's score until the new one reports, so re-running on `nav.at` would
+  // file the ply you just left under the ply you just opened.
+  const atRef = useRef(nav.at);
+  atRef.current = nav.at;
+  useEffect(() => {
+    const s = observer.score;
+    if (!s) return;
+    const ply = atRef.current;
+    // Our own search goes far deeper than the observer's capped one, so the
+    // deeper score for a ply wins regardless of which engine produced it.
+    setEvalByPly((prev) =>
+      prev[ply] && prev[ply].depth >= s.depth ? prev : { ...prev, [ply]: s },
+    );
+  }, [observer.score]);
+
+  // Both sources land in the same per-ply record, so the bar reads from one
+  // place. Gaps remain possible (a book move nobody looked at), and there the
+  // most recent earlier score carries forward rather than snapping to level.
+  const viewedEval = useMemo(() => {
+    for (let p = nav.at; p >= 0; p--) {
+      const s = evalByPly[p];
+      if (s) return s;
+    }
+    return null;
+  }, [evalByPly, nav.at]);
+  const evalThinking = myTurn || observer.thinking;
 
   // Memoised: StakeConfirm's auto-decline effect lists onDecline as a
   // dependency, and a fresh identity each render would re-run it every render.
@@ -261,29 +364,18 @@ export function SeatGame({
         />
       )}
       <div className="board-col">
-        <PlayerBar
-          color={oppColor}
-          name={opponent?.name ?? "Opponent"}
-          engine={opponent?.declared_engine}
-          clockMs={oppClock}
-          active={live && turn === oppColor}
-          captured={oppCaptured}
-          edge={-myEdge}
-        />
+        {bar(other(orientation))}
         <Chessboard
           fen={view.fen}
-          orientation={color}
+          orientation={orientation}
           lastMove={lastMoveFromUci(view.lastUci)}
           check={view.check}
+          onFlip={flip}
+          showEval={evalOn}
+          evalScore={viewedEval}
+          evalThinking={evalThinking}
         />
-        <PlayerBar
-          color={color}
-          name="You"
-          clockMs={myClock}
-          active={live && turn === color}
-          captured={myCaptured}
-          edge={myEdge}
-        />
+        {bar(orientation)}
         {nav.total > 0 && (
           <MoveNav
             at={nav.at}
@@ -321,6 +413,16 @@ export function SeatGame({
           <div className="muted" style={{ marginTop: 8 }}>
             Status: {status}
           </div>
+          {engineSwapped && (
+            <div className="muted" style={{ marginTop: 6, fontSize: 13, color: "var(--danger)" }}>
+              Your engine stopped responding — this game is being played by a fresh Stockfish 18.
+              Your settings still apply from the next game.
+            </div>
+          )}
+          {/* No `failed` here on purpose: if the observer engine won't load, the
+              seat's own search still feeds the bar, so there is nothing for the
+              player to act on. */}
+          <EvalToggle on={evalOn} onChange={setEvalOn} note="· from your engine's own search" />
         </div>
 
         {declined && !result && (

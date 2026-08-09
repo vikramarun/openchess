@@ -1,4 +1,4 @@
-// How the engine wrapper routes `bestmove`.
+// How the engine wrapper routes `bestmove`, and the search scores beside it.
 //
 // The engine answers exactly one `bestmove` per `go`, in order. If those lines
 // are broadcast to every waiter — as they were — then two searches that overlap
@@ -6,6 +6,10 @@
 // previous position: illegal, rejected by the server, and (before lib/uci.ts)
 // resigned over. Searches overlap whenever a caller stops waiting for one, which
 // is exactly what the desync-recovery path in lib/play.ts does.
+//
+// `onInfo` (which drives a playing seat's eval bar) rides the same overlap, so
+// it needs the same routing: scores belong to the search that is actually
+// running, and must stop reaching a caller whose search has ended.
 export {};
 
 import { BrowserEngine } from "../lib/engine";
@@ -75,6 +79,47 @@ async function main() {
   worker.emit("bestmove c2c3");
   await settle();
   check("a fresh search gets its own answer", third, "c2c3");
+
+  // --- search scores (onInfo), which a playing seat's eval bar reads ---
+
+  // The scores of a search reach the caller that asked for that search.
+  const seenA: number[] = [];
+  const searchA = engine.bestMove(["d2d4"], 100, (i) => seenA.push(i.depth));
+  await settle();
+  worker.emit("info depth 5 score cp 20 pv d7d5");
+  check("onInfo receives the search's scores", seenA, [5]);
+
+  // A second search overlapping the first: the engine is still working on A, so
+  // these scores are A's. Feeding them to B would put a number on B's bar for a
+  // position B is not looking at — the score-shaped version of the crossed
+  // bestmove above.
+  const seenB: number[] = [];
+  const searchB = engine.bestMove(["d2d4", "d7d5"], 100, (i) => seenB.push(i.depth));
+  await settle();
+  worker.emit("info depth 6 score cp 25 pv c2c4");
+  check("scores go to the running search, not the queued one", seenA, [5, 6]);
+  check("the queued search hears nothing yet", seenB, []);
+
+  worker.emit("bestmove c2c4");
+  await settle();
+  check("the finished search's bestmove still resolves", await searchA, "c2c4");
+
+  // A is done, so B is the running search now.
+  worker.emit("info depth 7 score cp 30 pv g1f3");
+  check("the next search picks up its own scores", seenB, [7]);
+  check("and the finished one hears nothing more", seenA, [5, 6]);
+
+  worker.emit("bestmove g1f3");
+  await settle();
+  check("second search resolves", await searchB, "g1f3");
+
+  // Detached for good: a later search with no onInfo must not resurrect either.
+  const searchC = engine.bestMove(["a2a3"], 100);
+  await settle();
+  worker.emit("info depth 9 score cp 5 pv a7a6");
+  worker.emit("bestmove a7a6");
+  await searchC;
+  check("a finished search's listener is gone", [seenA, seenB], [[5, 6], [7]]);
 
   // stopSearch is just `stop` — the engine still answers with a bestmove, which
   // is what leaves the worker clean for the next `position`.

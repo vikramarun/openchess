@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
-import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
 import { ensureBookLoaded } from "@/lib/browserBot";
+import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
 import { DEFAULT_TC, TIME_CONTROLS, tcByLabel, type TimeControl } from "@/lib/timeControls";
+import { useEval, useEvalPref } from "@/lib/useEval";
 import { usePlyNav } from "@/lib/usePlyNav";
 import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
 import { shortAddr } from "@/lib/verify";
@@ -24,6 +27,12 @@ export default function PlayPage() {
   const [status, setStatus] = useState("loading engines…");
   const [nonce, setNonce] = useState(0); // bump to start a new game
   const [tc, setTc] = useState<TimeControl | null>(null); // resolved on mount
+  // Nobody at this board is playing for anything: both seats are engines and the
+  // viewer is a spectator, so the eval bar belongs here for the same reason it
+  // does on /game/[id]. It runs on the shared singleton engine (a third worker
+  // beside the two seats), which is why it stays opt-outable.
+  const [evalOn, setEvalOn] = useEvalPref();
+  const engineEval = useEval(view.fen, evalOn);
 
   // Resolve the time control from the ?tc= query param (set by the homepage),
   // defaulting to 3+0. Done in an effect so SSR/CSR markup matches.
@@ -122,30 +131,38 @@ export default function PlayPage() {
   // follow the ply you're viewing.
   const turn = sideToMoveFromFen(fen);
   const mat = material(view.fen);
+  const { orientation, flip } = useFlip("white");
+
+  // Name-plates are positioned by perspective, not by color: the side you are
+  // looking from sits at the bottom. Flipping the board has to move them too.
+  const bar = (side: Side) => (
+    <PlayerBar
+      color={side}
+      name="Stockfish"
+      engine="in browser"
+      clockMs={side === "white" ? clock?.white_ms : clock?.black_ms}
+      active={live && turn === side}
+      captured={side === "white" ? mat.whiteCaptured : mat.blackCaptured}
+      edge={side === "white" ? mat.advantage : -mat.advantage}
+    />
+  );
 
   return (
     <div className="container">
       <div className="game-wrap">
         <div className="board-col">
-          <PlayerBar
-            color="black"
-            name="Stockfish"
-            engine="in browser"
-            clockMs={clock?.black_ms}
-            active={live && turn === "black"}
-            captured={mat.blackCaptured}
-            edge={-mat.advantage}
+          {bar(other(orientation))}
+          <Chessboard
+            fen={view.fen}
+            orientation={orientation}
+            lastMove={lastMoveFromUci(view.lastUci)}
+            check={view.check}
+            onFlip={flip}
+            showEval={evalOn && !engineEval.failed}
+            evalScore={engineEval.score}
+            evalThinking={engineEval.thinking}
           />
-          <Chessboard fen={view.fen} lastMove={lastMoveFromUci(view.lastUci)} check={view.check} />
-          <PlayerBar
-            color="white"
-            name="Stockfish"
-            engine="in browser"
-            clockMs={clock?.white_ms}
-            active={live && turn === "white"}
-            captured={mat.whiteCaptured}
-            edge={mat.advantage}
-          />
+          {bar(orientation)}
           {nav.total > 0 && (
             <MoveNav
               at={nav.at}
@@ -185,6 +202,12 @@ export default function PlayPage() {
             <div className="muted" style={{ marginTop: 8 }}>
               Status: {status}
             </div>
+            <EvalToggle
+              on={evalOn}
+              onChange={setEvalOn}
+              loading={engineEval.loading}
+              failed={engineEval.failed}
+            />
           </div>
 
           {result && (

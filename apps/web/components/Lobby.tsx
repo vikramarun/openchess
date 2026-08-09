@@ -8,7 +8,8 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { shortAddress } from "@/lib/address";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
-import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
+import { browserSeat, ensureRepertoireLoaded } from "@/lib/browserBot";
+import { prewarmPlayerEngine } from "@/lib/playerEngine";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
@@ -68,16 +69,6 @@ type Pending = {
   initialSecs: number;
   incrementSecs: number;
 };
-
-/** Offer body for a browser-driven seat: the user's configured bot name +
- *  engine label, declared to opponents (unverified). */
-function browserSeat(): { name?: string; engine: string } {
-  const cfg = getBrowserBotConfig();
-  return {
-    ...(cfg.name.trim() ? { name: cfg.name.trim() } : {}),
-    engine: browserEngineLabel(),
-  };
-}
 
 /** One seat's display: name if declared, else shortened wallet, else fallback. */
 const seatLabel = (name: string | null, addr: string | null, fallback: string) =>
@@ -208,6 +199,21 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
       stakeBase = amt.toString();
     }
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
+    // Prove the engine works BEFORE any money is committed. Building it after
+    // the offer is accepted means a failed 7 MB download forfeits an escrowed
+    // stake through the server's never-started reap — and nothing about that
+    // failure is the player's fault. A browser seat with no working engine
+    // simply must not create an offer.
+    if (!botPlays) {
+      try {
+        setCreating(true);
+        await prewarmPlayerEngine();
+        await ensureRepertoireLoaded();
+      } catch {
+        setCreating(false);
+        return setErr("Your engine couldn't load — nothing was staked. Check your connection and try again.");
+      }
+    }
     setCreating(true);
     try {
       const r = await authedFetch(`${SERVER_HTTP}/park/offers`, {
@@ -254,6 +260,15 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
     const wagered = !!o.stake;
     if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
+    if (!botPlays) {
+      // Same gate on the accept side: accepting locks stakes immediately.
+      try {
+        await prewarmPlayerEngine();
+        await ensureRepertoireLoaded();
+      } catch {
+        return setErr("Your engine couldn't load — nothing was staked. Check your connection and try again.");
+      }
+    }
     try {
       // A row can stand for several identical seats (the house bot posts one
       // per concurrent autopilot), so losing the race for the first is not a

@@ -4,10 +4,13 @@
 // This is a wallet-signing money app, so it ships a Content-Security-Policy and
 // the standard hardening headers. The CSP is scoped to exactly the origins the
 // app talks to: the game server (env), Base's default RPCs (wagmi/RainbowKit),
-// WalletConnect's relay/explorer, and the jsDelivr CDN that serves chessground's
-// CSS (loaded with SRI in app/layout.tsx). `frame-ancestors 'none'` +
+// and WalletConnect's relay/explorer. `frame-ancestors 'none'` +
 // X-Frame-Options block clickjacking of the Deposit/Withdraw and Finish-sign-in
 // buttons.
+//
+// `style-src` deliberately has no CDN entry: chessground's CSS used to be
+// loaded from jsDelivr with SRI, and is now vendored into app/ instead, so
+// there is one less third-party origin and no SRI hashes to re-pin on a bump.
 const isProd = process.env.NODE_ENV === "production";
 const SERVER_HTTP = process.env.NEXT_PUBLIC_SERVER_HTTP || "http://127.0.0.1:8080";
 const SERVER_WS = process.env.NEXT_PUBLIC_SERVER_WS || "ws://127.0.0.1:8080";
@@ -39,7 +42,11 @@ const connectSrc = [
 // policy. React Refresh (HMR) additionally needs 'unsafe-eval' — dev only.
 const scriptSrc = [
   "'self'",
-  "'unsafe-inline'", // Next.js injects inline bootstrap/hydration scripts (no nonce middleware)
+  // Next.js injects inline bootstrap/hydration scripts (no nonce middleware).
+  // app/layout.tsx also inlines the board-theme bootstrap here, which has to run
+  // before the first paint — moving to a nonce means giving that script one too,
+  // or every navigation flashes the default board.
+  "'unsafe-inline'",
   "'wasm-unsafe-eval'",
   ...(isProd ? [] : ["'unsafe-eval'"]),
 ].join(" ");
@@ -51,7 +58,8 @@ const csp = [
   "frame-ancestors 'none'",
   "form-action 'self'",
   `script-src ${scriptSrc}`,
-  "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline'",
+  // 'self' also covers the vendored piece SVGs under public/piece/.
   "img-src 'self' data: blob: https:", // ENS/wallet avatars (IPFS gateways, arbitrary https)
   "font-src 'self' data:",
   "worker-src 'self' blob:", // Stockfish web worker
@@ -70,10 +78,23 @@ const securityHeaders = [
   },
 ];
 
+// The engine is 7 MB and the books ~1 MB, and Next serves public/ with
+// `max-age=0, must-revalidate` — so every cold page paid a round trip for
+// each of them. Both are safe to freeze because both are addressed by a
+// changing name: the engine directory carries a content hash
+// (lib/engine.ts), and book requests carry a version query (lib/books.ts).
+// Change the content without changing the name and clients keep the old copy
+// for a year, so do not.
+const immutable = [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }];
+
 const nextConfig = {
   reactStrictMode: true,
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    return [
+      { source: "/:path*", headers: securityHeaders },
+      { source: "/engines/:path*", headers: immutable },
+      { source: "/books/:path*", headers: immutable },
+    ];
   },
   webpack: (config) => {
     // wagmi / RainbowKit / WalletConnect pull in optional Node-only deps

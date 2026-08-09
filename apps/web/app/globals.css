@@ -723,6 +723,125 @@ pre {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* Board plus the controls under it. The controls live outside .board-row so the
+ * eval bar keeps stretching to exactly the board's height. */
+.board-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.board-tools {
+  display: flex;
+  justify-content: flex-end;
+}
+.flip-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.flip-btn:hover {
+  color: var(--text-strong);
+  border-color: var(--accent);
+}
+/* Coordinates off. chessground only builds its coord elements at construction,
+ * so hiding them here is what keeps this toggle from rebuilding the board. */
+.board-wrap[data-coords="off"] coords {
+  display: none;
+}
+
+/* ---------- tabs (Customize page) ---------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 0;
+}
+.tab:hover {
+  color: var(--text-strong);
+}
+.tab.on {
+  color: var(--text-strong);
+  border-bottom-color: var(--accent);
+}
+
+/* ---------- board & piece settings ---------- */
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 380px) 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.settings-preview {
+  position: sticky;
+  top: 16px;
+}
+.settings-controls {
+  display: grid;
+  gap: 16px;
+}
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.swatch {
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  overflow: hidden;
+  background-color: transparent;
+}
+.swatch:hover {
+  border-color: var(--muted);
+}
+.swatch.on {
+  border-color: var(--accent);
+}
+.board-swatch {
+  width: 46px;
+  height: 46px;
+  background-size: cover;
+}
+.piece-swatch {
+  display: flex;
+  width: 72px;
+  height: 40px;
+}
+.piece-swatch span {
+  flex: 1 1 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.piece-swatch img {
+  width: 30px;
+  height: 30px;
+}
+
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-preview {
+    position: static;
+    max-width: 380px;
+  }
+}
 /* ---------- evaluation bar ---------- */
 .eval-bar {
   position: relative;
@@ -1575,5 +1694,157 @@ select:focus-visible,
   .game-wrap {
     /* let the board shrink below 320 so it never forces horizontal scroll */
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- opening repertoire (profile) ---------- */
+.rep-presets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.rep-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  transition: border-color 0.12s, background 0.12s;
+}
+.rep-preset:hover {
+  border-color: var(--accent);
+}
+.rep-preset.active {
+  border-color: var(--accent);
+  background: #62992418;
+}
+.rep-preset .rp-name {
+  font-weight: 700;
+  color: var(--text-strong);
+  font-size: 14px;
+}
+.rep-preset .rp-blurb {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.rep-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+}
+.rep-slot {
+  display: grid;
+  gap: 4px;
+}
+
+/* ---------- book tree (repertoire preview) ---------- */
+.book-tree {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.book-tree-board {
+  width: 240px;
+  max-width: 100%;
+}
+.book-tree-lines {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.book-mainline,
+.book-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.book-crumbs {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.book-move {
+  padding: 2px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.book-move:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+.book-move:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.book-move.played {
+  color: var(--accent);
+}
+.book-options {
+  display: grid;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.book-option {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 42px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.book-option:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+.book-option .bo-san {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.book-option .bo-bar {
+  display: block;
+  height: 8px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.book-option .bo-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.book-option .bo-pct {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+@media (max-width: 720px) {
+  .book-tree {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .book-tree-board {
+    width: min(240px, 100%);
   }
 }
