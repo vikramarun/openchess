@@ -59,6 +59,14 @@ wallet.
   AppState, `matchmaking.rs` Lobby, `auth.rs`, `agents.rs`, `ratelimit.rs`). Run
   exactly one Fly machine (`--ha=false` + `fly scale count 1`). Making it
   multi-node is the next task — see [HANDOFF.md](HANDOFF.md).
+  One exception is now durable: an **`open` tournament is rehydrated from
+  Postgres on boot** (`recover_tournaments`), because a restart used to delete
+  it from the lobby while its on-chain pool stayed open and entrants' buy-ins
+  stayed locked. Anything you add to `Tournament` that an open tournament needs
+  in order to be *startable* (organizer, entrants, bot bindings, terms) has to
+  be persisted too, or the restart quietly comes back wrong instead of missing.
+  `running` tournaments are still abandoned on purpose — their rooms are gone
+  and partial standings must never reach settlement.
 - **Rate limiting is per-IP, keyed on `Fly-Client-IP`.** Behind a different
   proxy the fallback header is client-forgeable, so pin header trust to the
   deploy. Limits are env-tunable (`RL_*`); a new HTTP route is unthrottled
@@ -143,6 +151,14 @@ wallet.
   per game. **Tournaments dispatch round-by-round** (circle method,
   `matchmaking.rs`), so a single-agent bot only ever plays one game at once; an
   offline bot at a round's dispatch forfeits that pairing.
+- **A tournament round dispatches on the server's schedule, not the player's.**
+  Each round's rooms are created the instant the previous round resolves, and a
+  room reaps after `START_WINDOW` (60s) — so a browser entrant who isn't at the
+  board forfeits, then forfeits every round after it. The tournament page
+  therefore **opens the board itself** when a round it's entered in dispatches
+  (`app/tournament/page.tsx`, the `leftRound` effect); backing out keeps you out
+  of that round only. Anything that reintroduces a "click here to play this
+  round" gate re-breaks the mode.
 - **Forfeit vs rating:** a no-show/forfeit loses the stake or buy-in, but a game
   is **rated (Elo) only if both sides made ≥1 move** (`ply >= 2`, guarded in
   `room.rs finish()`) — never ding rating for a game a player didn't play.
