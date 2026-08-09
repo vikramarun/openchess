@@ -9,6 +9,8 @@ import { SITE_URL } from "@/lib/brand";
 export default function sitemap(): MetadataRoute.Sitemap {
   const routes = [
     { path: "/", priority: 1 },
+    // The crawl path to individual games and profiles, per the note above.
+    { path: "/lobby", priority: 0.9 },
     { path: "/gauntlet", priority: 0.8 },
     { path: "/tournament", priority: 0.8 },
     { path: "/play", priority: 0.6 },

@@ -102,7 +102,7 @@ cg-board square.check {
  * which only line up at whatever board size they were measured against. lichess
  * overrides them in its own stylesheet; we vendored the base and nothing else,
  * so we inherited the raw offsets. On the 380px settings preview that put the
- * whole file strip 24px right of where it belongs (every letter centred on the
+ * whole file strip 24px right of where it belongs (every letter centered on the
  * boundary with the file to its LEFT, and `h` hanging off the board), sitting
  * 4px BELOW the last rank on the page background rather than on it, while every
  * rank digit rode up into the square above.

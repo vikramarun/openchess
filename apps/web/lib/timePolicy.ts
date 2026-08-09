@@ -20,7 +20,7 @@ export const MAX_CLOCK_FRACTION = 0.25;
 export const PANIC_MS = 5000;
 
 export type TimeMode =
-  /** Stockfish allocates from the real clock (today's behaviour). */
+  /** Stockfish allocates from the real clock (today's behavior). */
   | "engine"
   /** Same, but with a constant `movestogo` — lower thinks longer per move. */
   | "pace"

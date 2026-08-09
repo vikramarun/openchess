@@ -82,7 +82,7 @@ export function groupOffers<T extends OfferLike>(offers: T[]): OfferGroup<T>[] {
  *  free offers.
  *
  *  Still free offers only, and still `null` when the server publishes no house
- *  wallet: a miss downgrades the lobby's play-now button to its labelled
+ *  wallet: a miss downgrades the lobby's play-now button to its labeled
  *  fallback, and can never seat anyone at a board the button didn't describe. */
 export function houseOfferGroup<T extends OfferLike>(
   groups: OfferGroup<T>[],
@@ -105,10 +105,10 @@ export function houseOfferGroup<T extends OfferLike>(
 
 /** The side to seat a player on, from whatever the server sent.
  *
- *  Colour is drawn per game now (server-side `coin_flip`), so neither posting
+ *  Color is drawn per game now (server-side `coin_flip`), so neither posting
  *  nor accepting implies a side and the value has to come off the wire. But by
  *  the time either lobby path reads it the GAME ALREADY EXISTS and, if staked,
- *  escrow is locked — so a missing or unrecognised colour must never stop us
+ *  escrow is locked — so a missing or unrecognised color must never stop us
  *  taking the seat. A seat that never attaches reaps as a forfeit and hands the
  *  opponent the whole stake (`room.rs reap_forfeit_winner`), whereas a seat
  *  shown the wrong way round costs a flipped board, a mirrored clock and a

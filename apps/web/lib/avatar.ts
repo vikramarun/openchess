@@ -3,7 +3,7 @@
 import { authedFetch, SESSION_EXPIRED } from "./authedFetch";
 import { SERVER_HTTP } from "./config";
 
-/** Square the photo is normalised to before upload. The profile head renders it
+/** Square the photo is normalized to before upload. The profile head renders it
  *  at 72px, so 256 covers retina and a future larger rendering without storing
  *  a camera original. */
 export const AVATAR_PX = 256;
@@ -28,7 +28,7 @@ export function avatarUrl(address: string, version: string | null | undefined): 
   return `${SERVER_HTTP}/players/${seg}/avatar?v=${encodeURIComponent(version)}`;
 }
 
-/** Decode `file`, centre-crop it to a square, and re-encode it small.
+/** Decode `file`, center-crop it to a square, and re-encode it small.
  *
  *  Everything the server stores is produced here, which is why the server can
  *  cap the body so tightly: what arrives is always a 256px JPEG of tens of KB,

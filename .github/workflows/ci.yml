@@ -110,6 +110,15 @@ jobs:
           # row and seats a joiner at the wrong board; the walk is where a
           # lost race is told apart from a real failure.
           pnpm test:offers
+          # The three tournament-money suites arrived with the prize-pool work and
+          # were never listed here, so they existed and never ran — the exact hole
+          # this file warns about twice above. Prize splits that don't total the
+          # pool, a "0" buy-in read as truthy (which renders "0 USDC entry" and
+          # tags a free event Ranked), and a sponsor refund path are all silent
+          # in a build.
+          pnpm test:payouts
+          pnpm test:tourney
+          pnpm test:sponsor
           # Guards the two halves of the castling-notation trap: a king-takes-rook
           # move in the shipped book, or one reaching an engine, silently
           # truncates the engine's position, and every move it returns after
@@ -171,6 +180,15 @@ jobs:
           # you can click behind. Both are one-line CSS regressions that nothing
           # else here would see.
           pnpm test:layout
+          # Below 720px the bottom tab bar is the ONLY navigation (the header's
+          # .nav is display:none there), and "/player/0xabc".startsWith("/play")
+          # is true — so a bare prefix match lights "Engine" on every profile.
+          pnpm test:tabs
+          # The homepage reel is a scripted replay with no engine behind it. If
+          # its move list stops ending in mate, or the component ever reaches for
+          # lib/engine, the landing page silently costs every cold mobile visit a
+          # 7 MB wasm download.
+          pnpm test:demo
           # Sign-in depends on origins that appear in no Dynamic documentation —
           # the wallet list comes from a different domain than the API, and
           # MetaMask's mobile pairing needs its own relay socket. Dropping either

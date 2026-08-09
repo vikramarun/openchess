@@ -28,8 +28,8 @@ export default function ProfilePage() {
   const mounted = useMounted();
   return (
     <div className="container">
-      <div className="hero" style={{ paddingBottom: 8 }}>
-        <h1>Customize</h1>
+      <div className="page-head">
+        <h1 className="display d2">Customize</h1>
       </div>
       {mounted ? <ProfileClient /> : null}
     </div>

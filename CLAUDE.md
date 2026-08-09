@@ -25,13 +25,18 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 (cd apps/web && pnpm test:nav)     # move nav (following the live tip vs. parked on a ply)
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
+(cd apps/web && pnpm test:payouts) # a tournament's prize split adds up to the pool
+(cd apps/web && pnpm test:tourney) # buy-in vs free vs casual (a "0" buy-in is truthy)
+(cd apps/web && pnpm test:sponsor) # sponsoring a pool, and getting it back if the event dies
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
 (cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
-(cd apps/web && pnpm test:layout)  # header stays on screen/under the modal; coords stay on the board
+(cd apps/web && pnpm test:layout)  # header/tab bar stay put; coords stay on the board; no orphaned class
+(cd apps/web && pnpm test:tabs)    # mobile tab bar: which tab a route lights up
+(cd apps/web && pnpm test:demo)    # the homepage reel: still mates, still engine-free
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 (cd apps/web && pnpm test:username) # a username's shape, and what a player is called
 (cd apps/web && pnpm test:csp)     # the CSP origins sign-in depends on
@@ -75,9 +80,11 @@ crates/persistence   Postgres (sqlx) + migrations + settlement outbox
 crates/book-gen      dev tool: builds assets/house-book.bin (Polyglot) from a
                      SAN repertoire; not part of any deployed artifact
 contracts/           ChessEscrow.sol (Foundry): pooled balances + EIP-712 settlement
-apps/web             Next.js: lobby, in-browser Stockfish 18 (WASM/NNUE) + uploadable
+apps/web             Next.js: landing demo reel (lib/demoReel.ts) + quick play at /, browse at
+                     /lobby, in-browser Stockfish 18 (WASM/NNUE) + uploadable
                      Polyglot book (lib/polyglot.ts), wallet/SIWE, bot control, spectator, profiles,
-                     board/piece themes (lib/boardPrefs.ts + app/board.css)
+                     board/piece themes (lib/boardPrefs.ts + app/board.css),
+                     mobile tab bar (components/TabBar.tsx)
 ```
 
 ## Architecture in three sentences
@@ -130,15 +137,48 @@ wallet.
   `z-index: 40` is the other half: `.modal-overlay` (StakeConfirm, the
   time-control picker) is 50 and MUST keep covering the header, so raising the
   header above it turns the pre-game confirm into a dialog you can click behind.
-  The homepage also stands its hero + engine banner down while a board is
-  mounted (`Lobby`'s `onActiveChange` → `page.tsx`), which is what actually
-  brings the result banner back above the fold (235px, from 525px); sticky is
-  the backstop, and the only half that covers the pages with no lobby to stand
-  down (`/game/[id]`, gauntlet, tournament). Keep the hero in the SERVER render —
-  `Lobby` is client-only, so moving the `<h1>` inside it drops the landing
-  page's only heading out of the HTML. `pnpm test:layout` pins the two CSS
-  halves (sticky, and ranked under the overlay) by reading `globals.css`; the
-  React half — what `inGame` hides — is unpinned, since there's no DOM harness.
+  The homepage also stands its hero + demo reel + engine banner down while a
+  board is mounted (`Lobby`'s `onActiveChange` → `page.tsx`), which is what
+  actually brings the result banner back above the fold (235px, from 525px);
+  sticky is the backstop, and the only half that covers the pages with no lobby
+  to stand down (`/game/[id]`, gauntlet, tournament). Keep the hero in the
+  SERVER render — `Lobby` is client-only, so moving the `<h1>` inside it drops
+  the landing page's only heading out of the HTML. `pnpm test:layout` pins the
+  two CSS halves (sticky, and ranked under the overlay) by reading `globals.css`;
+  the React half — what `inGame` hides — is pinned instead by `pnpm test:demo`,
+  which greps `page.tsx` for `<HomeDemo>` inside the `!inGame` branch.
+- **Below 720px the bottom tab bar is the ONLY navigation.** The header's `.nav`
+  is `display: none` there and `components/TabBar.tsx` carries the five
+  destinations (it replaced a masked horizontal scroller whose last link sat
+  77px off the right edge at 375px). Three things it must keep. `.tabbar`'s
+  `z-index: 30` sits **under** the header's 40 — `.site-header` is sticky *with*
+  a z-index, so it is a stacking context and `.wallet-pop` (z-index 50) is
+  scoped inside it, meaning a bar above the header would paint over the bankroll
+  popover's Deposit button on a phone — and under `.modal-overlay`'s 50, or the
+  pre-game stake confirm gets five tappable links across its bottom edge. A
+  `position: fixed` bar takes no space in the flow, so `<body>` carries a
+  matching `padding-bottom` off the same `--tabbar-h` token, else the footer's
+  last line sits under it. And `activeTab()` must keep matching prefixes with a
+  trailing slash: `"/player/0xabc".startsWith("/play")` is true, so a bare
+  prefix lights "Engine" on every profile. `pnpm test:layout` pins the CSS,
+  `pnpm test:tabs` the routing.
+- **The landing page is a scripted demo, and it must never touch the engine.**
+  `/` opens on a coin flip and a canned 33-ply game that ends in mate
+  (`lib/demoReel.ts` → `components/HomeDemo.tsx`). Every frame is derived by
+  replaying SAN with chessops at module init, and the eval bar is fed canned
+  numbers — so a real `<Chessboard>`/`<EvalBar>` render with **zero wasm**. Reach
+  for `lib/engine`, `useEval` or `engineContext` from there and every cold mobile
+  visit silently pays a 7 MB download; `pnpm test:demo` greps for exactly that.
+  The reel stops three ways (unmounted by `inGame`, hidden tab, scrolled out of
+  view), and `.demo-payout` is rendered from the first paint at
+  `visibility: hidden` so it reserves its own height — it appears ~28s in, and
+  CLS accumulates over a page's whole lifetime, so a min-height guess that
+  under-reserves at some viewport would shift the page long after it looked
+  settled. The browse surfaces it displaced (open challenges, live now,
+  leaderboard, mode cards) live at **`/lobby`**, which renders the same
+  `<Lobby view="browse">` — one component owns the live-game session for both
+  routes, because both can open a board and splitting that would duplicate the
+  money path.
 - **Sign-in is Dynamic, and it has four traps.** Dynamic
   (`@dynamic-labs/*`, `app/providers.tsx`) replaced RainbowKit so email/Google
   logins provision an embedded MPC wallet. That wallet is an ordinary EOA whose

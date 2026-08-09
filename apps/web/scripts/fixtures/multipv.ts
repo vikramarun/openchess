@@ -23,7 +23,7 @@
 //     `c1g5` is index 1 at depth 10, `c1e3` is index 1 at depth 18. Keying a
 //     collection by index would merge different moves' scores; keying by
 //     pv[0] is what makes it correct.
-//  3. Stale lines are labelled exactly ONE ply back. In the final burst index 1
+//  3. Stale lines are labeled exactly ONE ply back. In the final burst index 1
 //     is depth 19 while indices 2-4 are depth 18 — Stockfish reprints
 //     un-re-searched lines at `depth - 1` with their previous score, so
 //     depth-inconsistency never has to be guessed at.

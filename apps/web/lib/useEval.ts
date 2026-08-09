@@ -107,7 +107,7 @@ export function useEval(fen: string | null, enabled: boolean): EvalState {
     // Debounce: holding ◀/▶ through a move list would otherwise start (and
     // immediately supersede) a search per keypress.
     const timer = setTimeout(() => {
-      handle = engine.analyse(fen, {
+      handle = engine.analyze(fen, {
         onInfo: (info) => {
           if (live) setScore(toWhiteRelative(info, turn));
         },

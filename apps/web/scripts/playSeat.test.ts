@@ -50,7 +50,7 @@ async function main() {
   // Dynamic import: the fake WebSocket above must be installed first.
   ({ playSeat } = await import("../lib/play"));
 
-  // --- no gate: unchanged behaviour -------------------------------------------
+  // --- no gate: unchanged behavior -------------------------------------------
   {
     const ws = await seatAfterWelcome();
     check("without a gate, the seat readies immediately", types(ws), ["hello", "ready"]);
