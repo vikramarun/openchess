@@ -120,6 +120,10 @@
   --header-h: 56px;
   --tabbar-h: 58px;
   --content-w: 1040px;
+  /* The eval bar's column: its own width plus `.board-row`'s gap. Anything
+     centring on the SQUARES rather than the whole board row has to discount it
+     (see .demo-scrim). Keep in step with `.eval-bar` and `.board-row`. */
+  --eval-col: 30px;
 
   /* ---------- mono ---------- */
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
@@ -518,21 +522,6 @@ a:hover {
 .demo-board {
   position: relative;
 }
-.demo-chip {
-  position: absolute;
-  top: var(--s-2);
-  left: var(--s-2);
-  z-index: 3;
-  padding: 3px 8px;
-  border-radius: var(--r-pill);
-  background: #12110fd9;
-  border: 1px solid var(--border-strong);
-  color: var(--text-strong);
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--tr-wide);
-}
 /* The payout card takes the slot the engine banner used to hold, in the pitch
    column beside the board. It is rendered from the first paint at
    `visibility: hidden` so it reserves its own height: it appears ~28s in, CLS
@@ -599,6 +588,12 @@ a:hover {
 }
 
 /* ---------- the coin ---------- */
+/* The scrim covers the whole board row — eval bar included, since dimming
+   everything but a 22px strip would look like a mistake — but its CONTENTS are
+   centred on the squares. `.demo-board` wraps `.board-row`, whose first child is
+   the eval bar, so without this the coin sits half a bar left of the board's
+   true middle. --eval-col is that bar plus the row's gap; keep it in step with
+   `.eval-bar`'s width and `.board-row`'s gap. */
 .demo-scrim {
   position: absolute;
   inset: 0;
@@ -608,6 +603,7 @@ a:hover {
   align-items: center;
   justify-content: center;
   gap: var(--s-5);
+  padding-left: var(--eval-col);
   background: #12110fcc;
   border-radius: var(--radius);
   perspective: 700px;

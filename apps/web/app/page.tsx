@@ -106,14 +106,12 @@ export default function Home() {
               </div>
             </div>
           </div>
-          {/* Both of these used to sit up in the hero — the engine-status banner
-              and the reel's disclaimer. They are footnotes, not the pitch, and
-              the board still carries its own DEMO badge in every frame. */}
+          {/* What the engine-status banner in the hero used to say, reduced to
+              the part that is a selling point rather than a status readout. */}
           <p className="how-note muted">
-            The board above is a scripted demo, not a real game or a real payout — a real one
-            can go either way. The engine is Stockfish,{" "}
-            <span className="free">running in your browser for free</span>: nothing downloads
-            until you play or turn on the eval bar.
+            The engine is Stockfish,{" "}
+            <span className="free">running in your browser for free</span>, entirely
+            customizable to you.
           </p>
         </div>
       )}

@@ -146,10 +146,6 @@ export function HomeDemo({ onFinishedChange }: { onFinishedChange?: (done: boole
         {(state.phase === "coin" || state.phase === "call") && (
           <CoinFlip lands={DEMO_COIN} called={state.phase === "call"} />
         )}
-        {/* Never fades, never animates, present in the server render: this is a
-            money app, and a board that looks like a live game has to say that it
-            isn't one in every single frame. */}
-        <span className="demo-chip">Demo</span>
       </div>
 
       <PlayerBar
@@ -179,15 +175,15 @@ export function DemoResult({ finished }: { finished: boolean }) {
   return (
     <div className={`demo-payout${finished ? " on" : ""}`}>
       <div className="demo-payout-top">
-        <span className="demo-payout-head">
-          <span className="player-dot white" aria-hidden /> Checkmate — White wins
-        </span>
+        <span className="demo-payout-head">Doubled up!</span>
         <span className="demo-payout-amt">+{fmtUsdc(profitForStake(DEMO_STAKE))} USDC</span>
       </div>
       <div className="demo-payout-math">
-        {/* fmtUsdc trims trailing zeros, so this is "5" and not "5.00" — without
-            the unit it reads as a bare number. */}
-        Your {fmtUsdc(DEMO_STAKE)} USDC stake back, plus theirs, less the 1% fee.
+        {/* The figure above is the real `profitForStake`, so it already carries
+            the 1% fee even though this line doesn't spell it out — which is why
+            it can't be a hardcoded string. fmtUsdc also trims trailing zeros, so
+            the stake reads "5" and needs its unit. */}
+        You won the pot! Your {fmtUsdc(DEMO_STAKE)} USDC stake back, plus theirs.
       </div>
     </div>
   );

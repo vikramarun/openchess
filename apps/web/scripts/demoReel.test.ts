@@ -21,6 +21,7 @@ import { Chess } from "chessops/chess";
 import { parseSan } from "chessops/san";
 
 import {
+  DEMO_END,
   DEMO_FRAMES,
   DEMO_NOTES,
   DEMO_SAN,
@@ -94,32 +95,43 @@ check(
 );
 
 // --- the phase machine ---
-// Driven to exhaustion: it has to reach "hold" and stop, or the reel either
-// never settles or loops forever on a landing page.
+// The live reel loops forever by design, so what has to hold is that every lap
+// is a COMPLETE one — coin, the whole game through mate, result, coin again —
+// and that no beat in it is infinite. A machine that quietly stopped advancing
+// would look identical to a finished game on a landing page nobody reloads.
 let s: DemoState = DEMO_START;
 const seen: DemoState[] = [s];
-let steps = 0;
-while (steps < 500) {
+for (let i = 0; i < 200; i++) {
   const n = nextBeat(s);
   if (!n) break;
   s = n;
   seen.push(s);
-  steps++;
 }
-check("the reel terminates", steps < 500, `still running after ${steps} beats`);
-check("it terminates in hold", s.phase === "hold", `ended in ${s.phase}`);
-check("hold is a dead end", nextBeat(s) === null);
+check("the live reel never stops", seen.length === 201, `stalled after ${seen.length} beats`);
 check(
-  "it plays every ply on the way",
+  "it reaches the final ply",
   seen.some((x) => x.phase === "play" && x.ply === DEMO_TOTAL),
-  "never reached the final ply",
+  "never reached mate",
 );
 check(
-  "every beat before hold has a finite duration",
-  seen.slice(0, -1).every((x) => Number.isFinite(beatMs(x))),
-  "an intermediate beat would never advance",
+  "it shows the result",
+  seen.some((x) => x.phase === "result"),
+  "never reached the payout",
 );
-check("hold waits forever", !Number.isFinite(beatMs(s)));
+check(
+  "it starts over from the coin",
+  seen.some((x, i) => x.phase === "result" && seen[i + 1]?.phase === "coin"),
+  "the result does not loop back",
+);
+check(
+  "no live beat is infinite",
+  seen.every((x) => Number.isFinite(beatMs(x))),
+  "a beat in the loop would never advance",
+);
+// `hold` is off the live path now — only reduced motion lands there, and it has
+// to be a still frame rather than a state the machine can be pushed out of.
+check("reduced motion's end state is a dead end", nextBeat(DEMO_END) === null);
+check("and it waits forever", !Number.isFinite(beatMs(DEMO_END)));
 
 // --- the component's two invariants ---
 const read = (p: string) => readFileSync(join(__dirname, "..", p), "utf8");
@@ -154,26 +166,21 @@ check(
   "reduced motion remounts the board rather than animating 33 plies at once",
   /key=\{reduced \? "static" : "reel"\}/.test(demo),
 );
-// Read from the RAW source: the point is that these are in the rendered output,
-// and a stripped copy would also pass if they only survived in a comment.
+// Read from the RAW source: the point is that this reaches the rendered output,
+// and a stripped copy would also pass if it only survived in a comment.
 //
-// Two halves, in two files. The badge is on the board itself and shows in every
-// frame, including the server render; the words moved down to the how-it-works
-// footnote when the hero was cut back. A demo board on a money product needs
-// both — the badge to catch someone who only glances, the sentence to say what
-// it actually is.
+// This is the LAST remaining signal that the board is not a live game. It had
+// two others — a Demo badge pinned to the board in every frame, and a sentence
+// under How stakes work — and both were removed on purpose, so the accessible
+// name is what is left. Removing it too leaves a board that plays itself next to
+// "You won the pot!" with nothing anywhere saying it is an illustration, which
+// on a product that settles real USDC is a claim rather than a decoration.
 check(
-  "the board carries a Demo badge in every frame",
-  demoRaw.includes('className="demo-chip"'),
-  "nothing on the board would say it isn't a live game",
+  "the demo is still named as one to assistive tech",
+  /aria-label="Demo[^"]*"/.test(demoRaw),
+  "no signal anywhere that this board is not a real game",
 );
-
 const page = read("app/page.tsx");
-check(
-  "the page says in words that the board is a demo",
-  /scripted demo/i.test(page) && /not a real game/i.test(page),
-  "the disclaimer that pairs with the badge is gone from app/page.tsx",
-);
 // The `inGame` ternary's else-arm runs from ") : (" to the start of the lobby
 // slot; <HomeDemo> has to be inside it.
 //

@@ -183,13 +183,12 @@ const BEAT = {
   mate: 1600,
   hold: 8000,
 };
-/** Plays once, then rests on the result.
+/** The reel runs forever: coin, game, result, coin again.
  *
- *  It looped twice when the result lived under the board. It sits in the pitch
- *  column now, right beside the call to action, so a second loop would clear
- *  that card and bring it back — churn next to the button the page is asking
- *  you to press. One complete story, then stillness. */
-const LOOPS = 1;
+ *  `hold` is still reachable, but only through `DEMO_END` — the reduced-motion
+ *  path jumps straight to it, and a state machine that loops is exactly what
+ *  reduced motion is asking us not to do. So `hold` is the still frame, and the
+ *  live reel never enters it. */
 
 /** How long to SIT in this state before advancing. */
 export function beatMs(s: DemoState): number {
@@ -221,9 +220,7 @@ export function nextBeat(s: DemoState): DemoState | null {
         ? { ...s, ply: s.ply + 1 }
         : { ...s, phase: "result" };
     case "result":
-      return s.loop + 1 < LOOPS
-        ? { phase: "coin", ply: 0, loop: s.loop + 1 }
-        : { ...s, phase: "hold" };
+      return { phase: "coin", ply: 0, loop: s.loop + 1 };
     case "hold":
       return null;
   }

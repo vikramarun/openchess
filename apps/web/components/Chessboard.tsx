@@ -82,7 +82,13 @@ export function Chessboard({
   useEffect(() => {
     api.current?.set({
       fen,
-      lastMove: (lastMove as Key[] | undefined) ?? undefined,
+      // `[]`, not `undefined`, when there is no last move. chessground's `set`
+      // merges a config, so an `undefined` field means "leave it alone" — a null
+      // lastMove would keep the PREVIOUS highlight lit. Visible wherever a board
+      // returns to a position with no last move: the homepage reel loops back to
+      // the start still wearing the highlight from the mate that ended the last
+      // lap, and scrubbing a replay to ply 0 leaves the same stale pair.
+      lastMove: (lastMove as Key[] | null) ?? [],
       check: check ?? undefined,
     });
   }, [fen, lastMove, check]);
