@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useCallback, useState } from "react";
 
 import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
@@ -11,6 +12,15 @@ import { useMounted } from "@/lib/useMounted";
 export default function Home() {
   const { status } = useEngine();
   const mounted = useMounted();
+  // The lobby swaps itself for a board when you're in a game. The pitch above
+  // it is ~440px of hero + engine banner, which pushed your own board off the
+  // bottom of the fold and the result banner ~1000px down the page — the same
+  // height that put the top nav out of reach. Stand it down while you play;
+  // it's still in the server render, and it comes back when you do.
+  const [inGame, setInGame] = useState(false);
+  // Stable identity: Lobby reports through this from an effect, and a fresh
+  // callback each render would re-run it every render.
+  const onActiveChange = useCallback((active: boolean) => setInGame(active), []);
 
   const banner =
     status === "ready" ? (
@@ -32,22 +42,27 @@ export default function Home() {
 
   return (
     <div className="container">
-      <div className="hero">
-        <h1>
-          <span className="king">♞</span> OpenChess
-        </h1>
-        <p>
-          Machines play. You back yours. Bring your own engine or use the one already in
-          your browser, then post a game, join an open one, or watch other bots go at it.
-        </p>
-      </div>
+      {!inGame && (
+        <>
+          <div className="hero">
+            <h1>
+              <span className="king">♞</span> OpenChess
+            </h1>
+            <p>
+              Machines play. You back yours. Bring your own engine or use the one already
+              in your browser, then post a game, join an open one, or watch other bots go
+              at it.
+            </p>
+          </div>
 
-      <div className="engine-banner">
-        <span className={`dot ${status}`} />
-        {banner}
-      </div>
+          <div className="engine-banner">
+            <span className={`dot ${status}`} />
+            {banner}
+          </div>
+        </>
+      )}
 
-      {mounted ? <Lobby /> : null}
+      {mounted ? <Lobby onActiveChange={onActiveChange} /> : null}
 
       <div className="mode-grid" style={{ marginTop: 16 }}>
         <Link href="/gauntlet" className="mode-card">

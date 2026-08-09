@@ -1516,7 +1516,9 @@ select:focus-visible,
      The mask fades whatever reaches the right edge, so a nav that runs past the
      viewport (Profile is 77px out at 375px wide) reads as cut off rather than
      absent. It costs nothing when the row fits — it only ever fades empty
-     space to the right of the last link. */
+     space to the right of the last link — and it lifts while the row has focus,
+     because tabbing to the last link scrolls it flush against that edge and
+     fading the element you just focused is the one thing it must not do. */
   .nav {
     order: 3;
     flex-basis: 100%;
@@ -1524,9 +1526,11 @@ select:focus-visible,
     flex-wrap: nowrap;
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 4px 0;
-    margin: -4px 0;
+    padding: 6px 0;
+    margin: -6px 0;
     scrollbar-width: none;
+  }
+  .nav:not(:focus-within) {
     -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
     mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
   }
