@@ -77,6 +77,15 @@ jobs:
           # row and seats a joiner at the wrong board; the walk is where a
           # lost race is told apart from a real failure.
           pnpm test:offers
+          # Guards the two halves of the castling-notation trap: a king-takes-rook
+          # move in the shipped book, or one reaching an engine, silently
+          # truncates the engine's position, and every move it returns after
+          # that is illegal, which the seat used to resign over.
+          pnpm test:openings
+          pnpm test:move
+          # One bestmove answers one `go`. Broadcasting it let an abandoned
+          # search answer for a live one, with a move for the wrong position.
+          pnpm test:engine
           # The board theme is applied twice: an inline script that runs before
           # first paint, and applyBoardPrefs after React mounts. If the two ever
           # compute different CSS variables the board visibly changes on load,

@@ -7,7 +7,23 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { Chess } from "chessops/chess";
 import { parseSan } from "chessops/san";
-import { makeUci } from "chessops/util";
+
+// NOT chessops' makeUci: it writes castling as king-takes-rook ("e1h1"), which
+// a UCI engine in standard mode silently drops from `position startpos moves …`
+// — desyncing the engine for the rest of the game. Book lines are fed straight
+// to the engine, so they must be standard UCI. See lib/uci.ts; scripts/
+// book.test.ts fails if a king-takes-rook move ever lands in the book again.
+const FILES = "abcdefgh";
+const sq = (s) => `${FILES[s & 7]}${(s >> 3) + 1}`;
+function makeStandardUci(pos, move) {
+  const piece = pos.board.get(move.from);
+  const target = pos.board.get(move.to);
+  if (piece?.role === "king" && target?.role === "rook" && target.color === piece.color) {
+    return `${sq(move.from)}${sq(move.to > move.from ? move.from + 2 : move.from - 2)}`;
+  }
+  const promo = move.promotion ? move.promotion[0].replace("k", "n") : "";
+  return `${sq(move.from)}${sq(move.to)}${promo}`;
+}
 
 const PGN = process.env.PGN || "/tmp/8moves_v3.pgn";
 const MAX_PLIES = 12, SAMPLE_EVERY = 18, MAX_LINES = 2200;
@@ -31,7 +47,7 @@ for (const g of games) {
     if (uci.length >= MAX_PLIES) break;
     const mv = parseSan(pos, san);
     if (!mv) break;
-    uci.push(makeUci(mv));
+    uci.push(makeStandardUci(pos, mv));
     pos.play(mv);
   }
   if (uci.length >= 6) out.add(uci.join(" "));
