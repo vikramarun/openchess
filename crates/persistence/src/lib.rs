@@ -1090,6 +1090,13 @@ impl Db {
     /// wildcard, so an unescaped `a_c` would match `abc`. The escape lives in the
     /// caller (`username::like_prefix`) so it is unit-testable without a
     /// database.
+    ///
+    /// Matching is case-insensitive, and `lower()` goes on BOTH sides — the same
+    /// rule `set_username` follows, and for the same reason. Folding only the
+    /// column made this silently case-SENSITIVE: a stored `Magnus` matched
+    /// `q=magnus` and missed `q=Magnus`, so anyone typing a name the way the UI
+    /// displays it got an empty typeahead. `lower()` is IMMUTABLE, so the pattern
+    /// still folds to a constant and `users_username_prefix_idx` is still used.
     pub async fn search_usernames(&self, prefix: &str, limit: i64) -> Result<Vec<UsernameHit>> {
         let rows = sqlx::query_as::<_, UsernameHit>(
             r#"SELECT username, lower(wallet) AS wallet, rating,
@@ -1097,7 +1104,7 @@ impl Db {
                            THEN avatar_updated_at END AS avatar_updated_at
                  FROM users
                 WHERE username IS NOT NULL
-                  AND lower(username) LIKE $1 ESCAPE '\'
+                  AND lower(username) LIKE lower($1) ESCAPE '\'
                 ORDER BY length(username), lower(username)
                 LIMIT $2"#,
         )
@@ -2224,6 +2231,33 @@ mod tests {
             names(db.search_usernames(&format!("{p}a"), 10).await?),
             vec![format!("{p}ab"), format!("{p}a_b"), format!("{p}abcd")],
         );
+
+        // Case-insensitive on BOTH sides. Folding only the column made this
+        // silently case-sensitive: a stored `Magnus` matched `magnus` and missed
+        // `Magnus`, so typing a name the way the UI shows it found nothing. The
+        // seeds above are lowercase, which is exactly why the assertion above
+        // passed while the feature was broken — so query in every casing, and
+        // seed a mixed-case name to fold from the other direction too.
+        let mixed = format!("{p}MiXeD");
+        db.set_username(&format!("0xM_{tag}"), &mixed).await?;
+        for q in [
+            format!("{p}A"),
+            format!("{p}a").to_uppercase(),
+            format!("{p}a"),
+        ] {
+            assert_eq!(
+                names(db.search_usernames(&q, 10).await?).len(),
+                3,
+                "query {q:?} must find the same three"
+            );
+        }
+        for q in [format!("{p}mixed"), format!("{p}MIXED"), mixed.clone()] {
+            assert_eq!(
+                names(db.search_usernames(&q, 10).await?),
+                vec![mixed.clone()],
+                "query {q:?} must find the stored mixed-case name"
+            );
+        }
         // `_` is a letter to this search, not LIKE's single-character wildcard.
         // The caller escapes it (`username::like_prefix`); unescaped, this
         // prefix would also match `{p}ab` and `{p}abcd`.

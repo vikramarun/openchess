@@ -168,6 +168,18 @@ async fn ensure_house_username(state: &AppState) {
         return;
     };
     let name = house_username();
+    // Bypass the RESERVED list — that is the point of this function — but never
+    // the grammar. `persistence::set_username` validates nothing (the rules live
+    // in the HTTP layer), so an unchecked env var writes straight past every
+    // constraint the rest of the system assumes: `HOUSE_USERNAME="House Bot"` —
+    // the name this bot used to post under, and so the likeliest thing for
+    // someone to set — stored a handle with a space in it, which the profile
+    // then advertised while `/players/House%20Bot` 404'd and the canonical URL
+    // carried a raw space. Every stored username has to stay routable.
+    if !username::is_username_shape(&name) {
+        tracing::warn!(%name, "HOUSE_USERNAME is not a valid username; leaving the house bot unnamed");
+        return;
+    }
     match db.set_username(&wallet, &name).await {
         Ok(persistence::SetUsernameOutcome::Set { username }) => {
             tracing::info!(%wallet, %username, "house bot username")
