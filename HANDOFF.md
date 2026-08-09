@@ -99,7 +99,7 @@ docs.
   `.github/workflows/ci.yml` runs all of them; releases in `release.yml`.
   Counts drift as tests land — trust `cargo test` / CI over this line.
 
-## Shipped 2026-08-09: the launch-eve sweep (PRs #29–#47 + launch-cleanup)
+## Shipped 2026-08-09: the launch-eve sweep (PRs #29–#50)
 
 Nineteen PRs merged in one day, then a full-repo launch review. The short list,
 newest context first — details live in each PR:
@@ -122,6 +122,16 @@ newest context first — details live in each PR:
   tournaments capped (`RL_MAX_TOURNAMENTS`); tournament names sanitized;
   park stakes validated at post; a post-flag move is no longer echoed/persisted;
   native gauntlet re-authenticates mid-run instead of aborting.
+- **P2 round 2 (PRs #49/#50, after launch was pushed):** `/games/live` joined
+  the polls bucket; a signed-in entrant in a FREE tournament now owns their
+  games (`entrant_wallets`, **migration 0016**, strict about stale bearers,
+  end-to-end test); the eval bar defaults OFF below 720px (stored choice wins);
+  `cargo clippy -D warnings` + `cargo fmt --check` are blocking in CI after a
+  zero-warning pass and one bulk fmt commit (`.git-blame-ignore-revs`);
+  workspace rust-version is 1.91 (alloy 2's real floor); both gauntlet clients
+  send the bearer on ticket polls (future queue_get gate); /ready memoizes its
+  DB ping; the wallet chain list is mainnet-only unless
+  `NEXT_PUBLIC_ENABLE_TESTNET=1`.
 - **Board/piece themes + vendored chessground (PR #37), the site mark +
   metadata/OG surfaces (PR #42), Noto Sans actually loading (PR #44), profile
   photos (PR #41), eval bar on every board (PR #39), per-game colour by coin
