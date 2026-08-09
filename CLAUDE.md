@@ -14,6 +14,7 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
 (cd contracts && forge test)       # Foundry — 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
+(cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 cargo run -p server                # game server on 127.0.0.1:8080
@@ -127,6 +128,19 @@ wallet.
   parses fine and never hits (`book::shipped_book` tests exist to catch exactly
   that); and `BookPolicy::Best` would walk one identical line every game, which
   is why `Weighted` is the default.
+- **Castling has two UCI spellings and only one of them is safe.** chessops,
+  Polyglot and Chess960 all write castling as king-takes-rook (`e1h1`);
+  standard UCI writes the king's two-square move (`e1g1`). shakmaty accepts
+  BOTH, so the server happily records either — but Stockfish in standard mode
+  does not: its `position startpos moves …` parser stops at the first move it
+  cannot read and **keeps the prefix silently**. One `e1h1` in the history
+  leaves the engine a ply behind (usually on the wrong side to move) for the
+  rest of the game, so every `bestmove` it returns is illegal, the server
+  rejects it, and `play.ts` resigns — a level position, seconds on the clock,
+  no error anywhere. That shipped: `scripts/build-book.mjs` used chessops'
+  `makeUci`, so 553 of 1817 lines in `public/book.json` carried it. Anything
+  reaching an engine or the wire goes through `lib/uci.ts` first;
+  `pnpm test:openings` fails if a king-takes-rook move lands in the book again.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr` — which silently disabled the client's self-match
