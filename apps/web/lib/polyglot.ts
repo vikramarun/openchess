@@ -117,11 +117,46 @@ export function entriesFor(entries: BookEntry[], key: bigint): BookEntry[] {
   return out;
 }
 
-/** Highest-weight book move for the position, as UCI (matches the native
- *  client's deterministic `BookPolicy::Best`). */
-export function pickBookMove(entries: BookEntry[], pos: Chess): string | null {
+/** How to choose among the book's moves for a position.
+ *  - `best`: highest weight, deterministic — matches the native client's
+ *    `BookPolicy::Best`, and means a book-following bot plays the same game
+ *    every time.
+ *  - `weighted`: sample proportional to weight, so a repertoire produces
+ *    variety across games while staying inside its own theory. */
+export type BookPick = "best" | "weighted";
+
+/** Book move for the position, as UCI, or null if the position isn't in book.
+ *
+ *  `rng` is injectable so weighted picks are testable; it defaults to
+ *  `Math.random`. Passing no options preserves the original deterministic
+ *  highest-weight behaviour exactly. */
+export function pickBookMove(
+  entries: BookEntry[],
+  pos: Chess,
+  opts: { pick?: BookPick; rng?: () => number } = {},
+): string | null {
   const found = entriesFor(entries, polyglotKey(pos));
   if (found.length === 0) return null;
-  const best = found.reduce((a, b) => (b.weight > a.weight ? b : a));
-  return decodeMove(pos, best.move);
+  if (opts.pick !== "weighted") {
+    const best = found.reduce((a, b) => (b.weight > a.weight ? b : a));
+    return decodeMove(pos, best.move);
+  }
+
+  // Weighted sampling. Entries that don't decode are dropped first so a single
+  // out-of-spec entry can't silently swallow the whole probe; a book whose
+  // weights are all zero degrades to uniform rather than always picking the
+  // first entry.
+  const usable = found
+    .map((e) => ({ uci: decodeMove(pos, e.move), weight: e.weight }))
+    .filter((e): e is { uci: string; weight: number } => e.uci !== null);
+  if (usable.length === 0) return null;
+  const total = usable.reduce((s, e) => s + e.weight, 0);
+  const rng = opts.rng ?? Math.random;
+  if (total <= 0) return usable[Math.min(usable.length - 1, Math.floor(rng() * usable.length))].uci;
+  let r = rng() * total;
+  for (const e of usable) {
+    r -= e.weight;
+    if (r < 0) return e.uci;
+  }
+  return usable[usable.length - 1].uci; // float drift at r ≈ total
 }

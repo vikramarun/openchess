@@ -8,18 +8,29 @@
 
 import { Chess } from "chessops/chess";
 
+import {
+  DEFAULT_REPERTOIRE,
+  loadRepertoire,
+  normalizeRepertoire,
+  repertoireLabel,
+  selectedBookIds,
+  type Repertoire,
+} from "./books";
 import { parseBook, pickBookMove, type BookEntry } from "./polyglot";
 
 export type BrowserBotConfig = {
   /** Display name shown to opponents; "" = default. */
   name: string;
-  /** Stop using the uploaded book after this many plies. */
+  /** Stop using an opening book after this many plies. */
   bookMaxPly: number;
+  /** Which built-in opening books this bot plays, per colour/reply slot. */
+  repertoire: Repertoire;
 };
 
 export const DEFAULT_CONFIG: BrowserBotConfig = {
   name: "",
   bookMaxPly: 16,
+  repertoire: DEFAULT_REPERTOIRE,
 };
 
 const CONFIG_KEY = "browser_bot_config";
@@ -30,27 +41,46 @@ function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
   return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : dflt;
 }
 
+/** Field-by-field parse with per-field defaults, so a config written before
+ *  repertoires existed keeps its name and book setting and simply gains the
+ *  new field. Exported for the tests, which have no localStorage. */
+export function parseBrowserBotConfig(raw: unknown): BrowserBotConfig {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    name: typeof r.name === "string" ? r.name.slice(0, 48) : "",
+    bookMaxPly: clampInt(r.bookMaxPly, 0, 60, DEFAULT_CONFIG.bookMaxPly),
+    repertoire: normalizeRepertoire(r.repertoire),
+  };
+}
+
 export function getBrowserBotConfig(): BrowserBotConfig {
   if (typeof window === "undefined") return DEFAULT_CONFIG;
   try {
-    const raw = JSON.parse(localStorage.getItem(CONFIG_KEY) ?? "{}");
-    return {
-      name: typeof raw.name === "string" ? raw.name.slice(0, 48) : "",
-      bookMaxPly: clampInt(raw.bookMaxPly, 0, 60, DEFAULT_CONFIG.bookMaxPly),
-    };
+    return parseBrowserBotConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) ?? "{}"));
   } catch {
     return DEFAULT_CONFIG;
   }
 }
 
-export function saveBrowserBotConfig(cfg: BrowserBotConfig) {
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg));
+/** Read-modify-write, so an older tab writing a subset of the fields can't
+ *  erase settings it doesn't know about. */
+export function saveBrowserBotConfig(cfg: Partial<BrowserBotConfig>) {
+  let stored: unknown = {};
+  try {
+    stored = JSON.parse(localStorage.getItem(CONFIG_KEY) ?? "{}");
+  } catch {
+    /* corrupt blob — overwrite it */
+  }
+  localStorage.setItem(CONFIG_KEY, JSON.stringify({ ...(stored as object), ...cfg }));
 }
 
-/** Engine label declared to opponents (informational). The browser bot always
- *  plays full strength — no scaler. */
-export function browserEngineLabel(): string {
-  return "Stockfish 18 (browser)";
+/** Engine label declared to opponents (informational, never verified). The
+ *  browser bot always plays full strength; the suffix names the repertoire so
+ *  the lobby shows what a bot actually opens with. The server caps declared
+ *  labels at 48 chars, so keep this short. */
+export function browserEngineLabel(cfg: BrowserBotConfig = getBrowserBotConfig()): string {
+  const rep = repertoireLabel(cfg.repertoire);
+  return rep ? `Stockfish 18 · ${rep}`.slice(0, 48) : "Stockfish 18 (browser)";
 }
 
 // ---------------------------------------------------------------------------
@@ -149,4 +179,65 @@ export async function userBookInfo(): Promise<BookInfo | null> {
 export function probeUserBook(pos: Chess, ply: number, maxPly: number): string | null {
   if (!cachedEntries || ply >= maxPly) return null;
   return pickBookMove(cachedEntries, pos);
+}
+
+// ---------------------------------------------------------------------------
+// Selected repertoire (built-in books, fetched from /books/*.bin)
+// ---------------------------------------------------------------------------
+
+let repEntries: BookEntry[] | null = null;
+/** Which selection `repEntries` is for, so changing the repertoire in another
+ *  tab (or in the picker) invalidates rather than silently playing the old one. */
+let repSig = "";
+let repLoad: Promise<void> | null = null;
+
+/** Load + merge the configured repertoire's books into memory (idempotent).
+ *  Safe to call on every game start; a no-op once warm. */
+export function ensureRepertoireLoaded(
+  rep: Repertoire = getBrowserBotConfig().repertoire,
+): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  const sig = selectedBookIds(rep).join(",");
+  if (sig === repSig && repEntries) return Promise.resolve();
+  if (!sig) {
+    repSig = "";
+    repEntries = null;
+    return Promise.resolve();
+  }
+  if (repLoad && sig === repSig) return repLoad;
+  repSig = sig;
+  repLoad = loadRepertoire(rep)
+    .then((entries) => {
+      // A newer selection landed while we were fetching — don't clobber it.
+      if (selectedBookIds(rep).join(",") === repSig) repEntries = entries;
+    })
+    .catch(() => {
+      // A missing book must not break the game; we simply fall through to the
+      // built-in book and then the engine.
+      if (selectedBookIds(rep).join(",") === repSig) repEntries = null;
+    })
+    .finally(() => {
+      repLoad = null;
+    });
+  return repLoad;
+}
+
+/** Synchronous probe of the selected repertoire (call ensureRepertoireLoaded
+ *  first). `pick` decides between replaying one line forever and varying
+ *  within the same theory. */
+export function probeRepertoire(
+  pos: Chess,
+  ply: number,
+  maxPly: number,
+  pick: Repertoire["pick"],
+): string | null {
+  if (!repEntries || ply >= maxPly) return null;
+  return pickBookMove(repEntries, pos, { pick });
+}
+
+/** Test/debug seam: drop the cached repertoire so the next ensure re-fetches. */
+export function resetRepertoireCache() {
+  repEntries = null;
+  repSig = "";
+  repLoad = null;
 }

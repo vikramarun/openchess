@@ -4,7 +4,13 @@
 import { Chess } from "chessops/chess";
 import { parseUci } from "chessops/util";
 
-import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserBot";
+import {
+  ensureBookLoaded,
+  ensureRepertoireLoaded,
+  getBrowserBotConfig,
+  probeRepertoire,
+  probeUserBook,
+} from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
@@ -19,19 +25,36 @@ function isLegalUci(pos: Chess, uci: string): boolean {
   return !!m && pos.isLegal(m);
 }
 
-/** A book move for this history — the user's uploaded Polyglot book first,
- *  then the built-in mainline set — returning the first LEGAL of the two, so a
- *  bad/illegal user-book entry falls through to the built-in book (and then to
- *  the engine) rather than suppressing it. */
+/** A book move for this history, in priority order:
+ *
+ *  1. the user's uploaded Polyglot book — the most explicit statement of intent;
+ *  2. their selected repertoire (the built-in `.bin` books);
+ *  3. the broad built-in mainline set.
+ *
+ *  Each falls through to the next only if it produced no LEGAL move, so a bad
+ *  entry anywhere can never suppress the books below it — or the engine. The
+ *  broad book last is deliberate: once an opponent leaves your repertoire you
+ *  want to stay in *some* book rather than drop into a cold search that burns
+ *  clock on move four. */
 function legalBookMove(movesUci: string[]): string | null {
   const pos = Chess.default();
   for (const u of movesUci) {
     if (!isLegalUci(pos, u)) return null;
     pos.play(parseUci(u)!);
   }
-  const maxPly = getBrowserBotConfig().bookMaxPly;
-  const user = probeUserBook(pos, movesUci.length, maxPly);
+  const cfg = getBrowserBotConfig();
+  const maxPly = cfg.bookMaxPly;
+  const ply = movesUci.length;
+
+  const user = probeUserBook(pos, ply, maxPly);
   if (user && isLegalUci(pos, user)) return user;
+
+  const rep = probeRepertoire(pos, ply, maxPly, cfg.repertoire.pick);
+  if (rep && isLegalUci(pos, rep)) return rep;
+
+  // The broad book honours maxPly too — it used to be exempt, which made the
+  // "leave book after N plies" setting quietly untrue.
+  if (ply >= maxPly) return null;
   const builtin = bookMove(movesUci);
   return builtin && isLegalUci(pos, builtin) ? builtin : null;
 }
@@ -46,8 +69,9 @@ export function playSeat(
   handlers: PlayHandlers = {},
   cancelled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
-  // Warm the uploaded-book cache; resolves long before the first your_turn.
+  // Warm both book caches; they resolve long before the first your_turn.
   void ensureBookLoaded();
+  void ensureRepertoireLoaded();
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
