@@ -56,9 +56,10 @@ primary_region = "iad"
 # script's own backoff loop handles a single autopilot dying.
 [[vm]]
   # Sized for CONCURRENT GAMES, not autopilots. An idle autopilot costs ~0% (it
-  # is a poll loop — the engine is launched per game, not at startup), but every
-  # game in progress is a Stockfish thread wanting a core, and a house bot that
-  # flags on time is worse than no house bot at all.
+  # is a poll loop — the engine is launched per game, and the one probe at
+  # startup quits straight away), but every game in progress is a Stockfish
+  # thread wanting a core, and a house bot that flags on time is worse than no
+  # house bot at all.
   #
   # Four shared vCPUs because TCS×SEATS = 8 seats now stand open, so the ceiling
   # doubled when SEATS did. This does not cover the absolute worst case (8
@@ -67,8 +68,20 @@ primary_region = "iad"
   # --max-move-ms caps each search and the opening book makes the first ~16
   # plies cost no search at all. Raise this BEFORE raising SEATS again.
   #
-  # 1gb is shared-cpu-4x's default RAM, so it adds no memory surcharge — and
-  # memory was never the constraint here (a handful of Stockfish processes at
-  # the default 16MB hash).
+  # 2gb, above shared-cpu-4x's 1gb default, because memory IS a constraint here
+  # — it stopped being free when SEATS went to 2. A Stockfish 17 process is
+  # ~150MB resident (the NNUE net, not the 16MB hash), so the eight-engine peak
+  # wants ~1.2GB and the kernel OOM-killed five of them on the 1gb machine.
+  #
+  # Eight at once happens in two places. Every boot: each autopilot probes the
+  # engine for its name and UCI options before posting (connect.rs), so all
+  # TCS×SEATS probes land together — the probe quits immediately, which is why
+  # an idle bot then sits near zero, but the spike is real and it cost four
+  # autopilots a crash-and-backoff cycle before the staggered restarts fit.
+  # And at peak: eight simultaneous games hold eight engines for real.
+  #
+  # So this scales with TCS×SEATS, same as the vCPUs above. Raise it before
+  # raising SEATS again — an OOM kill surfaces as "engine closed its output
+  # stream", which reads like an engine bug rather than a sizing one.
   size = "shared-cpu-4x"
-  memory = "1gb"
+  memory = "2gb"
