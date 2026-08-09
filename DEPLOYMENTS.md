@@ -19,6 +19,12 @@
 `REQUIRE_ONCHAIN=1`. `SIWE_CHAIN_ID=8453` is in `fly.toml`.
 
 > **Notes**
+> - The Basescan-verified source is the **pre-PR-#34 revision** of
+>   `contracts/src/ChessEscrow.sol`: that PR's copy pass edited two doc
+>   comments after the mainnet deploy, so recompiling `HEAD` yields identical
+>   runtime bytecode but a different solc metadata hash. Anyone taking up the
+>   "verify it yourself" invitation should diff against the verified source on
+>   Basescan, or check out the pre-#34 revision (`git log -- contracts/src`).
 > - The deployer address `0xd476AC2C6F0377FD489584899cDBbb64B569C66B` is **burned**
 >   (its key was exposed). Do not reuse it. It controls nothing once ownership
 >   is accepted by the hardware wallet.

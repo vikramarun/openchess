@@ -73,21 +73,21 @@ Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
 
 ## Status
 
-**98 automated tests pass** (73 Rust + 25 Foundry), plus three web suites. Four audit rounds
+**151 automated tests pass** (126 Rust + 25 Foundry), plus 20 web suites. Four audit rounds
 ([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated. CI
 (`.github/workflows/ci.yml`) runs Postgres + `forge test` + `cargo test` + the
 web build on every push.
 
 | Component | Dir | Status |
 |---|---|---|
-| Shared wire protocol | `crates/protocol` | ✅ 3 tests |
+| Shared wire protocol | `crates/protocol` | ✅ 5 tests |
 | Authoritative game engine (shakmaty) | `crates/game-engine` | ✅ 6 tests |
 | BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish + book tests |
 | Game server (WS hub + rooms + 3 modes + SIWE + lobby + rate limiting) | `crates/server` | ✅ live + unit tests |
-| Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 25 Foundry tests |
+| Non-custodial escrow + oracle (games + tournament pools) | `contracts/src/ChessEscrow.sol` | ✅ 25 Foundry tests |
 | Onchain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip + live |
-| Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser + 3 test suites |
+| Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser + 20 test suites |
 
 **This is not a turnkey production deployment.** Several items are ops/legal
 decisions only the operator can make: an **independent contract audit**, the

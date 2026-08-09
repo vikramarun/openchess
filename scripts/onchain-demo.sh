@@ -5,7 +5,7 @@
 # the durable settlement outbox -> worker signs an EIP-712 result and settles
 # onchain -> bankrolls move.
 set -e
-ROOT=/Users/vikramarun/chess
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RPC=http://127.0.0.1:8545
 H=http://127.0.0.1:8080
 CLIENT=$ROOT/target/debug/chess-client

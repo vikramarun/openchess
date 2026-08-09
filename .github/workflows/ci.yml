@@ -57,7 +57,9 @@ jobs:
       - name: Web build + tests
         run: |
           corepack enable
-          cd apps/web && pnpm install --frozen-lockfile=false
+          # Frozen, like Vercel's production install: CI green must prove the
+          # LOCKED tree builds, not whatever a caret dep resolved to today.
+          cd apps/web && pnpm install --frozen-lockfile
           # These suites existed but nothing ran them, so a regression in the
           # polyglot keys, the eval bar, or session handling would only have
           # shown up in a browser. Before the build: they are seconds, and a
