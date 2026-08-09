@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { useEngine } from "@/lib/engineContext";
 import { AuthButton } from "./AuthButton";
+import { Logo } from "./Logo";
 import { WalletMenu } from "./WalletMenu";
 
 export function Header() {
@@ -19,7 +20,7 @@ export function Header() {
   return (
     <header className="site-header">
       <Link href="/" className="brand" style={{ textDecoration: "none" }}>
-        <span className="king">♞</span> OpenChess
+        <Logo size={22} className="mark" /> OpenChess
       </Link>
       <nav className="nav">
         <Link href="/">Play</Link>

@@ -2,10 +2,9 @@
 
 import { useEffect, useState } from "react";
 
+import { isAddress } from "./address";
 import { AVATAR_EVENT, avatarUrl } from "./avatar";
 import { SERVER_HTTP } from "./config";
-
-const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 /** A wallet's uploaded profile photo URL, or null when it has none.
  *
@@ -20,7 +19,7 @@ export function useAvatar(address: string | undefined): string | null {
 
   useEffect(() => {
     const addr = address?.toLowerCase();
-    if (!addr || !ADDR_RE.test(addr)) {
+    if (!isAddress(addr)) {
       setUrl(null);
       return;
     }

@@ -23,11 +23,14 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
+(cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
+(cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
 (cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
+(cd apps/web && pnpm gen:icon)     # regenerate app/icon.svg from lib/brand.ts
 ```
 - Contract ABIs are **vendored** in `crates/ledger/abi/`, so `cargo build` does
   **not** need a prior `forge build`. Re-vendor after editing the contract
@@ -206,6 +209,39 @@ wallet.
   new set needs its license checked and recorded in
   `apps/web/public/piece/CREDITS.md` (`test:prefs` fails if a registered set has
   no art on disk).
+- **The brand mark is also written twice.** Geometry lives in
+  `apps/web/lib/brand.ts`; `app/icon.svg` is a second copy, because Next's icon
+  file convention cannot import from TypeScript. Nothing at runtime compares
+  them, so an edit to the path would leave the favicon showing the old mark
+  indefinitely — `pnpm test:brand` is what catches it. Run **`pnpm gen:icon`**
+  after any change to the geometry; never hand-edit the file. Two more traps:
+  anything **icon-shaped must use the tiled variant**, since on a light browser
+  tab strip the `#ededec` half of a bare mark disappears and leaves half a rook
+  (iOS composites transparent app icons badly too); and a segment's
+  `opengraph-image.tsx` is **auto-injected into that segment's metadata**, so if
+  its `generateMetadata` also sets `openGraph.images` one silently overrides the
+  other. Titles in `generateMetadata`, the picture in the file convention.
+- **An OG card must draw the mark as inline `<svg>`, never an `<img>` data
+  URI.** `next/og` rasterizes through resvg, and the resvg in a **production**
+  bundle does not decode a nested SVG image: it drops it and still returns 200,
+  so the card renders wordmark-only and every shared link quietly loses its
+  logo. `next dev` uses a different resvg that decodes it fine, so this passes
+  locally and breaks only once deployed — it shipped that way once already.
+  Encoding is irrelevant (base64 and percent-encoded give byte-identical,
+  markless output). `pnpm test:brand` greps `lib/ogCard.tsx` and
+  `app/apple-icon.tsx` for the inline form. The general lesson: **verify a
+  generated image against `next build && next start`, never the dev server.**
+- **A root `alternates.canonical` is inherited by every route.** Metadata merges
+  down the tree, so a canonical set in `app/layout.tsx` declares /gauntlet,
+  /tournament and the rest duplicates of the homepage and drops them out of the
+  index. There is deliberately none at the root; set one per segment if wanted.
+- **Every page is a Client Component, so metadata lives in a sibling
+  `layout.tsx`.** `"use client"` and `export const metadata` are mutually
+  exclusive, which is why each route has a three-line server layout next to its
+  page. A new route inherits the root title until you add one. The dynamic
+  routes (`/game/[id]`, `/player/[address]`) use `generateMetadata` there, and
+  both must degrade to a generic title rather than throw: a crawler hitting a
+  dead id must not 500 the page.
 - **One `bestmove` answers one `go`, in order.** `BrowserEngine` hands each one
   to the oldest waiter, never to every waiter: a caller that stops waiting for a
   search (the desync recovery above) leaves it running, and its late answer

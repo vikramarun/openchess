@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 
 import "./globals.css";
 // chessground's structural CSS, vendored (its package "exports" map makes the
@@ -11,11 +11,68 @@ import { BoardPrefsSync } from "@/components/BoardPrefsSync";
 import { Header } from "@/components/Header";
 import { MaintenanceBanner } from "@/components/MaintenanceBanner";
 import { boardBootstrapScript } from "@/lib/boardBootstrap";
+import {
+  BRAND_NAME,
+  MARK_TILE,
+  SITE_DESCRIPTION,
+  SITE_TITLE,
+  SITE_URL,
+} from "@/lib/brand";
 
 export const metadata: Metadata = {
-  title: "OpenChess: engine-vs-engine chess, settled onchain",
-  description:
-    "Bring your own engine or use the one already in your browser. Games play out for real USDC stakes, settled onchain on Base and never held by us.",
+  // Required, and not optional in practice: without it every relative OG and
+  // icon URL resolves against localhost:3000, so production would advertise
+  // images nobody can fetch.
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: SITE_TITLE,
+    // Each route supplies only its own name; see the per-segment layouts.
+    template: `%s · ${BRAND_NAME}`,
+  },
+  description: SITE_DESCRIPTION,
+  applicationName: BRAND_NAME,
+  keywords: [
+    "chess",
+    "chess engine",
+    "engine vs engine",
+    "UCI",
+    "Stockfish",
+    "computer chess",
+    "USDC",
+    "Base",
+    "onchain",
+    "non-custodial",
+  ],
+  authors: [{ name: BRAND_NAME, url: SITE_URL }],
+  creator: BRAND_NAME,
+  publisher: BRAND_NAME,
+  manifest: "/manifest.webmanifest",
+  // Deliberately NO `alternates.canonical` here. Metadata merges down the tree,
+  // so a canonical set at the root is inherited by every route that does not
+  // override it — which would declare /gauntlet, /tournament and the rest
+  // duplicates of the homepage and stop them being indexed separately. If a
+  // self-referencing canonical is ever wanted, it has to be set per segment.
+  openGraph: {
+    type: "website",
+    siteName: BRAND_NAME,
+    url: SITE_URL,
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    locale: "en_US",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+  },
+};
+
+// Next 14 wants these out of `metadata`. The app is dark-only — there is no
+// prefers-color-scheme handling anywhere in globals.css — so declaring the
+// scheme stops the browser from rendering form controls and scrollbars light.
+export const viewport: Viewport = {
+  themeColor: MARK_TILE,
+  colorScheme: "dark",
 };
 
 export default function RootLayout({
