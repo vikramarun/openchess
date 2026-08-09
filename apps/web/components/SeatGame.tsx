@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
 import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
@@ -14,6 +15,7 @@ import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
 import { fetchGame } from "@/lib/gameApi";
+import { usePlyNav } from "@/lib/usePlyNav";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
 import { shortAddr } from "@/lib/verify";
@@ -55,7 +57,13 @@ export function SeatGame({
   initialSecs?: number | null;
   incrementSecs?: number | null;
 }) {
-  const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
+  const { fen, moves, frames, clock, result, verified, applyFrame } = useSpectatorBoard();
+  // Your own game is navigable while you play it, exactly as it is when you
+  // spectate one: stepping back doesn't pause the stream or your engine (it only
+  // drives its seat over its own socket), and `nav.live` means we're showing the
+  // newest position, so the clocks and turn indicator still apply.
+  const nav = usePlyNav(frames.length - 1);
+  const view = frames[nav.at];
   const [opponent, setOpponent] = useState<Opponent | null>(null);
   const [status, setStatus] = useState("loading engine…");
   const [settleStatus, setSettleStatus] = useState<string | null>(null);
@@ -209,8 +217,12 @@ export function SeatGame({
 
   const oppColor = color === "white" ? "black" : "white";
   const live = !result && status === "playing";
+  // Name-plates describe the LIVE game — clock and whose turn it is — and stay
+  // put while you scrub; only the board and material follow the ply you're
+  // looking at. (Same split as LiveSpectator; the live stream carries no clock
+  // history, so a per-ply clock here would be fiction.)
   const turn = sideToMoveFromFen(fen);
-  const mat = material(fen);
+  const mat = material(view.fen);
   const myClock = clock ? (color === "white" ? clock.white_ms : clock.black_ms) : null;
   const oppClock = clock ? (color === "white" ? clock.black_ms : clock.white_ms) : null;
   const myCaptured = color === "white" ? mat.whiteCaptured : mat.blackCaptured;
@@ -258,7 +270,12 @@ export function SeatGame({
           captured={oppCaptured}
           edge={-myEdge}
         />
-        <Chessboard fen={fen} orientation={color} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
+        <Chessboard
+          fen={view.fen}
+          orientation={color}
+          lastMove={lastMoveFromUci(view.lastUci)}
+          check={view.check}
+        />
         <PlayerBar
           color={color}
           name="You"
@@ -267,6 +284,18 @@ export function SeatGame({
           captured={myCaptured}
           edge={myEdge}
         />
+        {nav.total > 0 && (
+          <MoveNav
+            at={nav.at}
+            total={nav.total}
+            mode={result ? "replay" : "live"}
+            live={nav.live}
+            onFirst={nav.first}
+            onPrev={nav.prev}
+            onNext={nav.next}
+            onLast={nav.last}
+          />
+        )}
       </div>
 
       <div className="sidebar">
@@ -339,24 +368,7 @@ export function SeatGame({
           </div>
         )}
 
-        <div className="panel">
-          <div className="muted" style={{ marginBottom: 8 }}>
-            Moves
-          </div>
-          <div className="moves">
-            {moves.length === 0 && <span className="muted">…</span>}
-            {moves.map((san, i) =>
-              i % 2 === 0 ? (
-                <span key={i}>
-                  <span className="num">{i / 2 + 1}.</span>
-                  {san}{" "}
-                </span>
-              ) : (
-                <span key={i}>{san} </span>
-              ),
-            )}
-          </div>
-        </div>
+        <MovePanel sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" behind={!nav.live} />
 
         {/* No early exit after declining, staked or not: leaving closes the
             socket, and the server only voids a game whose seats are both still

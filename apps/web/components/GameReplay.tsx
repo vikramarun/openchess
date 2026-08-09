@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
-import { MoveList, MoveNav } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { shortAddress } from "@/lib/address";
 import { lastMoveFromUci, material } from "@/lib/board";
@@ -199,17 +199,12 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
             )}
           </div>
 
-          <div className="panel">
-            <div className="muted" style={{ marginBottom: 8 }}>
-              Moves
-            </div>
-            <MoveList
-              sans={detail.moves.map((m) => m.san)}
-              at={at}
-              onSelect={nav.go}
-              emptyText="No moves recorded."
-            />
-          </div>
+          <MovePanel
+            sans={detail.moves.map((m) => m.san)}
+            at={at}
+            onSelect={nav.go}
+            emptyText="No moves recorded."
+          />
 
           <div style={{ display: "flex", gap: 8 }}>
             <Link href="/" className="ghost">
