@@ -91,8 +91,24 @@ const seatLabel = (name: string | null, addr: string | null, fallback: string) =
  *  rather than the page owning the state because the hero has to stay in the
  *  SERVER render — this component is client-only (`useMounted` in page.tsx),
  *  and moving the <h1> inside it would take the landing page's only heading
- *  out of the HTML. */
-export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) => void }) {
+ *  out of the HTML.
+ *
+ *  `view` selects WHICH sections render, and nothing else: "quickplay" is the
+ *  homepage's Play card, "browse" is /lobby's open-challenges and live tables.
+ *  It is one component with two views rather than two components because this
+ *  one owns the live-game session — the `active → <SeatGame>` swap, the
+ *  pre-game confirm gate, and the join walk — and BOTH views have to be able to
+ *  open a board (quickplay starts one; joining an open challenge starts one).
+ *  Splitting that state in two would duplicate the money path. The early return
+ *  below therefore sits ABOVE the view gate, so a board opens identically from
+ *  either. */
+export function Lobby({
+  onActiveChange,
+  view = "quickplay",
+}: {
+  onActiveChange?: (active: boolean) => void;
+  view?: "quickplay" | "browse";
+}) {
   const router = useRouter();
   const { address } = useAccount();
   const token = useAuthToken();
@@ -116,8 +132,13 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
   }, [active, onActiveChange]);
 
   // Poll open challenges + live games while in the lobby.
+  //
+  // Only in the browse view: these two tables are the only things that read
+  // `offers`/`live`, and before the split every visitor who merely LANDED on the
+  // homepage polled both endpoints every 3 seconds for as long as the tab
+  // stayed open.
   useEffect(() => {
-    if (active) return;
+    if (active || view !== "browse") return;
     let alive = true;
     const tick = async () => {
       try {
@@ -144,7 +165,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
       alive = false;
       clearInterval(t);
     };
-  }, [active]);
+  }, [active, view]);
 
   // Poll a posted offer until an opponent joins, then drop into the game.
   useEffect(() => {
@@ -199,6 +220,28 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
   const modalStakeBig = modalStake.trim() ? tryParse(modalStake) : 0n;
   const modalUnderfunded =
     !!modalStake.trim() && modalStakeBig != null && available != null && available < modalStakeBig;
+
+  // The quickplay view does not poll (see above), so `offers` is empty here and
+  // `houseSeat` below would always be null — the modal would promise the
+  // self-play demo even with a house seat standing, then hand you a real game
+  // against the bot, because playNow's own fallback fetch finds it. One read
+  // when the modal opens is all the label needs, and it costs a request per
+  // modal open rather than one every three seconds per visitor.
+  useEffect(() => {
+    if (view !== "quickplay" || !pickTc || offers.length > 0) return;
+    let alive = true;
+    fetch(`${SERVER_HTTP}/park/offers`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((o) => {
+        if (alive) setOffers(o);
+      })
+      .catch(() => {
+        /* the label falls back to the demo wording, which playNow honours */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [view, pickTc, offers.length]);
 
   // Whether the House Bot has a free seat standing at the picked clock — it
   // decides what the modal's instant-play button honestly promises.
@@ -368,7 +411,8 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
       {/* Play: pick a time control */}
       {/* `.quick-play` is a legacy class name — it styles THIS lobby card, not
           the /play page that used to share the name (now "Test Engine"). */}
-      <div className="quick-play" style={{ marginBottom: 16 }}>
+      {view === "quickplay" && (
+      <div className="quick-play">
         {pending ? (
           <div>
             <div className="qp-head">
@@ -462,16 +506,22 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
           </>
         )}
         {err && !pickTc && (
-          <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 10 }}>{err}</div>
+          <div className="lobby-err">{err}</div>
         )}
       </div>
+      )}
 
+      {view === "browse" && (
+      <>
       {/* Open challenges to join */}
       <div className="panel" style={{ marginBottom: 16 }}>
-        <b style={{ color: "var(--text-strong)" }}>Open challenges</b>
+        <div className="panel-head">Open challenges</div>
         {offers.length === 0 ? (
           <div className="muted" style={{ marginTop: 8 }}>
-            No one’s waiting right now. Post a game above and the next player joins you.
+            {/* "above" was right when this table sat under the Play card. It
+                lives on /lobby now and the card doesn't. */}
+            No one’s waiting right now. <Link href="/">Post a game</Link> and the next
+            player joins you.
           </div>
         ) : (
           <table className="history-table" style={{ marginTop: 10 }}>
@@ -565,10 +615,10 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
 
       {/* Live games to watch */}
       <div className="panel" style={{ marginBottom: 16 }}>
-        <b style={{ color: "var(--text-strong)" }}>Live now</b>
+        <div className="panel-head">Live now</div>
         {live.length === 0 ? (
           <div className="muted" style={{ marginTop: 8 }}>
-            No games in progress. Start one above.
+            No games in progress. <Link href="/">Start one</Link>.
           </div>
         ) : (
           <table className="history-table" style={{ marginTop: 10 }}>
@@ -636,6 +686,13 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
         )}
       </div>
 
+      {/* The quickplay card carries this error inline; browse has no card to put
+          it in, and a silently empty pair of tables reads as "nobody is here"
+          rather than "the server is unreachable". */}
+      {err && <div className="lobby-err">{err}</div>}
+      </>
+      )}
+
       {/* Stake modal (opens after picking a time control) */}
       {pickTc && (
         <div className="modal-overlay" onClick={() => setPickTc(null)}>
@@ -684,12 +741,12 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                   : "Post free challenge"}
             </button>
             {modalUnderfunded && modalStakeBig != null && (
-              <div style={{ color: "#e0a96c", fontSize: 13 }}>
+              <div className="lobby-warn">
                 Available {fmtUsdc(available)} USDC is under the {fmtUsdc(modalStakeBig)} stake.
                 Deposit more first.
               </div>
             )}
-            {err && <div style={{ color: "#e06c6c", fontSize: 13 }}>{err}</div>}
+            {err && <div className="lobby-err">{err}</div>}
             <button className="modal-cancel muted" onClick={() => setPickTc(null)}>
               Cancel
             </button>

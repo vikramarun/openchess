@@ -27,7 +27,7 @@ export type PlayHandlers = {
   /** Asked once, before this seat declares itself ready. Resolving false holds
    *  the seat back: the server starts a game only when BOTH seats ready, so
    *  this is the hook a "confirm the stakes" prompt hangs off. Omit to ready
-   *  immediately (the previous behaviour).
+   *  immediately (the previous behavior).
    *
    *  `deadlineMs` is how long the SERVER will still wait, straight from
    *  `welcome` — not a client-side constant. The window starts when the room
@@ -112,14 +112,14 @@ function legalBookMove(pos: Chess, history: string[]): string | null {
 }
 
 /** Play one seat of a game in the browser, driving `engine`. Resolves when the
- *  game ends or the socket closes. `cancelled()` lets the caller tear it down. */
+ *  game ends or the socket closes. `canceled()` lets the caller tear it down. */
 export function playSeat(
   gameId: string,
   token: string,
   engineIn: BrowserEngine,
   movetimeMs: number,
   handlers: PlayHandlers = {},
-  cancelled: () => boolean = () => false,
+  canceled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
   // Reassignable: a dead engine is swapped for a replacement mid-game (below).
   let engine = engineIn;
@@ -159,7 +159,7 @@ export function playSeat(
         return;
       }
       handlers.onEvent?.(m);
-      if (cancelled()) {
+      if (canceled()) {
         ws.close();
         return;
       }
@@ -175,7 +175,7 @@ export function playSeat(
             // is gone. Sitting here costs a minute and keeps the money.
             return;
           }
-          if (cancelled()) {
+          if (canceled()) {
             ws.close();
             return;
           }
@@ -253,7 +253,7 @@ export function playSeat(
                 played = await engine.bestMoveWithPlan(history, plan, onInfo);
               }
             }
-            if (cancelled()) {
+            if (canceled()) {
               ws.close();
               return;
             }
@@ -272,7 +272,7 @@ export function playSeat(
                     `is not legal here — resetting it and asking again`,
                 );
                 std = await retryAfterResync(engine, replay, movetimeMs);
-                if (cancelled()) {
+                if (canceled()) {
                   ws.close();
                   return;
                 }

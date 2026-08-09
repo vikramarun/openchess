@@ -95,7 +95,7 @@ export class CandidateCollector {
    *
    *  Keeps candidates at `maxDepth` or one ply behind. That is exactly
    *  Stockfish's own staleness convention: lines it has not re-searched at the
-   *  current depth are reprinted labelled `depth - 1` with their previous
+   *  current depth are reprinted labeled `depth - 1` with their previous
    *  score, so depth-inconsistency never has to be guessed at. */
   harvest(bestmove: string): Harvest {
     const fresh = [...this.byMove.values()].filter((c) => c.depth >= this.deepest - 1);
@@ -123,7 +123,7 @@ export type WindowOpts = {
  *  as "play `bestmove` verbatim". That happens more often than not, and every
  *  case is deliberate:
  *
- *   - `epsilonCp` is 0 (the default — full strength, today's behaviour);
+ *   - `epsilonCp` is 0 (the default — full strength, today's behavior);
  *   - the collection is untrusted (the engine's final answer isn't in it);
  *   - the search is shallower than `minDepth`;
  *   - a mate is on the board, in either direction. An attacking personality

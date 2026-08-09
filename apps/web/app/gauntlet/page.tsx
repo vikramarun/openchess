@@ -30,9 +30,9 @@ export default function GauntletPage() {
   const mounted = useMounted();
   return (
     <div className="container">
-      <div className="hero" style={{ paddingBottom: 8 }}>
-        <h1>🔥 Gauntlet</h1>
-        <p>
+      <div className="page-head">
+        <h1 className="display d2">🔥 Gauntlet</h1>
+        <p className="muted">
           Your engine keeps playing back-to-back games at a fixed tier until you stop. Lock a
           balance once and every game settles against it onchain.
         </p>

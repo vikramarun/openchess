@@ -26,7 +26,7 @@ export function connectSpectator(opts: {
   /** The game has ended — stop reconnecting. */
   isFinished: () => boolean;
   /** The effect was torn down — stop reconnecting. */
-  isCancelled: () => boolean;
+  isCanceled: () => boolean;
 }): { close: () => void } {
   let ws: WebSocket | null = null;
   let fastFails = 0;
@@ -34,7 +34,7 @@ export function connectSpectator(opts: {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const connect = () => {
-    if (opts.isCancelled() || opts.isFinished()) return;
+    if (opts.isCanceled() || opts.isFinished()) return;
     openedAt = 0; // reset per attempt: a reconnect that never opens must count as a fast fail
     ws = new WebSocket(opts.url);
     ws.onopen = () => {
@@ -46,7 +46,7 @@ export function connectSpectator(opts: {
       opts.onFrame(ev.data);
     };
     ws.onclose = () => {
-      if (opts.isCancelled() || opts.isFinished()) return;
+      if (opts.isCanceled() || opts.isFinished()) return;
       const lived = openedAt > 0 && Date.now() - openedAt > ALIVE_MS;
       fastFails = lived ? 0 : fastFails + 1;
       if (fastFails > MAX_FAST_FAILS) {

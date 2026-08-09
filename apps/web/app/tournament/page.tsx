@@ -57,9 +57,9 @@ export default function TournamentPage() {
   const mounted = useMounted();
   return (
     <div className="container">
-      <div className="hero" style={{ paddingBottom: 8 }}>
-        <h1>🏆 Tournament</h1>
-        <p>
+      <div className="page-head">
+        <h1 className="display d2">🏆 Tournament</h1>
+        <p className="muted">
           Buy in to a prize pool. A round-robin runs (Swiss &amp; knockout coming), and the
           pool is distributed onchain by final standings.
         </p>

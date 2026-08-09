@@ -5,14 +5,14 @@
 // it spawns six wasm engines and has no business being reachable in a money
 // app.
 //
-// Measures what a style budget actually costs, so the dials can be labelled
+// Measures what a style budget actually costs, so the dials can be labeled
 // with real numbers instead of a model. Engine vs engine, entirely
 // client-side: no server, no sockets, no clocks. Strength is fixed by NODE
 // COUNT rather than time, which removes machine noise and makes a run
 // reproducible.
 //
 // Design notes that matter for the numbers:
-//  * Paired openings. Each sampled opening is played TWICE with colours
+//  * Paired openings. Each sampled opening is played TWICE with colors
 //    reversed, which cancels most of the opening's own bias — the single
 //    biggest variance reducer available at small sample sizes.
 //  * Separate workers per side, so the two players never share a hash table.
@@ -128,7 +128,7 @@ class Eng {
 
 type Result = "w" | "b" | "d";
 
-/** Play one game from a fixed opening. Returns which colour won. */
+/** Play one game from a fixed opening. Returns which color won. */
 async function playGame(
   white: { eng: Eng; arm: Arm },
   black: { eng: Eng; arm: Arm },
@@ -228,7 +228,7 @@ export default function Bench() {
       book[Math.floor(rng() * book.length)].split(" ").slice(0, 8),
     );
 
-    say(`${NODES} nodes/move · ${pairs} openings × 2 colours = ${pairs * 2} games per arm`);
+    say(`${NODES} nodes/move · ${pairs} openings × 2 colors = ${pairs * 2} games per arm`);
 
     for (const arm of ARMS) {
       if (stop.current) break;

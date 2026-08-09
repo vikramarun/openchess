@@ -62,8 +62,8 @@ export default function PlayPage() {
 
   useEffect(() => {
     if (!tc) return; // wait until the time control is resolved
-    let cancelled = false;
-    const cancelledFn = () => cancelled;
+    let canceled = false;
+    const canceledFn = () => canceled;
     const engines: BrowserEngine[] = [];
     let spectator: WebSocket | null = null;
     const seats: { close: () => void }[] = [];
@@ -76,7 +76,7 @@ export default function PlayPage() {
       engines.push(white, black);
       setStatus("loading engines…");
       await Promise.all([white.whenReady(), black.whenReady()]);
-      if (cancelled) return;
+      if (canceled) return;
       // Warm the uploaded book. Note: the book is a shared cache, so both seats
       // follow it through the opening — the OpenChess bot diverges once out of book.
       await ensureBookLoaded();
@@ -92,7 +92,7 @@ export default function PlayPage() {
         return;
       }
       const game = await resp.json();
-      if (cancelled) return;
+      if (canceled) return;
 
       // Spectator socket renders the live board (no token = read-only).
       spectator = new WebSocket(`${SERVER_WS}/ws/game/${game.game_id}`);
@@ -100,18 +100,18 @@ export default function PlayPage() {
       spectator.onmessage = (ev) => applyFrame(ev.data, () => setStatus("finished"));
 
       // Two browser engines play the two seats.
-      seats.push(playSeat(game.game_id, game.white_token, white, 300, {}, cancelledFn));
-      seats.push(playSeat(game.game_id, game.black_token, black, 300, {}, cancelledFn));
+      seats.push(playSeat(game.game_id, game.white_token, white, 300, {}, canceledFn));
+      seats.push(playSeat(game.game_id, game.black_token, black, 300, {}, canceledFn));
     };
 
     run().catch(() => {
-      // Ignore failures from a cancelled run (React StrictMode double-invokes
+      // Ignore failures from a canceled run (React StrictMode double-invokes
       // effects in dev; the first run is torn down immediately).
-      if (!cancelled) setStatus("failed to start");
+      if (!canceled) setStatus("failed to start");
     });
 
     return () => {
-      cancelled = true;
+      canceled = true;
       spectator?.close();
       seats.forEach((s) => s.close());
       engines.forEach((e) => e.dispose());

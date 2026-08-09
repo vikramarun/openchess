@@ -102,8 +102,8 @@ export function SeatGame({
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const cancelledFn = () => cancelled;
+    let canceled = false;
+    const canceledFn = () => canceled;
     let engine: BrowserEngine | null = null;
     let released = true;
     let spectator: { close: () => void } | null = null;
@@ -119,7 +119,7 @@ export function SeatGame({
       // was torn down DURING the await, cleanup has already run and saw
       // `released` still true, so nothing would ever give this reference back
       // and the engine would stay pinned for the life of the tab.
-      if (cancelled) {
+      if (canceled) {
         releasePlayerEngine();
         return;
       }
@@ -142,7 +142,7 @@ export function SeatGame({
         onStatus: setStatus,
         liveStatus: "playing",
         isFinished: () => finished,
-        isCancelled: () => cancelled,
+        isCanceled: () => canceled,
       });
 
       // Drive only our seat; the fixed movetime is a fallback — playSeat uses
@@ -183,16 +183,16 @@ export function SeatGame({
                   })
               : undefined,
         },
-        cancelledFn,
+        canceledFn,
       );
     };
 
     run().catch(() => {
-      if (!cancelled) setStatus("failed to start");
+      if (!canceled) setStatus("failed to start");
     });
 
     return () => {
-      cancelled = true;
+      canceled = true;
       spectator?.close();
       seat?.close();
       // Release rather than dispose: the seat engine is shared and stays warm

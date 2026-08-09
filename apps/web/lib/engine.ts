@@ -133,7 +133,7 @@ export class BrowserEngine {
   /** Waiters for `bestmove`, oldest first — one per outstanding `go`. */
   private bestmoveWaiters: ((uci: string) => void)[] = [];
   private ready: Promise<void>;
-  /** Serializes analyse() searches on the single worker. */
+  /** Serializes analyze() searches on the single worker. */
   private analysisQueue: Promise<void> = Promise.resolve();
   /** Abandons the most recently started analysis, if any. */
   private cancelAnalysis: (() => void) | null = null;
@@ -224,7 +224,7 @@ export class BrowserEngine {
    *  a move it refused to parse — before deciding the engine is unusable.
    *
    *  Call it only with the worker idle: `ucinewgame` during a search is
-   *  undefined behaviour in UCI. `stopSearch()` first if one may be running. */
+   *  undefined behavior in UCI. `stopSearch()` first if one may be running. */
   async resync(): Promise<void> {
     await this.ready;
     this.send("ucinewgame");
@@ -348,7 +348,7 @@ export class BrowserEngine {
     );
   }
 
-  /** Analyse an arbitrary position, streaming every score the search reports so
+  /** Analyze an arbitrary position, streaming every score the search reports so
    *  a UI can deepen its eval progressively. Used by the eval bar, which follows
    *  whatever position the viewer is looking at (live tip, or a scrubbed-back
    *  ply) — hence a FEN rather than a move list. A FEN carries no repetition
@@ -360,7 +360,7 @@ export class BrowserEngine {
    *  still running (`stop` → its `bestmove` → the new `position`), because UCI
    *  commands must not interleave and the caller only ever wants the newest
    *  position. Returns a handle whose `stop()` abandons this analysis. */
-  analyse(
+  analyze(
     fen: string,
     opts: {
       onInfo: (info: EngineInfo) => void;
@@ -378,16 +378,16 @@ export class BrowserEngine {
     // the worker for its full budget before the new position even starts.
     this.cancelAnalysis?.();
 
-    let cancelled = false;
+    let canceled = false;
     let stopSearch: (() => void) | null = null;
     const cancel = () => {
-      cancelled = true;
+      canceled = true;
       stopSearch?.();
     };
     this.cancelAnalysis = cancel;
 
     const run = async () => {
-      if (cancelled || this.disposed) return;
+      if (canceled || this.disposed) return;
       try {
         await this.ready;
       } catch {
@@ -395,7 +395,7 @@ export class BrowserEngine {
       }
       // Re-check after the await: the engine may have been torn down while a
       // queued analysis was waiting, and a search must never outlive `quit`.
-      if (cancelled || this.disposed) return;
+      if (canceled || this.disposed) return;
       this.send(`position fen ${fen}`);
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -415,7 +415,7 @@ export class BrowserEngine {
         const done = () => finish();
         const info = (line: string) => {
           const parsed = parseInfoLine(line);
-          if (parsed && !cancelled) onInfo(parsed);
+          if (parsed && !canceled) onInfo(parsed);
         };
         // `stop` makes the engine emit `bestmove`, which is what actually
         // releases the worker for the next search.
@@ -427,7 +427,7 @@ export class BrowserEngine {
         this.bestmoveWaiters.push(done);
         this.send(`go depth ${depth}`);
       });
-      if (!cancelled) onDone?.();
+      if (!canceled) onDone?.();
       if (this.cancelAnalysis === cancel) this.cancelAnalysis = null;
     };
 

@@ -145,7 +145,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   ]);
   const start = Chess.default();
 
-  // Default (no options) must stay byte-identical to the old behaviour.
+  // Default (no options) must stay byte-identical to the old behavior.
   check("default pick is the highest weight", pickBookMove(entries, start), "e2e4");
   check("explicit best pick", pickBookMove(entries, start, { pick: "best" }), "e2e4");
 
@@ -204,7 +204,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
     check(`${meta.id} parses and has entries`, e.length > 0, true);
   }
 
-  // A style is a MIX, not one opening: given the defence, the book should offer
+  // A style is a MIX, not one opening: given the defense, the book should offer
   // several playable answers weighted toward its style. This is the property
   // the old by-first-move books didn't have.
   const sharpW = load("w-sharp");
@@ -223,7 +223,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
     "Nf3",
   );
 
-  // Gambiteer is a genuine style, not a relabelled Sharp: it meets 1…c5 with
+  // Gambiteer is a genuine style, not a relabeled Sharp: it meets 1…c5 with
   // the Smith-Morra and 1…e5 with gambit tries.
   const gambitW = load("w-gambit");
   check("Gambiteer answers 1…c5 with d4 (Smith-Morra)", bookChildren(gambitW, afterC5)[0].san, "d4");
@@ -245,7 +245,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   );
 
   // Coverage: a White book must answer EVERY Black first move, not just the
-  // defences its own style names. Without the coverage tails a Sharp bot was
+  // defenses its own style names. Without the coverage tails a Sharp bot was
   // out of book at move two against the Scandinavian.
   for (const id of ["w-classical", "w-sharp", "w-solid", "w-gambit"]) {
     const bk = load(id);
@@ -306,7 +306,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
     { white: "w-sharp", vsE4: "b-e4-sharp", vsD4: null, vsOther: null, maxPly: 10, pick: "best" },
   );
   // A book id in the wrong slot would fetch a real file but play the wrong
-  // colour's moves, which is worse than playing no book at all.
+  // color's moves, which is worse than playing no book at all.
   check("a book in the wrong slot is rejected", normalizeRepertoire({ white: "b-e4-sharp" }).white, null);
   check("an unknown id is rejected", normalizeRepertoire({ white: "w-nonsense" }).white, null);
   check("maxPly clamps high", normalizeRepertoire({ maxPly: 9999 }).maxPly, 60);
@@ -331,7 +331,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
 {
   // A blob written before repertoires existed must keep its settings — and one
   // still carrying the `name` this bot used to declare must simply drop it. A
-  // seat is labelled by the USERNAME of the wallet in it now, resolved
+  // seat is labeled by the USERNAME of the wallet in it now, resolved
   // server-side, so there is nothing here to migrate.
   const v1 = parseBrowserBotConfig({ name: "My Bot", bookMaxPly: 12 });
   check("v1 config keeps bookMaxPly", v1.bookMaxPly, 12);

@@ -129,7 +129,7 @@ export type BookPick = "best" | "weighted";
  *
  *  `rng` is injectable so weighted picks are testable; it defaults to
  *  `Math.random`. Passing no options preserves the original deterministic
- *  highest-weight behaviour exactly. */
+ *  highest-weight behavior exactly. */
 export function pickBookMove(
   entries: BookEntry[],
   pos: Chess,

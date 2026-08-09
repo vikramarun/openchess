@@ -87,7 +87,7 @@ export function LiveSpectator({ id }: { id: string }) {
   }, [id]);
 
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
     let finished = false;
     const spectator = connectSpectator({
       url: `${SERVER_WS}/ws/game/${id}`,
@@ -99,10 +99,10 @@ export function LiveSpectator({ id }: { id: string }) {
       onStatus: setStatus,
       liveStatus: "watching",
       isFinished: () => finished,
-      isCancelled: () => cancelled,
+      isCanceled: () => canceled,
     });
     return () => {
-      cancelled = true;
+      canceled = true;
       spectator.close();
     };
   }, [id, applyFrame]);

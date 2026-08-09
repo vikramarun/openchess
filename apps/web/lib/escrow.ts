@@ -56,7 +56,7 @@ export type OnchainConfig = {
   wagerEnabled: boolean;
   /** The house bot's wallet, lowercased, so the lobby can find its standing
    *  offers (`houseOfferGroup`). Null when the server publishes none — the
-   *  play-now button then uses its labelled fallback. */
+   *  play-now button then uses its labeled fallback. */
   houseWallet: string | null;
 };
 

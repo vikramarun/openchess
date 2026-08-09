@@ -12,6 +12,7 @@ import { BoardPrefsSync } from "@/components/BoardPrefsSync";
 import { Header } from "@/components/Header";
 import { MaintenanceBanner } from "@/components/MaintenanceBanner";
 import { SiteFooter } from "@/components/SiteFooter";
+import { TabBar } from "@/components/TabBar";
 import { boardBootstrapScript } from "@/lib/boardBootstrap";
 import {
   BRAND_NAME,
@@ -132,6 +133,13 @@ export default function RootLayout({
               "stakes are real money" line must reach people who land straight
               on a shared game, a profile, or the gauntlet. */}
           <SiteFooter />
+          {/* Phones only (CSS decides; see .tabbar in globals.css). Last in the
+              DOM because it is last on screen: a bar pinned to the bottom of the
+              viewport should be the last thing a keyboard user tabs into, not
+              the first. It is a labeled <nav> landmark, so a screen-reader
+              rotor still reaches it directly. Rendered on the server too, so its
+              links work before hydration. */}
+          <TabBar />
         </Providers>
       </body>
     </html>

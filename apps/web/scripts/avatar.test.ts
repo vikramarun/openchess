@@ -4,7 +4,7 @@
 // stores is produced here, so the two halves have to agree: if the crop or the
 // re-encode silently stopped happening, a phone photo would start arriving at
 // full size and every upload would 413. The crop is also the part that is wrong
-// in a way nobody notices in code review — an off-centre square reads as "the
+// in a way nobody notices in code review — an off-center square reads as "the
 // site cropped my head off", not as a bug.
 //
 // Browser globals must exist before the module under test is imported (it
@@ -133,12 +133,12 @@ async function main() {
   sourceSize = { w: 800, h: 400 };
   await toSquareJpeg(fakeFile());
   // Landscape: take the middle 400x400, i.e. skip 200px on the left.
-  check("wide source is centre-cropped", draws[0], [200, 0, 400, 400, 0, 0, AVATAR_PX, AVATAR_PX]);
+  check("wide source is center-cropped", draws[0], [200, 0, 400, 400, 0, 0, AVATAR_PX, AVATAR_PX]);
 
   draws.length = 0;
   sourceSize = { w: 300, h: 900 };
   await toSquareJpeg(fakeFile());
-  check("tall source is centre-cropped", draws[0], [0, 300, 300, 300, 0, 0, AVATAR_PX, AVATAR_PX]);
+  check("tall source is center-cropped", draws[0], [0, 300, 300, 300, 0, 0, AVATAR_PX, AVATAR_PX]);
 
   draws.length = 0;
   sourceSize = { w: 64, h: 64 };
