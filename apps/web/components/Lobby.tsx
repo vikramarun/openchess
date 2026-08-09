@@ -13,6 +13,7 @@ import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
+import { acceptFromGroup, groupOffers, joinErrorMessage, type OfferGroup } from "@/lib/offers";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -236,31 +237,29 @@ export function Lobby() {
     }
   };
 
-  const acceptOffer = async (o: Offer) => {
+  const acceptOffer = async (group: OfferGroup<Offer>) => {
+    const o = group.offer;
     setErr(null);
     const wagered = !!o.stake;
     if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
     try {
-      const r = await authedFetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
-        ),
-      });
-      if (!r.ok)
-        return setErr(
-          r.status === 503
-            ? MAINTENANCE_MSG
-            : r.status === 502
-              ? "Couldn’t lock the stakes onchain. Check that both players have deposited enough."
-              : r.status === 424
-                ? BOT_OFFLINE_MSG
-                : r.status === 410
-                  ? "That challenger’s bot went offline, so the offer is gone."
-                  : `Couldn’t join (${r.status}).`,
-        );
+      // A row can stand for several identical seats (the house bot posts one
+      // per concurrent autopilot), so losing the race for the first is not a
+      // failure while another is free. The walk and the status wording both
+      // live in lib/offers.ts, where they are tested. That is where the bug was
+      // that told a user with a mid-game bot that someone stole the seat.
+      const r = await acceptFromGroup(group.ids, (id) =>
+        authedFetch(`${SERVER_HTTP}/park/offers/${id}/accept`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
+          ),
+        }),
+      );
+      if (!r) return; // empty group: unreachable, but never fall through as OK
+      if (!r.ok) return setErr(joinErrorMessage(r.status, { botPlays }));
       const j = await r.json();
       if (j.seat === "bot" || !j.token) {
         // The bot plays this seat; watch the game live.
@@ -418,7 +417,8 @@ export function Lobby() {
               </tr>
             </thead>
             <tbody>
-              {offers.map((o) => {
+              {groupOffers(offers).map((group) => {
+                const o = group.offer;
                 const mine = !!address && o.poster_addr?.toLowerCase() === address.toLowerCase();
                 return (
                   <tr key={o.offer_id}>
@@ -428,6 +428,16 @@ export function Lobby() {
                         <span className="muted" style={{ fontSize: 12 }}>
                           {" "}
                           🤖 {o.poster_engine}
+                        </span>
+                      )}
+                      {group.ids.length > 1 && (
+                        <span
+                          className="muted"
+                          style={{ fontSize: 12 }}
+                          title="This challenger has more than one seat free at this time control"
+                        >
+                          {" "}
+                          · {group.ids.length} seats free
                         </span>
                       )}
                     </td>
@@ -462,7 +472,7 @@ export function Lobby() {
                           need {fmtUsdc(o.stake)}
                         </span>
                       ) : (
-                        <button className="ghost" onClick={() => acceptOffer(o)}>
+                        <button className="ghost" onClick={() => acceptOffer(group)}>
                           Join &amp; play
                         </button>
                       )}

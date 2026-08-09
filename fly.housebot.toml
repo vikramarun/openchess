@@ -15,9 +15,10 @@
 # without OPENCHESS_WALLET_KEY and would otherwise crash-loop the machine.
 # (`fly secrets deploy` hits the same no-machines wall; just deploy.)
 #
-# Run exactly ONE machine. The script already runs one autopilot per time
-# control; a second machine would post a duplicate challenge per tile under the
-# same wallet, so the lobby fills with house-vs-house offers.
+# Run exactly ONE machine. Concurrency belongs to SEATS (autopilots per time
+# control), which the script owns and can size deliberately; a second machine
+# would instead double every tile behind the app's back and put the wallet's
+# standing offers over RL_MAX_OPEN_OFFERS, where the excess seats 429 silently.
 #
 # The wallet must hold NO funds. House games are casual (no stake) — the key
 # only signs SIWE to give the bot a stable identity.
@@ -43,13 +44,31 @@ primary_region = "iad"
   SKILL = "20"
   # Matches the lobby's 1+0 / 3+0 / 5+0 / 10+0 tiles.
   TCS = "60:0 180:0 300:0 600:0"
+  # Concurrent house games per time control. At 1, the first visitor to accept
+  # a tile takes the only seat at it and that tile disappears from the lobby
+  # until their game ends — the house looked broken rather than busy. 4 TCs × 2
+  # = 8 standing offers under one wallet; RL_MAX_OPEN_OFFERS (16) leaves room,
+  # so raising SEATS here is safe up to 4 without touching the server.
+  SEATS = "2"
 
 # No [http_service]: this app listens on nothing, it dials out. That also means
 # no health check — Fly restarts the machine if the process exits, and the
 # script's own backoff loop handles a single autopilot dying.
 [[vm]]
-  # Two shared vCPUs, not one: four autopilots idle at ~0% while waiting for an
-  # acceptance, but a 1+0 bullet game needs real CPU the moment one lands, and a
-  # house bot that flags on time is worse than no house bot at all.
-  size = "shared-cpu-2x"
+  # Sized for CONCURRENT GAMES, not autopilots. An idle autopilot costs ~0% (it
+  # is a poll loop — the engine is launched per game, not at startup), but every
+  # game in progress is a Stockfish thread wanting a core, and a house bot that
+  # flags on time is worse than no house bot at all.
+  #
+  # Four shared vCPUs because TCS×SEATS = 8 seats now stand open, so the ceiling
+  # doubled when SEATS did. This does not cover the absolute worst case (8
+  # simultaneous games would still oversubscribe) — it covers the realistic
+  # peak with headroom, and the two existing per-game CPU bounds do the rest:
+  # --max-move-ms caps each search and the opening book makes the first ~16
+  # plies cost no search at all. Raise this BEFORE raising SEATS again.
+  #
+  # 1gb is shared-cpu-4x's default RAM, so it adds no memory surcharge — and
+  # memory was never the constraint here (a handful of Stockfish processes at
+  # the default 16MB hash).
+  size = "shared-cpu-4x"
   memory = "1gb"
