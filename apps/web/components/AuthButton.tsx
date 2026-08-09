@@ -2,7 +2,7 @@
 
 import { DynamicUserProfile, useDynamicContext } from "@dynamic-labs/sdk-react-core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAccount, useAccountEffect, useChainId } from "wagmi";
+import { useAccount, useAccountEffect } from "wagmi";
 
 import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { authAddress, authToken, clearAuth } from "@/lib/escrow";
@@ -35,8 +35,11 @@ export function AuthButton() {
  *  separate connect + sign-in step. The session token is bound to the wallet it
  *  was issued for and cleared on disconnect / account switch. */
 function AuthButtonInner() {
-  const { address, isConnected } = useAccount();
-  const chainId = useChainId();
+  // `useAccount().chainId` is the connector's REAL chain; `useChainId()` is
+  // pinned to the configured list (prod: `[base]` only) and so can never report
+  // a wrong network — which made the switch control below unreachable. See
+  // useEnsureChain.
+  const { address, isConnected, chainId } = useAccount();
   const ensureChain = useEnsureChain();
   const signMessageAsync = useDynamicSigner();
   const { setShowAuthFlow, setShowDynamicUserProfile, sdkHasLoaded } = useDynamicContext();

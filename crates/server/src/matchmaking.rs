@@ -49,6 +49,13 @@ const POOL_READ_RETRY_MS: u64 = 500;
 const OPEN_TOURNAMENT_RESTORE_LIMIT: i64 = 500;
 /// Hard cap on tournament entrants (bounds the O(n^2) round-robin + pool math).
 const MAX_TOURNAMENT_PLAYERS: usize = 128;
+/// Smallest entry fee (USDC base units, 6dp — so this is 1 USDC) that lets a
+/// POOLED tournament be `Open`. Below it, the organizer must gate admission.
+/// See the check in `tourney_create` for why the bar is materiality rather than
+/// non-zero: a seat has to cost an attacker something real, because sponsorship
+/// means the prize they are chasing is not bounded by what the field paid in.
+/// A gated event may charge whatever it likes, including nothing.
+const MIN_OPEN_ENTRY_FEE: u128 = 1_000_000;
 
 const OFFER_TTL: Duration = Duration::from_secs(3600);
 const TICKET_TTL: Duration = Duration::from_secs(3600);
@@ -1673,16 +1680,23 @@ async fn tourney_create(
     if admission != Admission::Open && state.authed_wallet(&headers).is_none() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    // A FREE-ENTRY event (`buy_in: "0"`) has a real, sponsor-funded prize pool
-    // but costs nothing to enter, so Open admission makes it drainable: an
-    // attacker fields costless throwaway entrants to capture places in the split,
-    // and unlike a buy-in pool there is no entry fee funding what they take
-    // (`tournament_ladder` keeps such events off the ranked ladder for the same
-    // costlessness, but that guards Elo, not the pool). Require a gate — invite
-    // or approval — so the organizer controls who can be paid. A CASUAL event
+    // A pooled event whose entry costs ~nothing is drainable under Open
+    // admission: the pool can be topped up by sponsors (`sponsorTournament` is
+    // permissionless and works on any pooled tournament), so what an attacker
+    // can win is unbounded while what a seat costs them is not. They field
+    // throwaway entrants, take places in the split, and the entry fees they paid
+    // — which for a buy-in event are the thing that funds what Sybils take —
+    // don't come close to covering it. Require a gate (invite or approval) so
+    // the organizer decides who can be paid.
+    //
+    // The bar is MATERIALITY, not merely non-zero. A 1-base-unit entry
+    // (0.000001 USDC) is free in every way that matters and would sail through a
+    // `== 0` test, while additionally billing the oracle a `enterTournament`
+    // transaction per Sybil and — because `tournament_ladder` calls any paid
+    // event ranked — moving the public leaderboard. A CASUAL event
     // (`buy_in: null`, no pool) is unaffected: there is nothing to drain.
     if has_pool(req.buy_in.as_deref())
-        && entry_fee(req.buy_in.as_deref()) == 0
+        && entry_fee(req.buy_in.as_deref()) < MIN_OPEN_ENTRY_FEE
         && admission == Admission::Open
     {
         return Err(StatusCode::BAD_REQUEST);
@@ -2499,13 +2513,25 @@ fn is_wallet_id(p: &str) -> bool {
 /// A bot entrant's games belong to the wallet that registered the agent; a
 /// casual browser entrant's to the session they joined with (recorded in
 /// `entrant_wallets`); a buy-in entrant's id already IS its wallet. One function
-/// because two callers need the identical answer: the seat builder, and the
-/// label resolver that says what the standings table calls that seat. If they
-/// ever disagreed, the crosstable and the board would print different names for
-/// the same person.
+/// because several callers need the identical answer: the seat builder, the
+/// label resolver that says what the standings table calls that seat, and the
+/// launch-token guard. If they ever disagreed, the crosstable and the board
+/// would print different names for the same person — or worse, one of them
+/// would trust a binding the others refuse.
+///
+/// **`ids_are_wallets` is a security parameter, not an optimisation.** Only a
+/// BUY-IN tournament's ids are wallets: `tourney_join_inner` sets them from the
+/// SIWE session. A casual tournament's ids are client-chosen nicknames, so
+/// reading one AS a wallet lets a guest called `0x<somebody-else>` bind that
+/// seat — its finished games, its casual Elo, and that wallet's username on the
+/// board. Refusing the shape at join is not enough on its own: `players` is also
+/// written by `recover_tournaments` straight from Postgres, with no revalidation,
+/// so a row poisoned before that guard existed would come back live. Deciding it
+/// HERE covers every writer, past and future.
 fn entrant_wallet(
     bots: &HashMap<String, BotEntry>,
     wallets: &HashMap<String, String>,
+    ids_are_wallets: bool,
     p: &str,
 ) -> Option<String> {
     match bots.get(p) {
@@ -2513,7 +2539,7 @@ fn entrant_wallet(
         None => wallets
             .get(p)
             .cloned()
-            .or_else(|| is_wallet_id(p).then(|| p.to_string())),
+            .or_else(|| (ids_are_wallets && is_wallet_id(p)).then(|| p.to_string())),
     }
 }
 
@@ -2848,7 +2874,7 @@ fn entrant_seats(t: &Tournament) -> EntrantSeats {
         .map(|p| {
             (
                 p.clone(),
-                entrant_wallet(&t.entrant_bots, &t.entrant_wallets, p),
+                entrant_wallet(&t.entrant_bots, &t.entrant_wallets, t.buy_in.is_some(), p),
             )
         })
         .collect()
@@ -2979,11 +3005,17 @@ async fn tourney_my_games(
             .keys()
             .any(|k| k.eq_ignore_ascii_case(&player));
         if !is_bot_entrant {
+            // Through `entrant_wallet`, not a direct `entrant_wallets` read: a
+            // third private definition of "which wallet owns this seat" is
+            // exactly what that helper exists to prevent, and one that
+            // disagreed here would guard a different seat than the one the
+            // board and the crosstable resolve. `false` because this is the
+            // casual branch — a casual id is never itself a wallet.
             let bound = t
-                .entrant_wallets
+                .players
                 .iter()
-                .find(|(pid, _)| pid.eq_ignore_ascii_case(&player))
-                .map(|(_, w)| w.clone());
+                .find(|p| p.eq_ignore_ascii_case(&player))
+                .and_then(|p| entrant_wallet(&t.entrant_bots, &t.entrant_wallets, false, p));
             if let Some(bound) = bound {
                 let caller = state
                     .authed_wallet(&headers)
@@ -3247,7 +3279,7 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
     // even though no pairing carries a stake of its own (the pool settles
     // separately), and this is the only place that knows it. The amount is
     // irrelevant here, so don't clone the string every round.
-    let (pairings, resolved, tc, bots, engines, wallets, ladder) = {
+    let (pairings, resolved, tc, bots, engines, wallets, ladder, ids_are_wallets) = {
         let ts = state.0.lobby.tournaments.lock();
         let Some(t) = ts.get(&tid) else {
             return RoundDispatch {
@@ -3283,6 +3315,9 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
             )
             .collect();
         let ladder = tournament_ladder(t.buy_in.as_deref());
+        // Whether an entrant id is itself a wallet — see `entrant_wallet`, where
+        // this is a security parameter and not a convenience.
+        let ids_are_wallets = t.buy_in.is_some();
         (
             pairings,
             resolved,
@@ -3291,22 +3326,24 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
             t.entrant_engines.clone(),
             t.entrant_wallets.clone(),
             ladder,
+            ids_are_wallets,
         )
     };
 
     let seat_meta = |p: &str| SeatMeta {
         // An entrant id is either a wallet (buy-in) or a chosen nickname
-        // (casual). Only the nickname is carried, and only as a fallback:
-        // `start_game` ignores this field entirely for any seat that has a
-        // wallet, resolving that seat's username instead. So a buy-in entrant,
-        // and a casual entrant who signed in, both render as their handle; an
-        // anonymous casual entrant renders their nickname, `~`-decorated so it
-        // cannot be read as one.
-        name: (!is_wallet_id(p)).then(|| p.to_string()),
+        // (casual) — decided by the TOURNAMENT, never by the shape of the id,
+        // for the reason spelled out on `entrant_wallet`. Only the nickname is
+        // carried, and only as a fallback: `start_game` ignores this field
+        // entirely for any seat that has a wallet, resolving that seat's
+        // username instead. So a buy-in entrant, and a casual entrant who signed
+        // in, both render as their handle; an anonymous casual entrant renders
+        // their nickname, `~`-decorated so it cannot be read as one.
+        name: (!ids_are_wallets).then(|| p.to_string()),
         // A bot entrant's engine comes from its agent registration; a browser
         // entrant declares its own at join time.
         engine: engines.get(p).cloned(),
-        wallet: entrant_wallet(&bots, &wallets, p),
+        wallet: entrant_wallet(&bots, &wallets, ids_are_wallets, p),
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
     // A claimed wallet is pushed onto `claimed` for rollback.
@@ -6990,6 +7027,16 @@ mod tests {
             matches!(mk(Some("0"), None).await, Err(StatusCode::BAD_REQUEST)),
             "a free-entry event must not be Open"
         );
+        // A NOMINAL fee is not a fee: one base unit (0.000001 USDC) is free in
+        // every way that matters, so it must not buy its way past the gate.
+        assert!(
+            matches!(mk(Some("1"), None).await, Err(StatusCode::BAD_REQUEST)),
+            "a 1-base-unit entry must not make an event Open-able"
+        );
+        assert!(
+            matches!(mk(Some("999999"), None).await, Err(StatusCode::BAD_REQUEST)),
+            "just under the threshold is still too cheap to be Open"
+        );
         // Free-entry + a gate → allowed.
         assert!(
             mk(Some("0"), Some(Admission::Invite)).await.is_ok(),
@@ -6998,7 +7045,7 @@ mod tests {
         // A real buy-in event may be Open (Sybils must each pay in).
         assert!(
             mk(Some("1000000"), None).await.is_ok(),
-            "a paid event may be Open"
+            "a paid event at the threshold may be Open"
         );
         // A casual (no-pool) event may be Open (nothing to drain).
         assert!(mk(None, None).await.is_ok(), "a casual event may be Open");
@@ -7125,6 +7172,92 @@ mod tests {
         assert!(
             ts.get(&tid).unwrap().players.is_empty(),
             "the impersonating entrant must not be seated"
+        );
+    }
+
+    /// An address-shaped entrant id that reaches `players` WITHOUT going through
+    /// the join guard — which is exactly what `recover_tournaments` does, writing
+    /// the persisted array back verbatim — must still not bind that wallet.
+    ///
+    /// This is the half the join-time check cannot cover: a casual row poisoned
+    /// before that guard existed comes back live on the next restart. Refusing
+    /// the shape at the door is not the invariant; refusing to READ a casual id
+    /// as a wallet is. Without `ids_are_wallets`, both assertions below flip —
+    /// the victim's wallet lands on a live seat, and the launch token that drives
+    /// it is handed to an anonymous caller (the token guard misses it, because a
+    /// poisoned id has no `entrant_wallets` row to match against).
+    #[tokio::test]
+    async fn a_rehydrated_address_shaped_entrant_binds_no_wallet() {
+        let (state, _c, _r) = test_state();
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "Free T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        let victim = "0xdead222222222222222222222222222222222222";
+        // One honest guest, so the round has a pairing to dispatch.
+        let _ = tourney_join(
+            State(state.clone()),
+            Path(tid),
+            HeaderMap::new(),
+            Json(JoinReq {
+                player: Some("Honest".into()),
+                seat: None,
+                uci_options: None,
+                engine: None,
+                invite: None,
+            }),
+        )
+        .await
+        .expect("join");
+        // Bypass the door exactly as rehydration does.
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            ts.get_mut(&tid).unwrap().players.push(victim.to_string());
+        }
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("start");
+
+        // 1. The victim's wallet is on no seat.
+        {
+            let live = state.0.live_games.lock();
+            let g = live.values().next().expect("round 0 dispatched");
+            for seat in [g.white.as_deref(), g.black.as_deref()] {
+                assert!(
+                    !seat.is_some_and(|w| w.eq_ignore_ascii_case(victim)),
+                    "a rehydrated address-shaped id bound the victim's wallet to a seat"
+                );
+            }
+        }
+        // 2. And its launch token is not handed to an anonymous caller.
+        let mine = tourney_my_games(
+            State(state.clone()),
+            Path(tid),
+            Query(MyGamesQuery {
+                player: Some(victim.into()),
+            }),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("casual my-games with no binding stays readable")
+        .0;
+        // The seat exists (it was rehydrated), but it is a GUEST seat: whoever
+        // holds the nickname drives it, and it attributes to nobody.
+        assert!(
+            mine.iter().all(|g| g.seat == "browser"),
+            "the poisoned id must resolve as a plain guest seat"
         );
     }
 

@@ -156,13 +156,15 @@ export function Lobby({
         if (!alive) return;
         if (o !== null) setOffers(o);
         if (l !== null) setLive(l);
-        if (o !== null && l !== null) {
-          // A healthy poll retracts the unreachable banner; without this a
-          // 3-second blip left a red error latched under the Play card while
-          // the lobby quietly repopulated behind it. Only the connectivity
-          // message is cleared — a join error stays until the user acts.
-          setErr((e) => (e === "Server unreachable." ? null : e));
-        }
+        // Reaching here at all means the server ANSWERED, so retract the
+        // unreachable banner — without this a 3-second blip left a red error
+        // latched under the Play card while the lobby quietly repopulated
+        // behind it. Deliberately not gated on both responses being OK: a 429
+        // is the server talking, and gating on `ok` would leave "Server
+        // unreachable." pinned under a working lobby for as long as one
+        // endpoint stayed throttled. Only the connectivity message is cleared —
+        // a join error stays until the user acts.
+        setErr((e) => (e === "Server unreachable." ? null : e));
       } catch {
         if (alive) setErr("Server unreachable.");
       }

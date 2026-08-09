@@ -4,23 +4,8 @@
     {
       "name": "web",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": [
-        "-C",
-        "apps/web",
-        "dev"
-      ],
-      "port": 3000,
-      "autoPort": true
-    },
-    {
-      "name": "server",
-      "runtimeExecutable": "cargo",
-      "runtimeArgs": [
-        "run",
-        "-p",
-        "server"
-      ],
-      "port": 8080
+      "runtimeArgs": ["--dir", "apps/web", "dev"],
+      "port": 3000
     }
   ]
 }

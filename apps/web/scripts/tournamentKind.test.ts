@@ -83,9 +83,9 @@ check(
   "~alice",
 );
 check(
-  "an already-decorated guest label is not double-decorated",
+  "a nickname that already starts with ~ is still prefixed — matching the server's guest_label, so guest `~alice` can't render as guest `alice`",
   entrantLabel(lab({}), "~alice"),
-  "~alice",
+  "~~alice",
 );
 check("no labels at all still renders something", entrantLabel(lab({}), "bob"), "~bob");
 

@@ -134,12 +134,21 @@ export function TournamentClaim({
 
   // Single source of truth for what this tournament shows — both the rendered
   // node and the parent's header gate derive from it (no duplicated conditions).
+  //
+  // `hasClaimed` is tested BEFORE the entry check, not after: once a free-entry
+  // winner claims, the proof effect clears `proof` (it stops asking once
+  // claimed), so `canClaim` goes false and — with no onchain entry to fall back
+  // on — the whole component would unmount mid-flow. The money arrived, but the
+  // button would vanish with no "claimed ✓" and the parent would hide its
+  // header, which reads as the claim having failed.
   const kind: "claimed" | "claim" | "refund" | "pending" | null =
-    !enabled || !exists || (!hasEntered && !canClaim)
+    !enabled || !exists
       ? null
       : hasClaimed
         ? "claimed"
-        : canClaim
+        : !hasEntered && !canClaim
+          ? null
+          : canClaim
           ? "claim"
           : refundReady
             ? "refund"

@@ -352,26 +352,36 @@ function TournamentClient() {
     if (buyIn.trim()) {
       if (!token)
         return setErr("Sign in (top right) to create a tournament with an entry fee.");
+      let base: bigint;
       try {
-        buyInBase = parseUsdc(buyIn).toString();
+        base = parseUsdc(buyIn);
       } catch {
         return setErr("Enter a valid USDC entry fee.");
       }
+      // parseUsdc happily parses a negative, and the server's `entry_fee` reads
+      // it back with an unsigned parse that fails to 0 — so "-5" would land in
+      // the free-entry branch rather than being refused.
+      if (base < 0n) return setErr("Enter a positive USDC entry fee.");
       // parseUsdc ROUNDS to the 6-decimal base unit, so a sub-micro fee like
-      // "0.0000001" silently becomes "0" — turning a paid event the creator
-      // intended into a free, sponsor-funded one. Only an explicit "0" means
-      // free entry; anything else that lands on zero is a mistake.
-      if (buyInBase === "0" && buyIn.trim() !== "0") {
+      // "0.0000001" silently becomes 0 — turning a paid event the creator
+      // intended into a free, sponsor-funded one. Only a deliberate zero means
+      // free entry; test the INPUT for a significant digit rather than the
+      // string being exactly "0", or "0.00" gets scolded for a typo it isn't.
+      if (base === 0n && /[1-9]/.test(buyIn)) {
         return setErr(
-          "That entry fee rounds to nothing (the minimum is 0.000001 USDC). Enter a larger amount, or exactly 0 for a free, sponsor-funded event.",
+          "That entry fee rounds to nothing (the minimum is 0.000001 USDC). Enter a larger amount, or 0 for a free, sponsor-funded event.",
         );
       }
-      // A free-entry event (entry "0", real sponsor pool) must be gated: costless
-      // entry + Open admission lets throwaway entrants drain the pool. Mirror the
-      // server's guard here so the creator gets a clear message, not a bare 400.
-      if (buyInBase === "0" && admission === "open") {
+      buyInBase = base.toString();
+      // A pooled event with a ~free entry must be gated: the pool can be topped
+      // up by sponsors, so an Open one lets throwaway entrants take a prize far
+      // bigger than their seats cost. Mirrors the server (MIN_OPEN_ENTRY_FEE),
+      // so the creator gets a sentence instead of a bare 400.
+      if (base < 1_000_000n && admission === "open") {
         return setErr(
-          "A free-entry event needs an invite or approval gate — otherwise anyone could join for free and split the sponsored pool. Set admission to invite-only or approval.",
+          base === 0n
+            ? "A free-entry event needs an invite or approval gate — otherwise anyone could join for nothing and split the sponsored pool. Set “Who can join” to invite or approval."
+            : "An entry fee under 1 USDC needs an invite or approval gate — otherwise anyone could join for almost nothing and split the pool. Raise the fee, or set “Who can join” to invite or approval.",
         );
       }
     }
@@ -942,6 +952,14 @@ function TournamentClient() {
             style={{ maxWidth: 280 }}
           />
         </label>
+        {/* Signed in, the standings and the board both show the name the SERVER
+            resolves from your wallet — never this string, which anyone could set
+            to anyone else's handle. Say so here, or typing "Alice" and seeing
+            0xaa88…8888 in the crosstable reads as a bug. */}
+        <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 420 }}>
+          Identifies your entry. Signed in, the standings show your username — or your address
+          until you <Link href="/profile">claim one</Link>.
+        </div>
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
       </div>
 

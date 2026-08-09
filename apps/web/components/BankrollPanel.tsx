@@ -1,13 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import {
-  useAccount,
-  useChainId,
-  usePublicClient,
-  useReadContract,
-  useWriteContract,
-} from "wagmi";
+import { useAccount, usePublicClient, useReadContract, useWriteContract } from "wagmi";
 
 import { ERC20_ABI, ESCROW_ABI, fmtUsdc, parseUsdc } from "@/lib/escrow";
 import { useEnsureChain } from "@/lib/useEnsureChain";
@@ -21,8 +15,10 @@ export function BankrollPanel({
   escrow: `0x${string}`;
   chainId: number;
 }) {
-  const { address, isConnected } = useAccount();
-  const chainId = useChainId();
+  // The connector's REAL chain, not `useChainId()` — which is pinned to the
+  // configured list and so could never report a wrong network, leaving the
+  // "Wrong network" notice below unreachable. See useEnsureChain.
+  const { address, isConnected, chainId } = useAccount();
   const ensureChain = useEnsureChain();
   // Pin the receipt-reading client to the escrow chain: after ensureChain
   // switches, the connected chain's client would otherwise be stale/undefined.

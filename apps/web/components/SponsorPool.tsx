@@ -103,34 +103,40 @@ export function SponsorPool({
       setBusy(false);
       return;
     }
+    // ONLY the receipt wait belongs in this try. Anything after it has already
+    // succeeded, and letting a throw from (say) `onFunded` land in the catch
+    // would print "we couldn't confirm it" underneath the green success line for
+    // a transaction that plainly confirmed.
+    let receipt;
     try {
-      const receipt = await publicClient!.waitForTransactionReceipt({ hash });
-      // waitForTransactionReceipt RESOLVES for a reverted tx — it only rejects on
-      // timeout/RPC error. A reverted sponsorship (e.g. the pool settled or the
-      // window closed mid-flight) moved no money, so treat it as failure and do
-      // NOT record a sponsorship, rather than flashing "Added X to the pool".
-      if (receipt.status === "reverted") {
-        setError("The sponsorship transaction reverted onchain — no funds moved.");
-        return;
-      }
-      // The reclaim path reads the chain, not this record (it is only a hint),
-      // so recording is safe even if the tx somehow didn't land — it resolves to
-      // 0 onchain and shows no reclaim button.
-      rememberSponsorship(address, tid);
-      setDone(`Added ${fmtUsdc(base)} USDC to the pool.`);
-      setAmount("");
-      refetchMine();
-      refetchAvailable();
-      onFunded?.();
+      receipt = await publicClient!.waitForTransactionReceipt({ hash });
     } catch {
       rememberSponsorship(address, tid);
       setAmount(""); // don't leave the amount primed for a one-click resend
       setError(
         `Broadcast, but we couldn't confirm it. Check your balance before adding again — the pool may already be funded. Tx ${hash}.`,
       );
-    } finally {
       setBusy(false);
+      return;
     }
+    setBusy(false);
+    // waitForTransactionReceipt RESOLVES for a reverted tx — it only rejects on
+    // timeout/RPC error. A reverted sponsorship (e.g. the pool settled or the
+    // window closed mid-flight) moved no money, so treat it as failure and do
+    // NOT record a sponsorship, rather than flashing "Added X to the pool".
+    if (receipt.status === "reverted") {
+      setError("The sponsorship transaction reverted onchain — no funds moved.");
+      return;
+    }
+    // The reclaim path reads the chain, not this record (it is only a hint),
+    // so recording is safe even if the tx somehow didn't land — it resolves to
+    // 0 onchain and shows no reclaim button.
+    rememberSponsorship(address, tid);
+    setDone(`Added ${fmtUsdc(base)} USDC to the pool.`);
+    setAmount("");
+    refetchMine();
+    refetchAvailable();
+    onFunded?.();
   };
 
   return (

@@ -271,7 +271,10 @@ export function entrantLabel(t: Pick<Tournament, "labels">, id: string): string 
   const named = t.labels[id] ?? t.labels[id.toLowerCase()];
   if (named) return named;
   if (isAddress(id.toLowerCase())) return shortAddress(id);
-  return id.startsWith("~") ? id : `~${id}`;
+  // Prefix unconditionally, exactly as the server's `guest_label` does. Skipping
+  // it for an id that already starts with `~` would render guest `~alice` and
+  // guest `alice` identically — the collision this decoration exists to stop.
+  return `~${id}`;
 }
 
 /** Entrant ids are compared case-insensitively everywhere on the server. */
