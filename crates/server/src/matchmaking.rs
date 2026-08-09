@@ -1691,16 +1691,20 @@ async fn tourney_join(
     }
 }
 
-/// One row of the standings table. `score` is the same number settlement ranks
-/// on, so what a viewer sees is what the pool pays out.
+/// One row of the standings table, in the order the pool is paid out.
 #[derive(Serialize)]
 struct Standing {
     player: String,
     score: f64,
     /// Pairings resolved so far (played games + forfeits).
     played: usize,
-    /// 1-based; equal scores share a rank.
+    /// 1-based position in the payout order. NOT shared between equal scores —
+    /// `distribute_pool` pays by position, so sharing it would promise money
+    /// the contract won't send. See `tied`.
     rank: usize,
+    /// Another entrant finished on this exact score, so this row's position
+    /// (and therefore its share of the pool) came from the tiebreak, not play.
+    tied: bool,
     /// This entrant's seat is played by a connected agent.
     bot: bool,
 }
@@ -1753,9 +1757,30 @@ struct TourneyView {
     age_secs: u64,
 }
 
-/// Rank entrants by score, best first, with ties sharing a rank. This is the
-/// same ordering `settle_tournament` pays out on — deliberately one function so
-/// the table a player is looking at can't disagree with the money.
+/// Final order of the field: score descending, and — because the sort is stable
+/// over `players` — equal scores separated by the order the entrants joined.
+///
+/// This is THE ordering, not one of two. `distribute_pool` pays
+/// `payout_weights` out positionally against it (65/25/10 for a field of 3+),
+/// so position 1 and position 2 are paid very differently even when their
+/// scores are identical. Ranking the table separately, with tied players
+/// sharing a rank, showed two entrants a gold medal each and then paid one of
+/// them 2.6x the other — so both callers go through here, and the table
+/// reports the position that actually gets paid.
+///
+/// The join-order tiebreak is not a good rule; it is just the current one, and
+/// `Standing::tied` exists so the UI can say so rather than imply the two
+/// players finished level in every sense that matters.
+fn ranked_entrants(t: &Tournament) -> Vec<(&str, f64)> {
+    let mut order: Vec<(&str, f64)> = t
+        .players
+        .iter()
+        .map(|p| (p.as_str(), t.scores.get(p).copied().unwrap_or(0.0)))
+        .collect();
+    order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    order
+}
+
 fn standings_of(t: &Tournament) -> Vec<Standing> {
     let mut played: HashMap<&str, usize> = HashMap::new();
     for (w, b) in t
@@ -1768,32 +1793,21 @@ fn standings_of(t: &Tournament) -> Vec<Standing> {
         *played.entry(w).or_default() += 1;
         *played.entry(b).or_default() += 1;
     }
-    let mut rows: Vec<Standing> = t
-        .players
+    let order = ranked_entrants(t);
+    order
         .iter()
-        .map(|p| Standing {
-            score: t.scores.get(p).copied().unwrap_or(0.0),
-            played: played.get(p.as_str()).copied().unwrap_or(0),
-            bot: t.entrant_bots.contains_key(p),
-            rank: 0,
-            player: p.clone(),
+        .enumerate()
+        .map(|(i, (p, score))| Standing {
+            player: (*p).to_string(),
+            score: *score,
+            played: played.get(p).copied().unwrap_or(0),
+            // Position in the payout order — deliberately never shared, because
+            // the payout never shares it.
+            rank: i + 1,
+            tied: order.iter().filter(|(_, s)| s == score).count() > 1,
+            bot: t.entrant_bots.contains_key(*p),
         })
-        .collect();
-    rows.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut rank = 0;
-    let mut prev: Option<f64> = None;
-    for (i, r) in rows.iter_mut().enumerate() {
-        if prev != Some(r.score) {
-            rank = i + 1;
-            prev = Some(r.score);
-        }
-        r.rank = rank;
-    }
-    rows
+        .collect()
 }
 
 /// Pairings the schedule has produced, played and forfeited alike, ordered by
@@ -2222,12 +2236,12 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
         let Some(t) = tourneys.get(&tid) else {
             return;
         };
-        let mut s: Vec<(String, f64)> = t
-            .players
-            .iter()
-            .map(|p| (p.clone(), t.scores.get(p).copied().unwrap_or(0.0)))
+        // Same ordering the standings table shows — one function, so what a
+        // player is looking at is what the pool pays.
+        let s: Vec<(String, f64)> = ranked_entrants(t)
+            .into_iter()
+            .map(|(p, score)| (p.to_string(), score))
             .collect();
-        s.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         (t.buy_in.clone(), s)
     };
     tracing::info!(tournament = %tid, ?standings, "tournament complete — final standings");
@@ -2894,6 +2908,64 @@ mod tests {
         );
         assert!(bots_from_json(&json!({})).is_empty());
         assert!(bots_from_json(&json!(null)).is_empty(), "a legacy row without bots is empty");
+    }
+
+    #[tokio::test]
+    async fn tied_entrants_are_shown_the_position_the_pool_pays() {
+        // The table used to give tied entrants a SHARED rank while
+        // `distribute_pool` paid `payout_weights` out positionally — two gold
+        // medals on screen, 65% and 25% of the pool in the wallets, decided by
+        // who joined first. Position is now never shared, and `tied` marks the
+        // rows whose position came from the tiebreak rather than from play.
+        let (state, _c, _r) = test_state();
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        for n in ["First", "Second", "Third"] {
+            let _ = tourney_join(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(JoinReq { player: Some(n.into()), seat: None, uci_options: None }),
+            )
+            .await
+            .expect("join");
+        }
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            let t = ts.get_mut(&tid).unwrap();
+            t.scores.insert("First".into(), 2.0);
+            t.scores.insert("Second".into(), 2.0); // dead level with First
+            t.scores.insert("Third".into(), 1.0);
+        }
+
+        let view = tourney_get(State(state.clone()), Path(tid)).await.expect("view").0;
+        let ranks: Vec<usize> = view.standings.iter().map(|s| s.rank).collect();
+        assert_eq!(ranks, vec![1, 2, 3], "positions are never shared — the payout doesn't share them");
+        assert!(view.standings[0].tied && view.standings[1].tied, "both level rows are flagged");
+        assert!(!view.standings[2].tied);
+
+        // And the table's order IS the order the pool is paid in.
+        let paid: Vec<String> = {
+            let ts = state.0.lobby.tournaments.lock();
+            ranked_entrants(ts.get(&tid).unwrap())
+                .into_iter()
+                .map(|(p, _)| p.to_string())
+                .collect()
+        };
+        let shown: Vec<String> = view.standings.iter().map(|s| s.player.clone()).collect();
+        assert_eq!(shown, paid, "what a player is looking at is what the pool pays");
     }
 
     #[test]

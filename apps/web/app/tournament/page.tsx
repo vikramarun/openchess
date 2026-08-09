@@ -676,7 +676,13 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
         <tbody>
           {t.standings.map((s: Standing) => (
             <tr key={s.player} className={sameEntrant(s.player, me) ? "me" : undefined}>
-              <td>{decided && s.rank === 1 ? "🥇" : s.rank}</td>
+              {/* The position, never a shared rank: the pool is paid out by
+                  position, so two level entrants who both showed a gold medal
+                  were being promised money only one of them would get. */}
+              <td title={s.tied ? "level on score — separated by entry order" : undefined}>
+                {decided && s.rank === 1 ? "🥇" : s.rank}
+                {s.tied && <span className="muted">*</span>}
+              </td>
               <td>
                 {shortName(s.player)}
                 {s.bot && <span className="muted"> 🤖</span>}
@@ -691,6 +697,12 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
           ))}
         </tbody>
       </table>
+      {t.standings.some((s) => s.tied) && (
+        <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+          * Level on score. Entry order separates them
+          {t.buy_in ? ", and the pool is split by finishing position" : ""}.
+        </div>
+      )}
     </div>
   );
 }

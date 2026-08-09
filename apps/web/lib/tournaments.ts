@@ -16,8 +16,13 @@ export type Standing = {
   player: string;
   score: number;
   played: number;
-  /** 1-based; equal scores share a rank. */
+  /** 1-based position in the payout order. Never shared between equal scores —
+   *  the pool is paid out by position (65/25/10 for a field of 3+), so showing
+   *  a shared rank would promise money the contract won't send. */
   rank: number;
+  /** Another entrant finished on this exact score, so this row's position — and
+   *  its share of the pool — came from the tiebreak rather than from play. */
+  tied: boolean;
   bot: boolean;
 };
 
@@ -77,7 +82,14 @@ function normalize(id: string, view: Partial<Omit<Tournament, "id">>): Tournamen
     // pretending nobody entered.
     standings: Array.isArray(view.standings)
       ? view.standings
-      : players.map((player) => ({ player, score: 0, played: 0, rank: 1, bot: false })),
+      : players.map((player, i) => ({
+          player,
+          score: 0,
+          played: 0,
+          rank: i + 1,
+          tied: players.length > 1,
+          bot: false,
+        })),
     current_round: view.current_round ?? 0,
     total_rounds: view.total_rounds ?? 0,
     initial_secs: view.initial_secs ?? 0,
