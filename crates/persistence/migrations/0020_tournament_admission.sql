@@ -2,7 +2,7 @@
 -- organizer minted), or 'approval' (a wallet the organizer approved).
 --
 -- All three MUST be restored by `recover_tournaments`, for the same reason as
--- organizer (0012) and payout (0017), and with a sharper edge: a gated
+-- organizer (0012) and payout (0019), and with a sharper edge: a gated
 -- tournament that rehydrated as 'open' is a closed door that silently stopped
 -- existing, so the first person to try after a deploy walks straight into an
 -- invite-only event. Losing `invites` would also re-open every code that had

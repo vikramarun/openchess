@@ -66,7 +66,7 @@ addresses. That is already true and stays true.
 ## Part 1 — creator-defined payouts (no contract change) — **IMPLEMENTED**
 
 `PayoutSpec` in [matchmaking.rs](crates/server/src/matchmaking.rs), migration
-[0017](crates/persistence/migrations/0017_tournament_payout.sql),
+[0019](crates/persistence/migrations/0019_tournament_payout.sql),
 `tournament_pool` in [ledger](crates/ledger/src/lib.rs).
 
 **One behaviour change to know about:** a two-entrant tournament used to be
@@ -133,7 +133,7 @@ documented behaviour; see the open question at the end.)
 
 ### Persistence
 
-Migration `0017`:
+Migration `0019`:
 
 ```sql
 ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS
@@ -285,7 +285,7 @@ token.balanceOf(escrow) == sum(bankroll) + sum(tournament pools)
 
 `Admission::{Open, Invite, Approval}` in
 [matchmaking.rs](crates/server/src/matchmaking.rs), migration
-[0018](crates/persistence/migrations/0018_tournament_admission.sql). Routes:
+[0020](crates/persistence/migrations/0020_tournament_admission.sql). Routes:
 `POST/GET /tournaments/{id}/invites`, `POST/GET /tournaments/{id}/requests`,
 `POST /tournaments/{id}/requests/{wallet}`. The detail view carries `admission`
 and the caller's own `my_admission`.

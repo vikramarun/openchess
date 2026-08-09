@@ -4820,7 +4820,7 @@ mod tests {
         assert_eq!(
             v,
             json!({ "bps": [5000, 3000, 2000] }),
-            "the shape migration 0017 stores"
+            "the shape migration 0019 stores"
         );
         assert_eq!(
             serde_json::from_value::<PayoutSpec>(v).expect("deserialize"),

@@ -147,10 +147,10 @@ pub struct OpenTournamentRow {
     /// Signed-in wallet per casual entrant (name -> wallet), so games
     /// dispatched after a restart stay attributed (migration 0016).
     pub entrant_wallets: serde_json::Value,
-    /// Creator-defined prize structure, `{"bps":[…]}` (migration 0017). Must be
+    /// Creator-defined prize structure, `{"bps":[…]}` (migration 0019). Must be
     /// restored, or a rehydrated tournament silently pays a different table.
     pub payout: serde_json::Value,
-    /// Admission policy + its state (migration 0018). Must be restored, or a
+    /// Admission policy + its state (migration 0020). Must be restored, or a
     /// gated tournament comes back with its door open.
     pub admission: String,
     pub invites: serde_json::Value,
