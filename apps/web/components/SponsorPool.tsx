@@ -54,12 +54,16 @@ export function SponsorPool({
   // renders against whatever escrow `/config` names and the button reverts on
   // submit, costing the user gas to learn what we could have known first. This
   // also makes a rollback to an older escrow a no-op here rather than a bug.
+  // Deliberately a CONSTANT tournament id, not this one: what's being asked is
+  // whether the escrow has the function at all, which is a property of the
+  // deployment. Keying on `tidHex` would re-read once per tournament opened and
+  // defeat react-query's cache, for an answer that cannot differ between them.
   const { isError: noSponsorship, isLoading: probing } = useReadContract({
     address: escrow,
     abi: ESCROW_ABI,
     functionName: "sponsorship",
-    args: [tidHex, "0x0000000000000000000000000000000000000000"],
-    query: { retry: false },
+    args: [`0x${"0".repeat(64)}`, `0x${"0".repeat(40)}`],
+    query: { retry: false, staleTime: Infinity },
   });
 
   const { data: mine, refetch: refetchMine } = useReadContract({
