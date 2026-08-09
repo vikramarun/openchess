@@ -14,7 +14,9 @@ members = [
 edition = "2021"
 license = "MIT"
 authors = ["OpenChess"]
-rust-version = "1.78"
+# alloy 2.0.x needs ≥ 1.91 (the Docker builder pins rust:1.91); the old "1.78"
+# was stale and made clippy's MSRV lint reject std APIs the build already uses.
+rust-version = "1.91"
 
 [workspace.dependencies]
 # shared internal crates

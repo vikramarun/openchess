@@ -1,0 +1,6 @@
+# Bulk, behavior-free reformatting commits — keep out of `git blame`.
+# Use: git blame --ignore-revs-file .git-blame-ignore-revs (or set
+# blame.ignoreRevsFile once: git config blame.ignoreRevsFile .git-blame-ignore-revs)
+
+# cargo fmt, once, everywhere (2026-08-09)
+0d4c2e6df654278f57db90c36dfa5dcfbfeada61

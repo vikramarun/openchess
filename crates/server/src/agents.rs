@@ -210,7 +210,11 @@ async fn ws_agent(
     // Throttle upgrade churn per-IP, then cap concurrent control sockets
     // (global + per-IP) so a flood can't exhaust the node before anyone even
     // authenticates. The slot is held for the socket's whole lifetime.
-    let guard = match state.0.limits.admit_ws(&headers, &state.0.limits.agent_conns) {
+    let guard = match state
+        .0
+        .limits
+        .admit_ws(&headers, &state.0.limits.agent_conns)
+    {
         Ok(g) => g,
         Err(resp) => return resp,
     };

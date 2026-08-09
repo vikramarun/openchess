@@ -46,7 +46,12 @@ export function makeWagmiConfig() {
     // so it has to be the product name they see everywhere else.
     appName: "OpenChess",
     projectId: projectId || "dev-only-no-walletconnect",
-    chains: [base, baseSepolia],
+    // Mainnet only unless a build opts in: a production visitor whose wallet
+    // sits on Base Sepolia should meet the wrong-network guard, not a
+    // first-class chain offer. The manual web check in
+    // scripts/test-sepolia-tournament.sh documents setting the flag.
+    chains:
+      process.env.NEXT_PUBLIC_ENABLE_TESTNET === "1" ? [base, baseSepolia] : [base],
     wallets: [{ groupName: "Popular", wallets: POPULAR_WALLETS }],
     ssr: true,
   });

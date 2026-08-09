@@ -432,7 +432,7 @@ async fn selfplay(opts: SelfplayOpts) -> Result<()> {
 
         match game.play_move(&uci_move, now_ms()) {
             Ok(applied) => {
-                let move_no = (applied.ply + 1) / 2;
+                let move_no = applied.ply.div_ceil(2);
                 let tag = if applied.ply % 2 == 1 { "." } else { "..." };
                 println!(
                     "{move_no}{tag} {san:8} (w {w:.1}s / b {b:.1}s)",

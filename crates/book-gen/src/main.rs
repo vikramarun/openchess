@@ -45,9 +45,9 @@ fn main() -> Result<()> {
             // A move's weight is the number of lines running through it, so the
             // weighted pick favours whatever the repertoire repeats.
             *weights.entry((key, encode_move(&mv))).or_default() += 1;
-            pos = pos
-                .play(&mv)
-                .map_err(|_| anyhow::anyhow!("{name}: move {} ('{token}') is not legal here", i + 1))?;
+            pos = pos.play(&mv).map_err(|_| {
+                anyhow::anyhow!("{name}: move {} ('{token}') is not legal here", i + 1)
+            })?;
             deepest = deepest.max(i + 1);
         }
     }
@@ -72,7 +72,10 @@ fn main() -> Result<()> {
     }
     std::fs::write(&out, &bytes).with_context(|| format!("writing {out}"))?;
 
-    let positions = weights.keys().map(|(k, _)| *k).collect::<std::collections::BTreeSet<_>>();
+    let positions = weights
+        .keys()
+        .map(|(k, _)| *k)
+        .collect::<std::collections::BTreeSet<_>>();
     println!(
         "{out}: {} lines, {} positions, {} entries, {} bytes (deepest line {} plies)",
         repertoire::LINES.len(),
@@ -89,7 +92,12 @@ fn main() -> Result<()> {
 /// destination, which is the classic way to get a book that never hits.
 fn encode_move(m: &Move) -> u16 {
     let (from, to, promo) = match m {
-        Move::Normal { from, to, promotion, .. } => (*from, *to, promo_code(*promotion)),
+        Move::Normal {
+            from,
+            to,
+            promotion,
+            ..
+        } => (*from, *to, promo_code(*promotion)),
         Move::EnPassant { from, to } => (*from, *to, 0),
         Move::Castle { king, rook } => (*king, *rook, 0),
         Move::Put { .. } => unreachable!("no drops in standard chess"),

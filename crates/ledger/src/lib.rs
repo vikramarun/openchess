@@ -6,6 +6,10 @@
 //! loser's bankroll to the winner's (minus rake). Funds live in the contract,
 //! never in a platform wallet.
 
+// The `sol!` macro generates contract bindings whose functions mirror the
+// Solidity signatures — arg counts aren't ours to shrink.
+#![allow(clippy::too_many_arguments)]
+
 use alloy::network::EthereumWallet;
 use alloy::primitives::{keccak256, B256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
@@ -862,10 +866,17 @@ mod tests {
         // Long window for the claim flow (settle never races the timeout); short
         // window for the refund flow (so we can actually wait past it).
         let escrow_pay =
-            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, 3600u64).await?;
-        let escrow_ref =
-            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, refund_timeout)
+            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, 3600u64)
                 .await?;
+        let escrow_ref = ChessEscrow::deploy(
+            &provider,
+            *usdc.address(),
+            me,
+            fee_recipient,
+            0u16,
+            refund_timeout,
+        )
+        .await?;
         eprintln!(
             "deployed: usdc={} escrow_pay={} escrow_ref={}",
             usdc.address(),
@@ -916,8 +927,16 @@ mod tests {
         let pay = ChessEscrow::new(*escrow_pay.address(), &provider);
         let tid = Uuid::new_v4();
         let gid = game_id_to_bytes32(tid);
-        pay.openTournament(gid, buy_in).send().await?.get_receipt().await?;
-        pay.enterTournament(gid, me).send().await?.get_receipt().await?; // pool = 17 USDC
+        pay.openTournament(gid, buy_in)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        pay.enterTournament(gid, me)
+            .send()
+            .await?
+            .get_receipt()
+            .await?; // pool = 17 USDC
 
         // 17 leaves: index 0 is our test winner, the rest synthetic. Total == pool.
         let winner = Address::from([0x11; 20]);
@@ -938,11 +957,19 @@ mod tests {
             .await?;
         let sig = signer.sign_hash(&digest).await?;
         let v: u8 = if sig.v() { 28 } else { 27 };
-        pay.settleTournamentRoot(gid, root, total, deadline, v, B256::from(sig.r()), B256::from(sig.s()))
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        pay.settleTournamentRoot(
+            gid,
+            root,
+            total,
+            deadline,
+            v,
+            B256::from(sig.r()),
+            B256::from(sig.s()),
+        )
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
         eprintln!("root committed: root={root} tid_bytes32={gid} (== web tidToBytes32)");
 
         let proof = merkle_proof(&leaf_hashes, 0);
@@ -954,8 +981,15 @@ mod tests {
             .get_receipt()
             .await?;
         let after = pay.bankroll(winner).call().await?;
-        assert_eq!(after - before, leaf_amt, "payout credited to winner bankroll");
-        eprintln!("claim OK: winner bankroll += 1 USDC  tx={}/{}", explorer, rcpt.transaction_hash);
+        assert_eq!(
+            after - before,
+            leaf_amt,
+            "payout credited to winner bankroll"
+        );
+        eprintln!(
+            "claim OK: winner bankroll += 1 USDC  tx={}/{}",
+            explorer, rcpt.transaction_hash
+        );
 
         // A second claim must revert (AlreadyClaimed). Assert via a static call
         // (eth_call) — an actual send that reverts would leave the sender's cached
@@ -972,8 +1006,16 @@ mod tests {
         let re = ChessEscrow::new(*escrow_ref.address(), &provider);
         let tid2 = Uuid::new_v4();
         let gid2 = game_id_to_bytes32(tid2);
-        re.openTournament(gid2, buy_in).send().await?.get_receipt().await?;
-        re.enterTournament(gid2, me).send().await?.get_receipt().await?; // bankroll[me] -= buy_in
+        re.openTournament(gid2, buy_in)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        re.enterTournament(gid2, me)
+            .send()
+            .await?
+            .get_receipt()
+            .await?; // bankroll[me] -= buy_in
         let before_ref = re.bankroll(me).call().await?;
 
         // Wait out the settle window (opened ~now; over-wait to clear the boundary).
@@ -983,7 +1025,10 @@ mod tests {
         let rcpt2 = re.claimRefund(gid2, me).send().await?.get_receipt().await?;
         let after_ref = re.bankroll(me).call().await?;
         assert_eq!(after_ref - before_ref, buy_in, "refund restored the buy-in");
-        eprintln!("refund OK: entrant bankroll += buy-in  tx={}/{}", explorer, rcpt2.transaction_hash);
+        eprintln!(
+            "refund OK: entrant bankroll += buy-in  tx={}/{}",
+            explorer, rcpt2.transaction_hash
+        );
         eprintln!("LIVE TOURNAMENT CLAIM + REFUND: PASS");
         Ok(())
     }

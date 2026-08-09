@@ -132,11 +132,12 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
             .ok_or_else(|| anyhow!("no ticket_id"))?
             .to_string();
 
-        // Wait for a pairing.
+        // Wait for a pairing. The bearer rides along so the server CAN one day
+        // gate a wagered ticket's token on the owner wallet — today it doesn't,
+        // because clients shipped before this line polled anonymously.
         println!("game {}/{}: waiting for an opponent...", i + 1, opts.count);
         let (game_id, token) = loop {
-            let t: Value = client
-                .get(format!("{http}/queue/{ticket_id}"))
+            let t: Value = with_auth(client.get(format!("{http}/queue/{ticket_id}")), &auth_token)
                 .send()
                 .await?
                 .json()

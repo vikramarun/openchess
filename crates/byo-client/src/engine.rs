@@ -96,7 +96,9 @@ impl UciEngine {
     /// case-sensitive in the UCI spec, but engines disagree in practice, so
     /// compare loosely — a missed match would silently drop the setting.
     pub fn supports_option(&self, name: &str) -> bool {
-        self.options.iter().any(|o| o.name.eq_ignore_ascii_case(name))
+        self.options
+            .iter()
+            .any(|o| o.name.eq_ignore_ascii_case(name))
     }
 
     /// Block until the engine reports `readyok`.

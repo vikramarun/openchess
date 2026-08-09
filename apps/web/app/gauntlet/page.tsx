@@ -148,7 +148,11 @@ function GauntletClient() {
         const { ticket_id } = await r.json();
         poll = setInterval(async () => {
           try {
-            const t = await (await fetch(`${SERVER_HTTP}/queue/${ticket_id}`)).json();
+            // authedFetch, not fetch: the ticket poll should carry the session
+            // so the server CAN one day gate a wagered ticket's launch token on
+            // the owner wallet (queue_get documents why it can't yet — shipped
+            // native clients still poll bearerless).
+            const t = await (await authedFetch(`${SERVER_HTTP}/queue/${ticket_id}`)).json();
             if (t.status === "matched" && live) {
               clearInterval(poll);
               setSearching(false);

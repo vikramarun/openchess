@@ -395,7 +395,7 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             0x01 | 0xd0..=0xd7 => {}
             // Start of scan: entropy-coded data follows, so a frame header we
             // haven't reached by now isn't coming. Ditto a second SOI or an EOI.
-            0xda | 0xd8 | 0xd9 => return None,
+            0xd8..=0xda => return None,
             // Start of frame, in all its flavours (baseline, progressive,
             // lossless, arithmetic). DHT/JPG/DAC share the 0xC_ range but are
             // not frame headers, hence the three holes.
@@ -574,7 +574,10 @@ mod tests {
         // of these compresses to ~236 KB — comfortably inside AVATAR_MAX_BYTES.
         let bomb = png(9000, 9000);
         let (_, w, h) = sniffed(&bomb).expect("a well-formed header, just an absurd one");
-        assert!(w > AVATAR_MAX_PX && h > AVATAR_MAX_PX, "must be refused by size");
+        assert!(
+            w > AVATAR_MAX_PX && h > AVATAR_MAX_PX,
+            "must be refused by size"
+        );
         // One oversized side is enough.
         let (_, w, h) = sniffed(&png(64, 4000)).unwrap();
         assert!(w <= AVATAR_MAX_PX && h > AVATAR_MAX_PX);

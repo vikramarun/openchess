@@ -238,10 +238,12 @@ impl Game {
         let elapsed = now_ms.saturating_sub(self.turn_started_ms);
         match mover {
             shakmaty::Color::White => {
-                self.white_ms = self.white_ms.saturating_sub(elapsed) + self.time_control.increment_ms;
+                self.white_ms =
+                    self.white_ms.saturating_sub(elapsed) + self.time_control.increment_ms;
             }
             shakmaty::Color::Black => {
-                self.black_ms = self.black_ms.saturating_sub(elapsed) + self.time_control.increment_ms;
+                self.black_ms =
+                    self.black_ms.saturating_sub(elapsed) + self.time_control.increment_ms;
             }
         }
         self.turn_started_ms = now_ms;
@@ -341,10 +343,7 @@ fn fen_string(pos: &Chess) -> String {
 /// The repetition-relevant prefix of a FEN: piece placement, side to move,
 /// castling rights, and en-passant square (drops the halfmove/fullmove clocks).
 fn repetition_key(fen: &str) -> String {
-    fen.split_whitespace()
-        .take(4)
-        .collect::<Vec<_>>()
-        .join(" ")
+    fen.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -390,7 +389,9 @@ mod tests {
         // White makes a move quickly.
         g.play_move("e2e4", 500).unwrap();
         // Black is to move with 60s; let way more than that elapse.
-        let result = g.flag_if_expired(500 + 60_000 + LAG_ALLOWANCE_MS + 1).unwrap();
+        let result = g
+            .flag_if_expired(500 + 60_000 + LAG_ALLOWANCE_MS + 1)
+            .unwrap();
         assert_eq!(result.reason, GameEndReason::Timeout);
         assert_eq!(result.winner, Some(Color::White));
     }

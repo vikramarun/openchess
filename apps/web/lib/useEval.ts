@@ -9,19 +9,36 @@ import { toWhiteRelative, type EvalScore } from "./evalScore";
 /** localStorage key for the viewer's eval-bar preference. */
 const PREF_KEY = "openchess.evalBar";
 
-/** The eval-bar on/off preference, persisted per browser. Starts from the
- *  default on the server render and adopts the stored value after mount, so
- *  hydration can't mismatch. */
+/** Viewports below this get the eval bar OFF by default: the bar costs a 7 MB
+ *  engine download plus a continuous search on the viewer's CPU — the wrong
+ *  first experience for someone who tapped a shared game link on a phone.
+ *  Turning it on once persists, so this only ever decides the first visit. */
+const EVAL_DEFAULT_OFF_BELOW_PX = 720;
+
+/** The eval-bar on/off preference, persisted per browser; the default is
+ *  device-aware (phones start off).
+ *
+ *  Resolved SYNCHRONOUSLY in the state initializer, not adopted in an effect:
+ *  useEval's engine-load effect fires on the first commit, so a pref that
+ *  arrived one effect later could let the download start before "off" landed.
+ *  Safe from hydration mismatch in practice because every eval surface mounts
+ *  client-side (boards appear only after a fetch/WS frame) — if one is ever
+ *  server-rendered, the `typeof window` arm is what the server saw. */
 export function useEvalPref(): [boolean, (on: boolean) => void] {
-  const [on, setOn] = useState(true);
-  useEffect(() => {
+  const [on, setOn] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
     try {
       const v = window.localStorage.getItem(PREF_KEY);
-      if (v !== null) setOn(v === "1");
+      if (v !== null) return v === "1";
     } catch {
-      /* private mode / storage disabled — keep the default */
+      /* private mode / storage disabled — fall through to the device default */
     }
-  }, []);
+    try {
+      return !window.matchMedia(`(max-width: ${EVAL_DEFAULT_OFF_BELOW_PX - 1}px)`).matches;
+    } catch {
+      return true;
+    }
+  });
   const set = useCallback((next: boolean) => {
     setOn(next);
     try {
