@@ -1523,6 +1523,11 @@ enum ApprovalState {
 /// Most codes an organizer may have outstanding on one tournament. Bounds the
 /// map that rides on every persist and every rehydrate.
 const MAX_INVITE_CODES: usize = 256;
+/// Most pending/decided requests one tournament will record. Its own constant
+/// rather than borrowing the invite cap: they bound different maps, filled by
+/// different people (the organizer mints codes; anyone can ask to join), and a
+/// shared name would make a future change to one silently move the other.
+const MAX_JOIN_REQUESTS: usize = 256;
 
 /// Dispatch info for a bot entrant (its seat is played by its connected agent).
 #[derive(Clone)]
@@ -2335,6 +2340,15 @@ async fn tourney_invites_list(
 struct RequestRow {
     wallet: String,
     state: ApprovalState,
+    /// The applicant's handle, when they have claimed one.
+    ///
+    /// Resolved here because the view's `labels` map cannot cover these: it is
+    /// built from `entrant_seats`, i.e. from `players` — and an applicant the
+    /// organizer has yet to decide on is by definition not a player. Without
+    /// this the one screen where someone is judged by their identity is the one
+    /// screen that shows a bare address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
 }
 
 /// Ask to be let in. The applicant's own call; no money moves here — that is
@@ -2360,7 +2374,7 @@ async fn tourney_request(
         }
         // Bounded by the same cap as invites so an open request list can't be
         // used to grow this map (and every persist of it) without limit.
-        if !t.approvals.contains_key(&wallet) && t.approvals.len() >= MAX_INVITE_CODES {
+        if !t.approvals.contains_key(&wallet) && t.approvals.len() >= MAX_JOIN_REQUESTS {
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
         // Re-requesting never overwrites a decision: an applicant must not be
@@ -2379,19 +2393,32 @@ async fn tourney_requests_list(
 ) -> Result<Json<Vec<RequestRow>>, StatusCode> {
     state.reject_if_rate_limited_polls(&headers)?;
     let caller = state.authed_wallet(&headers);
-    let ts = state.0.lobby.tournaments.lock();
-    let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-    if !is_organizer(t, caller.as_deref()) {
-        return Err(StatusCode::FORBIDDEN);
+    // Lock-scoped, so the username lookup below can await without holding it.
+    let mut rows: Vec<RequestRow> = {
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+        if !is_organizer(t, caller.as_deref()) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        t.approvals
+            .iter()
+            .map(|(wallet, state)| RequestRow {
+                wallet: wallet.clone(),
+                state: *state,
+                username: None,
+            })
+            .collect()
+    };
+    // One batched query, like `entrant_labels`. Organizer-only and rarely
+    // polled, so this is nowhere near the lobby list's cost profile.
+    if let Some(db) = state.0.db.as_ref() {
+        let wallets: Vec<String> = rows.iter().map(|r| r.wallet.clone()).collect();
+        if let Ok(names) = db.usernames_for(&wallets).await {
+            for row in rows.iter_mut() {
+                row.username = names.get(&row.wallet.to_lowercase()).cloned();
+            }
+        }
     }
-    let mut rows: Vec<RequestRow> = t
-        .approvals
-        .iter()
-        .map(|(wallet, state)| RequestRow {
-            wallet: wallet.clone(),
-            state: *state,
-        })
-        .collect();
     rows.sort_by(|a, b| a.wallet.cmp(&b.wallet));
     Ok(Json(rows))
 }
@@ -2701,9 +2728,10 @@ fn pairings_of(t: &Tournament, scope: Pairings) -> Vec<TourneyPairing> {
 ///
 /// Prefers the cached onchain figure (`pool_refresh_task`), which is the only
 /// one that can see sponsorship. Falls back to `buy_in × entrants` until the
-/// first read lands — right for a plain buy-in event, and an understatement
-/// rather than an overstatement for a sponsored one, which is the safer way to
-/// be briefly wrong about a prize.
+/// first read lands, and that fallback can be wrong in EITHER direction: it
+/// misses sponsorship, and it counts an entrant whose `enterTournament` failed
+/// onchain. Display only, and never the number that pays — `distribute_pool`
+/// re-reads the chain and fails closed if it can't.
 fn pool_of(t: &Tournament, entrants: usize) -> Option<u128> {
     if !has_pool(t.buy_in.as_deref()) {
         return None;
@@ -3443,31 +3471,69 @@ fn has_pool(buy_in: Option<&str>) -> bool {
 /// `max_lobby_tournaments` view calls per tick, and only for tournaments that
 /// have a pool and haven't finished with it.
 const POOL_REFRESH: Duration = Duration::from_secs(15);
+/// Pools read per tick. `max_lobby_tournaments` defaults to 256, and these are
+/// sequential awaited view calls — an unbounded sweep of a full lobby takes far
+/// longer than the interval above, so the task stops sleeping in any meaningful
+/// sense and becomes a permanent load on the same RPC the oracle needs to
+/// settle with. Bounded and rotated instead: every tournament still gets a
+/// refresh, just within a few ticks rather than every one.
+const POOL_REFRESH_BATCH: usize = 32;
 
 /// Keep each live tournament's cached pool roughly current, for display.
 pub async fn pool_refresh_task(state: AppState) {
+    // Where the last tick stopped, so a lobby larger than one batch is covered
+    // in turn instead of the same head being refreshed forever.
+    let mut cursor = 0usize;
     loop {
         tokio::time::sleep(POOL_REFRESH).await;
-        refresh_pools(&state).await;
+        cursor = refresh_pools(&state, cursor).await;
     }
 }
 
-async fn refresh_pools(state: &AppState) {
+/// The slice of `ids` this tick should read, and where the next should resume.
+///
+/// Split out from the awaiting loop because this is the part that can be wrong
+/// in a way no build catches: an off-by-one either re-reads one head forever
+/// (starving the tail) or skips ids entirely. Wraps, so a batch spanning the
+/// end continues from the front.
+fn refresh_batch(ids: &[Uuid], cursor: usize) -> (Vec<Uuid>, usize) {
+    if ids.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let start = cursor % ids.len();
+    let take = POOL_REFRESH_BATCH.min(ids.len());
+    let batch: Vec<Uuid> = ids.iter().cycle().skip(start).take(take).copied().collect();
+    (batch, (start + take) % ids.len())
+}
+
+/// Refresh up to `POOL_REFRESH_BATCH` pools starting at `cursor`; returns where
+/// the next tick should resume.
+async fn refresh_pools(state: &AppState, cursor: usize) -> usize {
     if !state.0.settlement.is_onchain() {
-        return;
+        return 0;
     }
     // Snapshot the ids, then read — never hold the lobby lock across an await.
+    //
+    // Only a tournament that can still be funded is worth asking about: a
+    // `complete` one is waiting on settlement, which re-reads the chain itself,
+    // and sponsorship is refused past the settle window anyway. Sorted so the
+    // rotation below is stable — the map's own iteration order is arbitrary and
+    // reshuffles, which would starve some ids and re-read others.
     let ids: Vec<Uuid> = {
         let ts = state.0.lobby.tournaments.lock();
-        ts.iter()
+        let mut ids: Vec<Uuid> = ts
+            .iter()
             .filter(|(_, t)| {
                 has_pool(t.buy_in.as_deref())
-                    && !matches!(t.status.as_str(), "settled" | "abandoned")
+                    && matches!(t.status.as_str(), "open" | "running" | "paused")
             })
             .map(|(id, _)| *id)
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     };
-    for id in ids {
+    let (batch, next) = refresh_batch(&ids, cursor);
+    for id in batch {
         let Some(pool) = state.0.settlement.tournament_pool(id).await else {
             continue; // transient RPC failure: keep the previous figure
         };
@@ -3478,6 +3544,7 @@ async fn refresh_pools(state: &AppState) {
             t.pool = Some(pool);
         }
     }
+    next
 }
 
 /// Recover tournaments after a restart.
@@ -3557,7 +3624,16 @@ pub async fn recover_tournaments(state: &AppState) {
                     // existing — anyone could walk into an invite-only event
                     // after a deploy.
                     admission: serde_json::from_value(json!(r.admission)).unwrap_or_default(),
-                    invites: serde_json::from_value(r.invites).unwrap_or_default(),
+                    // An invite reserved by a join that was still running when
+                    // the process died is stored as the empty-string sentinel.
+                    // Nothing is in flight after a restart, so hand those back
+                    // rather than leaving a code spent by nobody — the one way
+                    // a code could be lost for good.
+                    invites: serde_json::from_value::<HashMap<String, Option<String>>>(r.invites)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(code, used)| (code, used.filter(|u| !u.is_empty())))
+                        .collect(),
                     approvals: serde_json::from_value(r.approvals).unwrap_or_default(),
                     // Re-read from the chain by `pool_refresh_task`; a
                     // rehydrated tournament shows no pool figure until it is.
@@ -5439,6 +5515,105 @@ mod tests {
         // The MODE is public (a client has to know to ask for a code); the codes
         // themselves are not.
         assert_eq!(view.admission, Admission::Invite);
+    }
+
+    #[test]
+    fn an_in_flight_invite_reservation_is_reclaimed_on_restart() {
+        // A code is reserved BEFORE the join runs, as the empty-string
+        // sentinel, so two joins can't race one code. If the process dies in
+        // that window the reservation is what's persisted — and nothing is in
+        // flight after a restart, so a code left that way is spent by nobody,
+        // forever. This is the reclaim `recover_tournaments` applies; the
+        // mapping is asserted here because the rehydrate path itself needs a
+        // database.
+        let stored: HashMap<String, Option<String>> = serde_json::from_value(json!({
+            "spent": "alice",
+            "reserved": "",
+            "fresh": null,
+        }))
+        .unwrap();
+        let reclaimed: HashMap<String, Option<String>> = stored
+            .into_iter()
+            .map(|(code, used)| (code, used.filter(|u| !u.is_empty())))
+            .collect();
+
+        assert_eq!(
+            reclaimed.get("spent"),
+            Some(&Some("alice".into())),
+            "a genuinely spent code stays spent"
+        );
+        assert_eq!(
+            reclaimed.get("reserved"),
+            Some(&None),
+            "an in-flight reservation is handed back, not burned"
+        );
+        assert_eq!(
+            reclaimed.get("fresh"),
+            Some(&None),
+            "an unused code is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pool_refresh_is_bounded_and_rotates() {
+        // `max_lobby_tournaments` defaults to 256 and these are sequential
+        // awaited RPC calls, so an unbounded sweep outruns its own interval and
+        // becomes permanent load on the RPC the oracle settles with. Off-chain
+        // the task must do nothing at all, and the cursor must advance rather
+        // than re-reading the same head forever.
+        let (state, _c, _r) = test_state();
+        assert!(
+            !state.0.settlement.is_onchain(),
+            "the log sink stands in for 'no chain configured'"
+        );
+        assert_eq!(
+            refresh_pools(&state, 0).await,
+            0,
+            "nothing to do without a chain — and no RPC attempted"
+        );
+
+        // The rotation itself. A lobby larger than one batch must be covered in
+        // turn: never more than a batch per tick, and never the same head twice
+        // while the tail goes unread.
+        let n = POOL_REFRESH_BATCH + 5;
+        let ids: Vec<Uuid> = (0..n).map(|_| Uuid::new_v4()).collect();
+
+        let (first, cursor) = refresh_batch(&ids, 0);
+        assert_eq!(
+            first.len(),
+            POOL_REFRESH_BATCH,
+            "one batch per tick, no more"
+        );
+        assert_eq!(first[0], ids[0]);
+        assert_eq!(cursor, POOL_REFRESH_BATCH);
+
+        // The next tick starts where that stopped, and wraps past the end.
+        let (second, _) = refresh_batch(&ids, cursor);
+        assert_eq!(
+            second[0], ids[POOL_REFRESH_BATCH],
+            "resumes, doesn't restart"
+        );
+        assert_eq!(second[5], ids[0], "and wraps around to the front");
+
+        // Every id is reached within ceil(n / batch) ticks — the property that
+        // makes a bounded sweep still a complete one.
+        let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        let mut c = 0;
+        for _ in 0..n.div_ceil(POOL_REFRESH_BATCH) {
+            let (b, next) = refresh_batch(&ids, c);
+            seen.extend(b);
+            c = next;
+        }
+        assert_eq!(
+            seen.len(),
+            n,
+            "every pool refreshed within one full rotation"
+        );
+
+        // Degenerate inputs must not panic or divide by zero.
+        assert_eq!(refresh_batch(&[], 7), (Vec::new(), 0));
+        let one = vec![ids[0]];
+        assert_eq!(refresh_batch(&one, 99), (one.clone(), 0));
     }
 
     #[test]

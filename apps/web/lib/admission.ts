@@ -13,6 +13,10 @@ export type Invite = {
 export type SeatRequest = {
   wallet: string;
   state: ApprovalState;
+  /** The applicant's handle, when they have one. Resolved by this route rather
+   *  than the tournament view's `labels`, which only covers entrants — and an
+   *  applicant awaiting a decision is not one yet. */
+  username?: string;
 };
 
 /** Mint `count` single-use codes. Organizer-only (403 otherwise). */

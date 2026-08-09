@@ -353,7 +353,13 @@ contract ChessEscrow {
     ///
     /// Refused once the settle window has closed: funding a pool that can no
     /// longer be settled would only park the money until `refundSponsorship`.
-    function sponsorTournament(bytes32 tid, uint256 amount) external nonReentrant whenNotPaused {
+    ///
+    /// No `nonReentrant`, deliberately: this moves bankroll into a pool with no
+    /// external call, exactly like `enterTournament` and `claimRefund`. The
+    /// guard belongs on the functions that touch the token (`deposit`,
+    /// `withdraw`); putting it here would cost gas and imply a reentrancy
+    /// surface that isn't there.
+    function sponsorTournament(bytes32 tid, uint256 amount) external whenNotPaused {
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();

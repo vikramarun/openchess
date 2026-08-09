@@ -10,12 +10,16 @@ import {
   type Invite,
   type SeatRequest,
 } from "@/lib/admission";
+import { shortAddress } from "@/lib/address";
 import { entrantLabel, type Admission, type Tournament } from "@/lib/tournaments";
 
-// Applicants are wallets. Prefer a claimed handle when the tournament view
-// already resolved one (an approved entrant who has joined will have it), else
-// the shared shortener — never a bare 42-character address, and never a
-// second local copy of the truncation rule.
+/** What to call an applicant. The route resolves their handle (the view's
+ *  `labels` cannot — it only covers entrants, and this list is by definition
+ *  people who aren't entrants yet), so prefer that, then a handle they've since
+ *  earned by joining, then the shared shortener. Never a bare 42-char address,
+ *  and never a second local copy of the truncation rule. */
+const applicantLabel = (t: Tournament, r: { wallet: string; username?: string }) =>
+  r.username ?? (t.labels[r.wallet.toLowerCase()] ?? shortAddress(r.wallet));
 
 /** The organizer's side of a gated tournament: mint and watch invite codes, or
  *  decide who gets in.
@@ -156,7 +160,7 @@ export function TournamentAdmission({ t }: { t: Tournament }) {
                   key={r.wallet}
                   style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
                 >
-                  <span style={{ minWidth: 130 }}>{entrantLabel(t, r.wallet)}</span>
+                  <span style={{ minWidth: 130 }}>{applicantLabel(t, r)}</span>
                   {r.state === "pending" ? (
                     <>
                       <button
