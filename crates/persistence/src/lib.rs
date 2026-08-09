@@ -207,6 +207,14 @@ pub struct OpenTournamentRow {
     pub entrant_wallets: serde_json::Value,
     /// Self-declared engine per entrant (migration 0017), display only.
     pub entrant_engines: serde_json::Value,
+    /// Creator-defined prize structure, `{"bps":[…]}` (migration 0019). Must be
+    /// restored, or a rehydrated tournament silently pays a different table.
+    pub payout: serde_json::Value,
+    /// Admission policy + its state (migration 0020). Must be restored, or a
+    /// gated tournament comes back with its door open.
+    pub admission: String,
+    pub invites: serde_json::Value,
+    pub approvals: serde_json::Value,
     /// How long ago the tournament was created, so the caller can restore its
     /// TTL clock instead of restarting it on every deploy. Computed by the
     /// database — the server has no chrono of its own.
@@ -582,16 +590,28 @@ impl Db {
         bots: &serde_json::Value,
         entrant_wallets: &serde_json::Value,
         entrant_engines: &serde_json::Value,
+        payout: &serde_json::Value,
+        admission: &str,
+        invites: &serde_json::Value,
+        approvals: &serde_json::Value,
     ) -> Result<()> {
+        // `payout` is deliberately absent from the DO UPDATE set: the prize
+        // structure is decided once, at creation, and entrants join on the
+        // strength of it. Re-writing it on every join would let a later bug (or
+        // a lost in-memory value) rewrite the terms a field already accepted.
         sqlx::query(
             r#"INSERT INTO tournaments
                  (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
-                  entrant_wallets, entrant_engines)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                  entrant_wallets, entrant_engines, payout, admission, invites, approvals)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
                  players=EXCLUDED.players, bots=EXCLUDED.bots,
                  entrant_wallets=EXCLUDED.entrant_wallets,
-                 entrant_engines=EXCLUDED.entrant_engines"#,
+                 entrant_engines=EXCLUDED.entrant_engines,
+                 -- These DO change after creation (codes get minted and spent,
+                 -- requests get decided), unlike `payout` and `admission`, which
+                 -- are the terms a field joined on and stay as first written.
+                 invites=EXCLUDED.invites, approvals=EXCLUDED.approvals"#,
         )
         .bind(id)
         .bind(name)
@@ -604,6 +624,10 @@ impl Db {
         .bind(bots)
         .bind(entrant_wallets)
         .bind(entrant_engines)
+        .bind(payout)
+        .bind(admission)
+        .bind(invites)
+        .bind(approvals)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -619,6 +643,7 @@ impl Db {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
                       players, bots, entrant_wallets, entrant_engines,
+                      payout, admission, invites, approvals,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,
@@ -629,17 +654,26 @@ impl Db {
         Ok(rows)
     }
 
-    /// Buy-in tournaments the wallet entered that have reached a finished state
-    /// (a payout or refund may be collectable onchain). DB-sourced so it
-    /// survives the restart that wipes the in-memory tournaments map. `address`
-    /// must be lowercased (entrants are stored lowercased).
+    /// Buy-in tournaments the wallet entered where a payout or refund may be
+    /// collectable onchain. DB-sourced so it survives the restart that wipes the
+    /// in-memory tournaments map. `address` must be lowercased (entrants are
+    /// stored lowercased).
+    ///
+    /// `paused` is in the list even though it is not a finished state. A paused
+    /// tournament that is never resumed is only marked `abandoned` by
+    /// `recover_tournaments`, i.e. by a restart — so without this, a server that
+    /// paused a round and then simply kept running would leave its entrants'
+    /// buy-ins locked, claimable onchain once the settle timeout lapses, and
+    /// invisible in the UI that exists to offer exactly that. The claim button
+    /// gates on the contract's own timeout, so listing one early promises
+    /// nothing.
     pub async fn claimable_tournaments(
         &self,
         address: &str,
     ) -> Result<Vec<ClaimableTournamentRow>> {
         let rows = sqlx::query_as::<_, ClaimableTournamentRow>(
             r#"SELECT id, name, status FROM tournaments
-               WHERE status IN ('complete','settled','abandoned')
+               WHERE status IN ('complete','settled','abandoned','paused')
                  AND buy_in IS NOT NULL
                  AND players @> to_jsonb($1::text)"#,
         )
@@ -713,8 +747,12 @@ impl Db {
 
     /// Tournaments that may need recovery after a restart (status='running').
     pub async fn recoverable_tournaments(&self) -> Result<Vec<TournamentRow>> {
+        // `paused` counts too: a tournament the server parked mid-round (a
+        // maintenance drain, the room ceiling) still has in-flight rooms that a
+        // restart destroys, so it is recoverable in exactly the same sense —
+        // i.e. it is not, and its entrants refund.
         let rows = sqlx::query_as::<_, TournamentRow>(
-            "SELECT id, buy_in, players FROM tournaments WHERE status='running'",
+            "SELECT id, buy_in, players FROM tournaments WHERE status IN ('running','paused')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1329,6 +1367,72 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paused tournament's entrants must still be able to find their money.
+    ///
+    /// `paused` is not a finished state, and only a RESTART ever turns one into
+    /// `abandoned` — so a server that paused a round and then kept running left
+    /// its entrants' buy-ins locked onchain, claimable once the settle timeout
+    /// lapsed, and absent from the only screen that offers the claim.
+    #[tokio::test]
+    async fn a_paused_tournament_is_still_claimable() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let wallet = format!("0x{:040x}", Uuid::new_v4().as_u128() >> 8);
+        let players = serde_json::json!([wallet]);
+        let empty = serde_json::json!({});
+        let payout = serde_json::json!({ "bps": [10000] });
+
+        // One tournament per status the claim list is meant to surface, plus
+        // `running`, which it must not.
+        let mut ids = Vec::new();
+        for status in ["paused", "abandoned", "complete", "settled", "running"] {
+            let id = Uuid::new_v4();
+            db.upsert_tournament(
+                id,
+                status,
+                Some("1000000"),
+                Some(&wallet),
+                60,
+                1,
+                status,
+                &players,
+                &empty,
+                &empty,
+                &empty,
+                &payout,
+                "open",
+                &empty,
+                &empty,
+            )
+            .await?;
+            ids.push((id, status));
+        }
+
+        let claimable = db.claimable_tournaments(&wallet).await?;
+        let got: std::collections::HashSet<Uuid> = claimable.iter().map(|r| r.id).collect();
+        for (id, status) in &ids {
+            let want = *status != "running";
+            assert_eq!(
+                got.contains(id),
+                want,
+                "status {status}: expected claimable={want}"
+            );
+        }
+
+        for (id, _) in &ids {
+            sqlx::query("DELETE FROM tournaments WHERE id = $1")
+                .bind(id)
+                .execute(&db.pool)
+                .await?;
+        }
+        Ok(())
+    }
 
     // Runs only when DATABASE_URL is set (local Postgres).
     #[tokio::test]

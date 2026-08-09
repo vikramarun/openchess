@@ -22,6 +22,14 @@ interface IERC20 {
 ///    only move a locked stake between the two committed players (minus the rake
 ///    snapshotted at open), so it can never mint balance or pay outsiders.
 ///  - `claimTimeout` refunds both stakes if a game is never settled.
+///  - A tournament pool is funded by entries, by **sponsors**, or by both. Every
+///    path in also has a path out if the pool is never settled: entrants use
+///    `claimRefund`, sponsors `refundSponsorship`.
+///
+/// Solvency: the contract's token balance always equals the sum of all bankrolls
+/// plus, for every tournament, `pool - claimedAmount` — the part of a pool it
+/// still holds that is not yet in anyone's bankroll. Fuzzed in
+/// `test/Invariant.t.sol`.
 contract ChessEscrow {
     // --- storage ----------------------------------------------------------
 
@@ -59,6 +67,12 @@ contract ChessEscrow {
     // that winners claim individually (scales to any field size). If the oracle
     // never settles, each entrant can permissionlessly reclaim their buy-in
     // after the timeout.
+    //
+    // The buy-in MAY be zero: a pool can instead (or additionally) be funded by
+    // sponsors, who move their own unlocked bankroll in via `sponsorTournament`.
+    // That is what makes free-entry prize events possible. Sponsorship is
+    // irrevocable before the timeout on purpose — a sponsor able to withdraw at
+    // will could rug a field that paid to enter a pool advertised at a size.
     struct Tournament {
         uint256 buyIn;
         uint256 pool;
@@ -73,6 +87,10 @@ contract ChessEscrow {
     mapping(bytes32 => Tournament) public tournaments;
     mapping(bytes32 => mapping(address => bool)) public tournamentEntered;
     mapping(bytes32 => mapping(address => bool)) public tournamentClaimed;
+    /// Per-sponsor contribution, so an unsettled pool can be handed back. Without
+    /// this the sponsor's money would be stranded forever whenever a tournament
+    /// is abandoned — `claimRefund` only ever returns `buyIn`, to entrants.
+    mapping(bytes32 => mapping(address => uint256)) public sponsorship;
 
     // EIP-712 (domain separator recomputed if the chain id changes, e.g. a fork)
     bytes32 private immutable _CACHED_DOMAIN_SEPARATOR;
@@ -97,6 +115,10 @@ contract ChessEscrow {
     event GameRefunded(bytes32 indexed gameId);
     event TournamentOpened(bytes32 indexed tournamentId, uint256 buyIn);
     event TournamentEntered(bytes32 indexed tournamentId, address indexed player);
+    event TournamentSponsored(bytes32 indexed tournamentId, address indexed sponsor, uint256 amount);
+    event TournamentSponsorRefunded(
+        bytes32 indexed tournamentId, address indexed sponsor, uint256 amount
+    );
     event TournamentSettled(bytes32 indexed tournamentId, uint256 pool, uint256 rake);
     event TournamentRootSet(bytes32 indexed tournamentId, bytes32 payoutRoot);
     event TournamentClaimed(bytes32 indexed tournamentId, address indexed account, uint256 amount);
@@ -133,6 +155,7 @@ contract ChessEscrow {
     error NoRoot();
     error InvalidProof();
     error SettleWindowClosed();
+    error NotSponsor();
 
     // --- modifiers --------------------------------------------------------
 
@@ -280,9 +303,12 @@ contract ChessEscrow {
     // --- tournaments ------------------------------------------------------
 
     /// Open a tournament with a uniform buy-in. Oracle-only.
+    ///
+    /// `buyIn` MAY be zero: a free-entry event whose prize pool is funded by
+    /// `sponsorTournament` instead. Nothing downstream divides by it, and an
+    /// entry of zero simply records the entrant without moving money.
     function openTournament(bytes32 tid, uint256 buyIn) external whenNotPaused {
         if (msg.sender != oracle) revert NotOracle();
-        if (buyIn == 0) revert ZeroStake();
         if (tournaments[tid].exists) revert TournamentExists();
         tournaments[tid] = Tournament({
             buyIn: buyIn,
@@ -315,6 +341,58 @@ contract ChessEscrow {
         t.entrants += 1;
         tournamentEntered[tid][player] = true;
         emit TournamentEntered(tid, player);
+    }
+
+    /// Fund a tournament's prize pool from your own unlocked bankroll.
+    ///
+    /// **Permissionless, and deliberately not oracle-gated.** It moves only the
+    /// caller's own money into a named pool, which is the same trust model as
+    /// `deposit` — gating it would buy nothing and cost an oracle round trip and
+    /// its gas. Anyone may sponsor, any number of times, and several sponsors
+    /// may fund one pool.
+    ///
+    /// Refused once the settle window has closed: funding a pool that can no
+    /// longer be settled would only park the money until `refundSponsorship`.
+    ///
+    /// No `nonReentrant`, deliberately: this moves bankroll into a pool with no
+    /// external call, exactly like `enterTournament` and `claimRefund`. The
+    /// guard belongs on the functions that touch the token (`deposit`,
+    /// `withdraw`); putting it here would cost gas and imply a reentrancy
+    /// surface that isn't there.
+    function sponsorTournament(bytes32 tid, uint256 amount) external whenNotPaused {
+        Tournament storage t = tournaments[tid];
+        if (!t.exists) revert UnknownTournament();
+        if (t.settled) revert AlreadySettled();
+        if (amount == 0) revert ZeroStake();
+        if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+        if (available(msg.sender) < amount) revert InsufficientUnlocked();
+
+        bankroll[msg.sender] -= amount; // moved into the pool, exactly like an entry
+        t.pool += amount;
+        sponsorship[tid][msg.sender] += amount;
+        emit TournamentSponsored(tid, msg.sender, amount);
+    }
+
+    /// Return a sponsor's contribution from a tournament that was never settled.
+    /// Permissionless (credits `sponsor`), O(1), and available only after the
+    /// timeout — the same safety net `claimRefund` gives entrants.
+    ///
+    /// Without this a sponsored pool is stranded permanently whenever a
+    /// tournament is abandoned, because `claimRefund` returns `buyIn` and only
+    /// to entrants. Abandonment is not hypothetical: the server abandons any
+    /// tournament that was mid-flight when it restarted.
+    function refundSponsorship(bytes32 tid, address sponsor) external {
+        Tournament storage t = tournaments[tid];
+        if (!t.exists) revert UnknownTournament();
+        if (t.settled) revert AlreadySettled();
+        if (block.timestamp <= t.openedAt + settleTimeout) revert TimeoutNotReached();
+        uint256 amount = sponsorship[tid][sponsor];
+        if (amount == 0) revert NotSponsor();
+
+        sponsorship[tid][sponsor] = 0;
+        t.pool -= amount;
+        bankroll[sponsor] += amount;
+        emit TournamentSponsorRefunded(tid, sponsor, amount);
     }
 
     /// Settle a small field directly: credit each winner. Losers are not listed
@@ -414,10 +492,15 @@ contract ChessEscrow {
     /// If a tournament is never settled within the timeout, each entrant can
     /// permissionlessly reclaim their entry. O(1) per entrant, with no oracle and
     /// no entrant-list needed (non-custodial safety net at any field size).
+    ///
+    /// A free-entry tournament has nothing to give back here — its money came
+    /// from sponsors, who use `refundSponsorship`. Refusing outright beats
+    /// burning the caller's `tournamentClaimed` flag on a zero transfer.
     function claimRefund(bytes32 tid, address account) external {
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
+        if (t.buyIn == 0) revert ZeroStake();
         if (block.timestamp <= t.openedAt + settleTimeout) revert TimeoutNotReached();
         if (!tournamentEntered[tid][account]) revert NotEntered();
         if (tournamentClaimed[tid][account]) revert AlreadyClaimed();

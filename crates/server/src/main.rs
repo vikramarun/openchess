@@ -379,6 +379,16 @@ async fn main() -> anyhow::Result<()> {
         let st = state.clone();
         supervise("sweep", move || sweep_task(st.clone()));
     }
+    // Keep each live tournament's displayed prize pool current. Sponsorship is
+    // sent by the sponsor's own browser, so there is no server-side event to
+    // react to — the pool has to be polled or the prize table shows stale
+    // numbers. Display only; settlement re-reads the chain itself.
+    {
+        let st = state.clone();
+        supervise("pool-refresh", move || {
+            matchmaking::pool_refresh_task(st.clone())
+        });
+    }
     // Backstop for the one misconfiguration this server can't survive: a second
     // machine. deploy-server.sh asserts the count, but only for deploys that go
     // through it — a bare `fly deploy` re-adds the HA machine and never does.

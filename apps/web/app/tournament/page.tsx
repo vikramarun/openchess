@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
+import { SponsorPool } from "@/components/SponsorPool";
+import { TournamentAdmission } from "@/components/TournamentAdmission";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
@@ -12,11 +14,24 @@ import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import {
+  DEFAULT_PAYOUT,
+  formatPayout,
+  parsePayout,
+  PAYOUT_PRESETS,
+  presetLabel,
+} from "@/lib/payouts";
+import { requestSeat } from "@/lib/admission";
+import {
   casualIdentity,
+  entrantLabel,
   fetchTournament,
   fetchTournaments,
   rememberCasualIdentity,
+  hasPrizePool,
+  isOrganizer,
+  kindOf,
   sameEntrant,
+  type Admission,
   type Standing,
   type Tournament,
   type TournamentGame,
@@ -54,8 +69,57 @@ export default function TournamentPage() {
   );
 }
 
-const shortName = (p: string) =>
-  p.startsWith("0x") && p.length === 42 ? `${p.slice(0, 6)}…${p.slice(-4)}` : p;
+/** Sentinel for the "type your own percentages" option in the prizes picker. */
+const CUSTOM_PAYOUT = "custom";
+
+/** A tournament's prize structure, by preset name when it matches one. */
+const payoutLabel = (t: Tournament) => presetLabel(t.payout.bps) ?? formatPayout(t.payout.bps);
+
+/** A non-zero pool as USDC, or null. Never throws on a malformed figure — this
+ *  runs inside a render. */
+function poolLabel(pool: string | null): string | null {
+  if (!pool) return null;
+  try {
+    return BigInt(pool) > 0n ? `${fmtUsdc(pool)} USDC pool` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The money terms: what entry costs, what's in the pot, how it splits.
+ *
+ *  One helper for the lobby card and the detail header so they can't drift, and
+ *  because getting this wrong is easy: `buy_in` is `"0"` for a free
+ *  sponsor-funded event, which is a TRUTHY string — branching on it directly
+ *  renders "0 USDC entry" and tags an unranked event Ranked. Go through
+ *  `kindOf`. */
+function Terms({ t }: { t: Tournament }) {
+  const kind = kindOf(t);
+  if (kind === "casual") return <>casual</>;
+  const pool = poolLabel(t.pool);
+  return (
+    <>
+      {kind === "buyin" ? (
+        <>
+          {fmtUsdc(t.buy_in)} USDC entry{" "}
+          <span className="tag tag-rated" title="Ranked: moves your ranked Elo">
+            Ranked
+          </span>
+        </>
+      ) : (
+        // Free entry is sponsor-funded: real prize money, nothing risked — so it
+        // moves casual Elo, not ranked, and carries no Ranked tag.
+        <>free entry</>
+      )}
+      {pool ? <> · {pool}</> : null} · prizes{" "}
+      <span title={formatPayout(t.payout.bps)}>{payoutLabel(t)}</span>
+    </>
+  );
+}
+
+// Entrant labels come from `entrantLabel`, which reads the server-resolved
+// `labels` map. Rendering the raw id here would print a wallet in the standings
+// while the board and the lobby print that same person's handle.
 
 const isFinished = (t: Tournament) =>
   t.status === "complete" || t.status === "settled" || t.status === "abandoned";
@@ -71,6 +135,16 @@ function TournamentClient() {
   const [name, setName] = useState("");
   const [buyIn, setBuyIn] = useState("");
   const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
+  // Prize structure for a tournament being created: a preset by label, or
+  // "custom" with percentages typed in. Parsed (and validated against the same
+  // rules the server enforces) before the request goes out.
+  const [payoutChoice, setPayoutChoice] = useState<string>(PAYOUT_PRESETS[0].label);
+  const [payoutCustom, setPayoutCustom] = useState("");
+  const [admission, setAdmission] = useState<Admission>("open");
+  // Joiner side of a gated tournament: the code being entered, and whether an
+  // approval request is in flight.
+  const [inviteCode, setInviteCode] = useState("");
+  const [requesting, setRequesting] = useState(false);
   const [casualName, setCasualName] = useState("");
 
   // Casual entrant identity, mirrored from localStorage so a reload doesn't turn
@@ -248,9 +322,22 @@ function TournamentClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openT?.id, openMe, openT?.current_round, openT?.games.length, token, address]);
 
+  // The structure the create form currently describes, or the reason it isn't
+  // one. Shown live under the field so a creator sees "these add up to 90%"
+  // while typing rather than after the form round-trips.
+  const payoutDraft = useMemo(() => {
+    if (payoutChoice !== CUSTOM_PAYOUT) {
+      const preset = PAYOUT_PRESETS.find((p) => p.label === payoutChoice);
+      return preset ? { bps: preset.bps } : DEFAULT_PAYOUT;
+    }
+    return parsePayout(payoutCustom);
+  }, [payoutChoice, payoutCustom]);
+  const payoutErr = "error" in payoutDraft ? payoutDraft.error : null;
+
   const create = async () => {
     setErr(null);
     if (!name.trim()) return setErr("Give the tournament a name.");
+    if ("error" in payoutDraft) return setErr(payoutDraft.error);
     let buyInBase: string | undefined;
     if (buyIn.trim()) {
       if (!token)
@@ -270,17 +357,33 @@ function TournamentClient() {
           buy_in: buyInBase,
           initial_secs: tc.initial,
           increment_secs: tc.inc,
+          payout: payoutDraft,
+          admission,
         }),
       });
       if (!r.ok)
         return setErr(
           r.status === 401
-            ? SESSION_EXPIRED
+            ? // A gated tournament needs an organizer who can open the gate, so
+              // the server refuses an anonymous one. Otherwise it's a stale
+              // session, which is what SESSION_EXPIRED explains.
+              admission !== "open" && !token
+              ? "Sign in (top right) to create a tournament people have to be let into."
+              : SESSION_EXPIRED
             : r.status === 402
-              ? "Deposit at least the entry fee before opening a paid tournament — the organizer plays too."
+              ? // The organizer must be funded before we spend oracle gas on
+                // `openTournament` — at least their own entry, and a deposit of
+                // some kind even when entry is free.
+                buyInBase && buyInBase !== "0"
+                ? "Deposit at least the entry fee before opening a paid tournament — the organizer plays too."
+                : "Deposit to your balance first — opening a prize pool costs us gas, so it needs a funded organizer."
               : r.status === 503
                 ? MAINTENANCE_MSG
-                : `Couldn’t create (${r.status}).`,
+                : // The server validates the structure too, and it is the
+                  // authority — say so rather than blaming the whole form.
+                  r.status === 400
+                  ? "The server refused those terms. Check the prize structure and entry fee."
+                  : `Couldn’t create (${r.status}).`,
         );
       setName("");
       setBuyIn("");
@@ -289,7 +392,7 @@ function TournamentClient() {
     }
   };
 
-  const join = async (t: Tournament, asBot = false) => {
+  const join = async (t: Tournament, asBot = false, invite?: string) => {
     setErr(null);
     if ((t.buy_in || asBot) && !token)
       return setErr(
@@ -309,6 +412,7 @@ function TournamentClient() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           player,
+          ...(invite ? { invite } : {}),
           ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : { engine: browserSeat().engine }),
         }),
       });
@@ -324,7 +428,20 @@ function TournamentClient() {
                   ? BOT_OFFLINE_MSG
                   : r.status === 409
                     ? "That display name is already taken in this tournament."
-                    : `Couldn’t join (${r.status}).`,
+                    : // The admission gate. The server answers 403 for every
+                      // not-admitted case and never a 2xx — `fetch` counts 202
+                      // as ok, so a "you're still pending" success code would be
+                      // read here as a completed join. Which case it is comes
+                      // from `my_admission`, not the status.
+                      r.status === 403
+                      ? t.admission === "invite"
+                        ? "That invite code isn’t valid — it may already have been used."
+                        : t.my_admission === "pending"
+                          ? "Your request is still waiting on the organizer."
+                          : t.my_admission === "rejected"
+                            ? "The organizer declined this request."
+                            : "Ask the organizer to let you in first."
+                      : `Couldn’t join (${r.status}).`,
         );
         return;
       }
@@ -394,18 +511,10 @@ function TournamentClient() {
             <b style={{ color: "var(--text-strong)" }}>{openT.name}</b>{" "}
             <span className={`status-pill ${openT.status}`}>{openT.status}</span>
             <div className="muted" style={{ fontSize: 13 }}>
-              {/* A buy-in is the only money in a tournament, and it's what makes
-                  its games ranked — nothing else on this page would say so. */}
-              {openT.buy_in ? (
-                <>
-                  {fmtUsdc(openT.buy_in)} USDC entry{" "}
-                  <span className="tag tag-rated" title="Ranked: moves your ranked Elo">
-                    Ranked
-                  </span>
-                </>
-              ) : (
-                "casual"
-              )}{" "}
+              {/* The structure is fixed at creation and can't be changed
+                  afterwards, so it belongs next to the entry fee: it is half of
+                  what an entrant is agreeing to. */}
+              <Terms t={openT} />{" "}
               · {openT.players.length} entrant{openT.players.length === 1 ? "" : "s"}
               {openT.total_rounds > 0 &&
                 ` · round ${Math.min(openT.current_round + 1, openT.total_rounds)} of ${openT.total_rounds}`}
@@ -422,6 +531,146 @@ function TournamentClient() {
             </span>
           )}
         </div>
+
+        {openT.status === "open" && !entrant && (
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <b style={{ color: "var(--text-strong)" }}>Join</b>
+            {openT.admission === "approval" ? (
+              <div style={{ marginTop: 8 }}>
+                {openT.my_admission === "approved" ? (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span className="muted" style={{ fontSize: 13 }}>
+                      You&apos;re approved.
+                    </span>
+                    <button className="primary" onClick={() => join(openT)}>
+                      Join
+                    </button>
+                    {bot.online && (
+                      <button className="ghost" onClick={() => join(openT, true)}>
+                        🤖 Join with bot
+                      </button>
+                    )}
+                  </div>
+                ) : openT.my_admission === "pending" ? (
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    Waiting for the organizer to let you in. Nothing has been charged —
+                    you&apos;ll join after they approve.
+                  </span>
+                ) : openT.my_admission === "rejected" ? (
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    The organizer declined this request.
+                  </span>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button
+                      className="primary"
+                      disabled={requesting || !token}
+                      onClick={async () => {
+                        setErr(null);
+                        setRequesting(true);
+                        try {
+                          await requestSeat(openT.id);
+                          // my_admission comes from the detail poll; pull it now
+                          // rather than leaving the button looking unclicked.
+                          const fresh = await fetchTournament(openT.id);
+                          setTourneys((prev) => prev.map((x) => (x.id === fresh.id ? fresh : x)));
+                        } catch {
+                          setErr("Couldn’t send that request.");
+                        } finally {
+                          setRequesting(false);
+                        }
+                      }}
+                    >
+                      {requesting ? "Asking…" : "Ask to join"}
+                    </button>
+                    <span className="muted" style={{ fontSize: 13 }}>
+                      {token
+                        ? "The organizer decides. Asking costs nothing."
+                        : "Sign in (top right) to ask — approval is tied to your wallet."}
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : openT.admission === "invite" ? (
+              <div style={{ marginTop: 8 }}>
+                <div className="offer-form" style={{ margin: 0 }}>
+                  <label className="of-field" style={{ flex: 1 }}>
+                    <span className="muted">Invite code</span>
+                    <input
+                      value={inviteCode}
+                      onChange={(e) => setInviteCode(e.target.value.trim())}
+                      placeholder="paste the code the organizer sent you"
+                    />
+                  </label>
+                  <button
+                    className="primary"
+                    disabled={!inviteCode}
+                    onClick={() => join(openT, false, inviteCode)}
+                  >
+                    Join
+                  </button>
+                  {bot.online && (
+                    <button
+                      className="ghost"
+                      disabled={!inviteCode}
+                      onClick={() => join(openT, true, inviteCode)}
+                    >
+                      🤖 Join with bot
+                    </button>
+                  )}
+                </div>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Each code lets one entrant in.
+                </span>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button className="primary" onClick={() => join(openT)}>
+                  Join
+                </button>
+                {bot.online && (
+                  <button className="ghost" onClick={() => join(openT, true)}>
+                    🤖 Join with bot
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {isOrganizer(openT, address) && <TournamentAdmission t={openT} />}
+
+        {/* Anyone may add to the pool, entrant or not, while the field is still
+            playing for it. Not once the tournament is `complete`: settlement is
+            being signed against the pool as read, so money arriving in that
+            window is raked rather than paid out (see TOURNAMENTS.md). */}
+        {hasPrizePool(openT) &&
+          config?.escrow &&
+          wagerOn &&
+          (openT.status === "open" || openT.status === "running") && (
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <b style={{ color: "var(--text-strong)" }}>Prize pool</b>
+              <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+                {poolLabel(openT.pool) ?? "Nothing in the pot yet"}
+                {kindOf(openT) === "free"
+                  ? " — entry is free, so the prizes are whatever sponsors put up."
+                  : " — entries plus sponsorship."}
+              </div>
+              <SponsorPool
+                tid={openT.id}
+                escrow={config.escrow}
+                chainId={config.chainId}
+                onFunded={() => {
+                  // The server polls the chain for the pool, so the figure here
+                  // catches up on its own within a tick or two; this just makes
+                  // the next poll happen now rather than after the interval.
+                  fetchTournament(openT.id)
+                    .then((t) => setTourneys((prev) => prev.map((x) => (x.id === t.id ? t : x))))
+                    .catch(() => {});
+                }}
+              />
+            </div>
+          )}
 
         {entrant && current && seat?.seat === "bot" && (
           <div className="panel" style={{ textAlign: "center", marginBottom: 16 }}>
@@ -554,8 +803,9 @@ function TournamentClient() {
             seat that doesn&apos;t show up within a minute forfeits.
           </li>
           <li>
-            The pool is distributed by final standings: small fields directly, large fields via
-            a Merkle claim.
+            The pool is distributed by final standings, using the prize structure the
+            organizer set when they created it: small fields directly, large fields via a
+            Merkle claim.
           </li>
           <li>If it never settles, every entrant reclaims their entry after a timeout.</li>
         </ol>
@@ -594,9 +844,65 @@ function TournamentClient() {
               ))}
             </div>
           </label>
-          <button className="primary" onClick={create}>
+          <button className="primary" onClick={create} disabled={!!payoutErr}>
             Create
           </button>
+        </div>
+        <div className="offer-form" style={{ marginTop: 10 }}>
+          <label className="of-field">
+            <span className="muted">Prizes</span>
+            <select
+              value={payoutChoice}
+              onChange={(e) => setPayoutChoice(e.target.value)}
+              style={{ minWidth: 190 }}
+            >
+              {PAYOUT_PRESETS.map((p) => (
+                <option key={p.label} value={p.label}>
+                  {p.label}
+                </option>
+              ))}
+              <option value={CUSTOM_PAYOUT}>Custom…</option>
+            </select>
+          </label>
+          <label className="of-field">
+            <span className="muted">Who can join</span>
+            <select
+              value={admission}
+              onChange={(e) => setAdmission(e.target.value as Admission)}
+              style={{ minWidth: 170 }}
+            >
+              <option value="open">Anyone</option>
+              <option value="invite">Invite code only</option>
+              <option value="approval">I approve each entrant</option>
+            </select>
+          </label>
+          {payoutChoice === CUSTOM_PAYOUT && (
+            <label className="of-field" style={{ flex: 1 }}>
+              <span className="muted">Shares, best first (%)</span>
+              <input
+                value={payoutCustom}
+                onChange={(e) => setPayoutCustom(e.target.value)}
+                placeholder="50, 30, 20"
+              />
+            </label>
+          )}
+        </div>
+        {admission !== "open" && !token && (
+          <div className="muted" style={{ fontSize: 12, marginTop: 4, color: "#e0a06c" }}>
+            Sign in (top right) first — minting codes and approving entrants are the
+            organizer&apos;s, so a gated tournament needs one.
+          </div>
+        )}
+        <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          {payoutErr ? (
+            <span style={{ color: "#e06c6c" }}>{payoutErr}</span>
+          ) : (
+            <>
+              Pays {formatPayout("bps" in payoutDraft ? payoutDraft.bps : [])} of the pool.
+              Entrants level on score split their places&apos; share equally, and a field
+              smaller than the structure shares the whole pool between whoever turned up.
+            </>
+          )}
         </div>
         <label className="of-field" style={{ marginTop: 10 }}>
           <span className="muted">Display name for casual tournaments</span>
@@ -628,25 +934,34 @@ function TournamentClient() {
                       {t.name} <span className={`status-pill ${t.status}`}>{t.status}</span>
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
-                      {t.buy_in ? (
+                      <Terms t={t} />{" "}
+                      {t.admission !== "open" && (
                         <>
-                          {fmtUsdc(t.buy_in)} USDC entry{" "}
-                          <span className="tag tag-rated">Ranked</span>
+                          ·{" "}
+                          <span
+                            className="tag"
+                            title={
+                              t.admission === "invite"
+                                ? "You need an invite code from the organizer"
+                                : "The organizer approves each entrant"
+                            }
+                          >
+                            {t.admission === "invite" ? "invite only" : "approval"}
+                          </span>{" "}
                         </>
-                      ) : (
-                        "casual"
-                      )}{" "}
+                      )}
                       · {t.players.length} entrant{t.players.length === 1 ? "" : "s"}
                       {t.total_rounds > 0 &&
                         ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}
                       {t.status !== "open" && leader && leader.score > 0 && (
-                        <> · leader {shortName(leader.player)} {leader.score}</>
+                        <> · leader {entrantLabel(t, leader.player)} {leader.score}</>
                       )}
                     </div>
                   </div>
                   <div className="tc-actions">
                     {t.status === "open" &&
                       !joined &&
+                      t.admission === "open" &&
                       (t.buy_in && available != null && available < BigInt(t.buy_in) ? (
                         <span className="muted" title="Deposit more USDC to join">
                           need {fmtUsdc(t.buy_in)}
@@ -695,9 +1010,20 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
       </div>
     );
   const decided = isFinished(t) && t.status !== "abandoned";
+  // Only show money when the server sent a table for THIS field — the prizes
+  // array is index-aligned with standings, and a mismatched length means an
+  // older server or a stale poll. Guessing would put numbers on screen that the
+  // contract has no intention of sending.
+  const prizes = t.buy_in && t.prizes.length === t.standings.length ? t.prizes : null;
   return (
     <div className="panel">
       <b style={{ color: "var(--text-strong)" }}>Standings</b>
+      {t.buy_in && (
+        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+          Prizes: {payoutLabel(t)}
+          {prizes ? (decided ? " · final" : " · if it ended now") : ""}
+        </div>
+      )}
       <table className="standings">
         <thead>
           <tr>
@@ -705,10 +1031,11 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
             <th>Entrant</th>
             <th>Score</th>
             <th>Played</th>
+            {prizes && <th>Prize</th>}
           </tr>
         </thead>
         <tbody>
-          {t.standings.map((s: Standing) => (
+          {t.standings.map((s: Standing, i: number) => (
             <tr key={s.player} className={sameEntrant(s.player, me) ? "me" : undefined}>
               {/* Equal scores share the place — honest only because the pool
                   shares the money to match. While payouts went strictly by
@@ -719,7 +1046,7 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
                 {s.tied && <span className="muted">*</span>}
               </td>
               <td>
-                {shortName(s.player)}
+                {entrantLabel(t, s.player)}
                 {s.bot && <span className="muted"> 🤖</span>}
                 {sameEntrant(s.player, me) && <span className="muted"> (you)</span>}
               </td>
@@ -728,6 +1055,11 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
                 {s.played}
                 {t.total_rounds > 0 ? `/${t.players.length - 1}` : ""}
               </td>
+              {prizes && (
+                <td className={prizes[i] === "0" ? "muted" : undefined}>
+                  {prizes[i] === "0" ? "—" : `${fmtUsdc(prizes[i])} USDC`}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -772,11 +1104,11 @@ function PairingsList({ t, me }: { t: Tournament; me: string | null }) {
                 className={`pairing${sameEntrant(g.white, me) || sameEntrant(g.black, me) ? " me" : ""}`}
               >
                 <span className={g.result === "white" ? "won" : g.result === "black" ? "lost" : ""}>
-                  {shortName(g.white)}
+                  {entrantLabel(t, g.white)}
                 </span>
                 <span className="muted"> vs </span>
                 <span className={g.result === "black" ? "won" : g.result === "white" ? "lost" : ""}>
-                  {shortName(g.black)}
+                  {entrantLabel(t, g.black)}
                 </span>
                 <span className="muted" style={{ marginLeft: 8 }}>
                   {g.forfeit

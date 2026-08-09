@@ -1,4 +1,6 @@
 import { SERVER_HTTP } from "./config";
+import { isAddress, shortAddress } from "./address";
+import { DEFAULT_PAYOUT, type PayoutSpec } from "./payouts";
 import { KEYS } from "./storage";
 
 /** A pairing in the schedule. `game_id` is null for a forfeit — the pairing was
@@ -18,8 +20,9 @@ export type Standing = {
   score: number;
   played: number;
   /** 1-based position in the payout order. Never shared between equal scores —
-   *  the pool is paid out by position (65/25/10 for a field of 3+), so showing
-   *  a shared rank would promise money the contract won't send. */
+   *  the pool is paid out by position (by the tournament's own `payout`
+   *  structure), so showing a shared rank would promise money the contract
+   *  won't send. */
   rank: number;
   /** Another entrant finished on this exact score, so this row's position — and
    *  its share of the pool — came from the tiebreak rather than from play. */
@@ -45,8 +48,71 @@ export type Tournament = {
   initial_secs: number;
   increment_secs: number;
   organizer: string | null;
+  /** How the pool is divided: basis points per finishing place, best first. */
+  payout: PayoutSpec;
+  /** What each `standings` row would take if the event ended now, in USDC base
+   *  units, INDEX-ALIGNED with `standings`. Empty when there is no pool (and on
+   *  a server that predates the field). Computed server-side by the same
+   *  function that settles, so this is the table that actually pays. */
+  prizes: string[];
+  /** The prize pool in USDC base units — entries plus sponsorship. `null` when
+   *  there is no pool. A free event is `buy_in: "0"` with a pool here. */
+  pool: string | null;
+  /** Entrant id → username, for entrants who have claimed one. Display only:
+   *  every id in `players`, `standings` and `games` stays the internal key, so
+   *  this is a lookup layered on top and nothing is keyed by it. Only the detail
+   *  and list routes fill it in, and an entrant who joined since the last poll
+   *  simply has no entry for one tick. */
+  labels: Record<string, string>;
+  /** Who may join. The MODE is public (a joiner has to know to bring a code);
+   *  the codes themselves are organizer-only and never appear here. */
+  admission: Admission;
+  /** Where the CALLING wallet stands with an approval-gated tournament. Only
+   *  the detail route fills this in — the lobby list is shared by every client
+   *  and has no caller, so it is always undefined there. */
+  my_admission?: ApprovalState;
   age_secs: number;
 };
+
+/** Who may join a tournament. Mirrors the server's `Admission`. */
+export type Admission = "open" | "invite" | "approval";
+
+/** Where a wallet stands with an approval-gated tournament. */
+export type ApprovalState = "pending" | "approved" | "rejected";
+
+/** Is this wallet the organizer? Compared against the WALLET, never the casual
+ *  display-name identity — every gate-management route is wallet-authenticated,
+ *  so offering the panel on a name match would show buttons that 403. */
+export const isOrganizer = (t: Pick<Tournament, "organizer">, address?: string): boolean =>
+  !!t.organizer && !!address && t.organizer.toLowerCase() === address.toLowerCase();
+
+/** What kind of tournament this is.
+ *
+ *  `buy_in` carries two facts at once: whether there is an onchain prize pool
+ *  (non-null) and what entry costs (its value, which may be `"0"` for a
+ *  sponsor-funded free event). Never branch on `buy_in` directly — `"0"` is a
+ *  TRUTHY string, so `t.buy_in ? … : "casual"` renders a free event as a
+ *  0 USDC entry, and tags it Ranked when it is not. */
+export type TournamentKind = "casual" | "free" | "buyin";
+
+export function kindOf(t: Pick<Tournament, "buy_in">): TournamentKind {
+  // Empty/whitespace is checked before BigInt because `BigInt("")` is `0n`
+  // rather than a throw — so a blank field would otherwise classify as a
+  // *funded free event* and advertise a prize pool that doesn't exist.
+  if (t.buy_in == null || t.buy_in.trim() === "") return "casual";
+  try {
+    return BigInt(t.buy_in) > 0n ? "buyin" : "free";
+  } catch {
+    return "casual"; // unparseable: treat as no pool rather than throw in a render
+  }
+}
+
+/** Only a paid entry moves ranked Elo — the server's `tournament_ladder` rule.
+ *  A free event pays real USDC but risks nothing, so it counts as casual. */
+export const isRanked = (t: Pick<Tournament, "buy_in">): boolean => kindOf(t) === "buyin";
+
+/** Is there prize money at all (whoever funded it)? */
+export const hasPrizePool = (t: Pick<Tournament, "buy_in">): boolean => kindOf(t) !== "casual";
 
 export type ClaimableTournament = {
   tournament_id: string;
@@ -96,6 +162,22 @@ function normalize(id: string, view: Partial<Omit<Tournament, "id">>): Tournamen
     initial_secs: view.initial_secs ?? 0,
     increment_secs: view.increment_secs ?? 0,
     organizer: view.organizer ?? null,
+    // A server that predates creator-defined structures paid the old hardcoded
+    // 65/25/10, which is what this default is — so the label a pre-deploy client
+    // shows is still the truth about how that tournament settles.
+    payout:
+      view.payout && Array.isArray(view.payout.bps) && view.payout.bps.length > 0
+        ? view.payout
+        : DEFAULT_PAYOUT,
+    // Never synthesized: an invented prize column would be a number the contract
+    // has no intention of sending. Absent means "don't show one".
+    prizes: Array.isArray(view.prizes) ? view.prizes : [],
+    pool: view.pool ?? null,
+    labels: view.labels && typeof view.labels === "object" ? view.labels : {},
+    // A server that predates admission control had no gates at all, so `open`
+    // is what such a tournament actually is — not a guess.
+    admission: view.admission === "invite" || view.admission === "approval" ? view.admission : "open",
+    my_admission: view.my_admission,
     age_secs: view.age_secs ?? 0,
   };
 }
@@ -168,6 +250,22 @@ export function rememberCasualIdentity(tid: string, player: string): void {
   } catch {
     /* private mode — identity just won't survive the reload */
   }
+}
+
+/** What to call an entrant.
+ *
+ *  An entrant id is either a wallet (buy-in) or a chosen nickname (casual), and
+ *  `labels` maps the ones whose seat has a claimed username. Falls back to a
+ *  shortened address for a wallet and to the nickname itself otherwise — never
+ *  to a raw 42-character id, which is what the standings printed before the
+ *  server started resolving handles.
+ *
+ *  Shared so the crosstable, the pairings and the organizer's request list all
+ *  say the same thing about the same person. */
+export function entrantLabel(t: Pick<Tournament, "labels">, id: string): string {
+  const named = t.labels[id] ?? t.labels[id.toLowerCase()];
+  if (named) return named;
+  return isAddress(id.toLowerCase()) ? shortAddress(id) : id;
 }
 
 /** Entrant ids are compared case-insensitively everywhere on the server. */
