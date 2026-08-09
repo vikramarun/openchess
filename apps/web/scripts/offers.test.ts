@@ -2,7 +2,12 @@
 // in a screenshot and expensive: merging two *anonymous* posters would send a
 // joiner to a stranger's board, and failing to merge the house bot's identical
 // seats brings back the duplicate-row noise the grouping exists to remove.
-import { groupOffers, type OfferLike } from "../lib/offers";
+import {
+  acceptFromGroup,
+  groupOffers,
+  joinErrorMessage,
+  type OfferLike,
+} from "../lib/offers";
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -130,5 +135,111 @@ check("empty park groups to nothing", groupOffers([]), []);
 // member of its own group (first seen), not a synthesised composite.
 check("representative is the first member", twoSeats[0]?.offer.offer_id, "a");
 
-console.log(failed === 0 ? "\nall offer-grouping tests passed" : `\n${failed} FAILED`);
-process.exit(failed === 0 ? 0 : 1);
+// --- the join walk over a group's seats ---
+//
+// The house bot stands SEATS identical offers, so a click can lose the race for
+// the first one and still have somewhere to sit. What must NOT happen is
+// walking past a failure that has nothing to do with which seat was picked
+// (maintenance, an unaffordable stake) — that would fire one pointless request
+// per seat and report the LAST one.
+const res = (status: number): Response => ({ ok: status < 400, status }) as Response;
+
+/** Records which ids were tried, answering each with a scripted status. */
+function spy(statuses: number[]) {
+  const tried: string[] = [];
+  return {
+    tried,
+    attempt: async (id: string) => {
+      tried.push(id);
+      return res(statuses[tried.length - 1] ?? 500);
+    },
+  };
+}
+
+async function main() {
+  let s = spy([200]);
+  let r = await acceptFromGroup(["a", "b"], s.attempt);
+  check("takes the first seat and stops", [r?.status, s.tried], [200, ["a"]]);
+
+  s = spy([409, 200]);
+  r = await acceptFromGroup(["a", "b"], s.attempt);
+  check("walks past a taken seat (409) to the next", [r?.status, s.tried], [200, ["a", "b"]]);
+
+  s = spy([404, 200]);
+  r = await acceptFromGroup(["a", "b"], s.attempt);
+  check("walks past a vanished seat (404)", [r?.status, s.tried], [200, ["a", "b"]]);
+
+  // The regression guard: maintenance is not "try the next seat".
+  s = spy([503, 200]);
+  r = await acceptFromGroup(["a", "b"], s.attempt);
+  check("stops on a non-retryable failure", [r?.status, s.tried], [503, ["a"]]);
+
+  s = spy([424, 200]);
+  r = await acceptFromGroup(["a", "b"], s.attempt);
+  check("stops when our own bot is offline", [r?.status, s.tried], [424, ["a"]]);
+
+  s = spy([409, 409]);
+  r = await acceptFromGroup(["a", "b"], s.attempt);
+  check("every seat taken reports the last failure", [r?.status, s.tried], [409, ["a", "b"]]);
+
+  s = spy([409, 409, 409]);
+  await acceptFromGroup(["a", "b"], s.attempt);
+  check("never tries more seats than the group has", s.tried.length, 2);
+
+  s = spy([]);
+  r = await acceptFromGroup([], s.attempt);
+  check("an empty group tries nothing and returns null", [r, s.tried], [null, []]);
+
+  // --- what the user is told ---
+  //
+  // park_accept answers 409 for three different situations: the offer is no
+  // longer open, the POSTER's bot is busy, and the ACCEPTOR's own bot is busy.
+  // The client can't tell them apart, so seating our own bot must not assert a
+  // race that may never have happened.
+  check(
+    "409 with our own bot playing admits both causes",
+    joinErrorMessage(409, { botPlays: true }),
+    "Couldn't join — your bot may already be in a game, or the seat was just taken.",
+  );
+  check(
+    "409 with a browser seat is a plain lost race",
+    joinErrorMessage(409, { botPlays: false }),
+    "Someone just took that challenge — the lobby will refresh.",
+  );
+  check(
+    "404 reads the same as 409",
+    joinErrorMessage(404, { botPlays: false }),
+    joinErrorMessage(409, { botPlays: false }),
+  );
+  check(
+    "maintenance is named",
+    joinErrorMessage(503, { botPlays: false }).includes("maintenance"),
+    true,
+  );
+  check(
+    "a stake that can't be locked is named",
+    joinErrorMessage(502, { botPlays: false }).includes("on-chain"),
+    true,
+  );
+  check(
+    "our offline bot is distinguished from the challenger's",
+    [
+      joinErrorMessage(424, { botPlays: true }),
+      joinErrorMessage(410, { botPlays: true }),
+    ],
+    [
+      "Your bot is offline — check the chess-client window.",
+      "That challenger's bot went offline — the offer is gone.",
+    ],
+  );
+    check(
+      "an unexpected status still surfaces its code",
+      joinErrorMessage(418, { botPlays: false }),
+      "Couldn't join (418).",
+    );
+
+  console.log(failed === 0 ? "\nall offer-grouping tests passed" : `\n${failed} FAILED`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+void main();

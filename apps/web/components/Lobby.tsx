@@ -12,7 +12,7 @@ import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
-import { groupOffers, type OfferGroup } from "@/lib/offers";
+import { acceptFromGroup, groupOffers, joinErrorMessage, type OfferGroup } from "@/lib/offers";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -244,49 +244,21 @@ export function Lobby() {
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
     try {
       // A row can stand for several identical seats (the house bot posts one
-      // per concurrent autopilot). Losing the race for the first — 404 gone,
-      // 409 already matching — is not a failure while another is free, so walk
-      // the group before reporting anything.
-      //
-      // 409 has to stay in the retry set even though the server overloads it
-      // (see the error text below): a just-accepted offer keeps its row in the
-      // park with status "matching"/"matched" and is only *removed* on cancel,
-      // TTL sweep, or a poster bot going offline. So the exact race this walk
-      // exists for answers 409, and narrowing to 404 would silently defeat it.
-      let r: Response | null = null;
-      for (const id of group.ids) {
-        r = await authedFetch(`${SERVER_HTTP}/park/offers/${id}/accept`, {
+      // per concurrent autopilot), so losing the race for the first is not a
+      // failure while another is free. The walk and the status wording both
+      // live in lib/offers.ts, where they are tested — this is where the bug
+      // was that told a user with a mid-game bot that someone stole the seat.
+      const r = await acceptFromGroup(group.ids, (id) =>
+        authedFetch(`${SERVER_HTTP}/park/offers/${id}/accept`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(
             botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
           ),
-        });
-        if (r.ok || (r.status !== 404 && r.status !== 409)) break;
-      }
+        }),
+      );
       if (!r) return; // empty group: unreachable, but never fall through as OK
-      if (!r.ok)
-        return setErr(
-          r.status === 503
-            ? "The server is in maintenance — no new games can be started right now."
-            : r.status === 502
-              ? "Couldn't lock stakes on-chain — check both players have deposited enough."
-              : r.status === 424
-                ? "Your bot is offline — check the chess-client window."
-                : r.status === 410
-                  ? "That challenger's bot went offline — the offer is gone."
-                  : r.status === 404 || r.status === 409
-                    ? // 409 is three different things: the offer is no longer
-                      // open, the POSTER's bot is busy, or OUR bot is busy
-                      // (matchmaking.rs park_accept). Only the first is a lost
-                      // race, so name the seat we can actually check — telling
-                      // someone their own mid-game bot means "someone took it"
-                      // sends them looking for a race that never happened.
-                      botPlays
-                      ? "Couldn't join — your bot may already be in a game, or the seat was just taken."
-                      : "Someone just took that challenge — the lobby will refresh."
-                    : `Couldn't join (${r.status}).`,
-        );
+      if (!r.ok) return setErr(joinErrorMessage(r.status, { botPlays }));
       const j = await r.json();
       if (j.seat === "bot" || !j.token) {
         // The bot plays this seat; watch the game live.
