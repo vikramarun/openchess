@@ -242,7 +242,14 @@ async fn resolve_ident(db: &persistence::Db, ident: &str) -> Result<String, Stat
     if username::is_address_shape(ident) {
         return Ok(ident.to_lowercase());
     }
-    username::validate_username(ident).map_err(|_| StatusCode::NOT_FOUND)?;
+    // The SHAPE gate, not the write gate: a name the server has already issued
+    // has to keep resolving even when the word is one nobody new may claim. The
+    // house bot is exactly that case — it holds `HouseBot` because the word is
+    // reserved to everyone else, and routing through `validate_username` 404'd
+    // its own profile while the address still served it.
+    if !username::is_username_shape(ident) {
+        return Err(StatusCode::NOT_FOUND);
+    }
     db.wallet_for_username(ident)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -388,6 +395,11 @@ struct PlayerHit {
 
 #[derive(Deserialize)]
 struct SearchQuery {
+    /// `default` so a missing `q` is an empty search rather than a 400. Without
+    /// it axum's `Query` rejects the request before the handler runs, and the
+    /// promise below — that this endpoint answers `[]` instead of erroring —
+    /// would be false for the one malformed case a client can send by accident.
+    #[serde(default)]
     q: String,
     limit: Option<i64>,
 }
@@ -446,10 +458,16 @@ async fn set_username(
     headers: HeaderMap,
     Json(req): Json<UsernameReq>,
 ) -> Response {
-    let wallet = match authed_owner(&state, &headers, &state.0.limits.username) {
-        Ok(w) => w,
+    let wallet = match state.authed_wallet_strict(&headers) {
+        Ok(Some(w)) => w,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(code) => return code.into_response(),
     };
+    // Validate BEFORE charging the bucket. What this meters is write attempts
+    // against a unique index, and a name the grammar already rejects never
+    // reaches one — so a typo shouldn't spend a token from a budget that refills
+    // once every twenty seconds. Rejected requests are still covered by this
+    // router's per-IP layer, which is the one sized for junk traffic.
     let name = match username::validate_username(&req.username) {
         Ok(n) => n,
         Err(e) => {
@@ -460,6 +478,13 @@ async fn set_username(
                 .into_response()
         }
     };
+    if state.0.limits.username.check(&wallet).is_some() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
     let Some(db) = state.0.db.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };

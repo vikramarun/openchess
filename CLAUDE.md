@@ -352,6 +352,11 @@ wallet.
   is what fails. The rules live in TWO places by necessity — `crates/server/src/username.rs`
   enforces, `apps/web/lib/username.ts` mirrors for instant feedback, and the
   reserved lists are hand-synced (divergence fails soft, in the safe direction).
+  Each side also keeps TWO gates that must not be merged: a SHAPE check for
+  routing (`is_username_shape` / `isUsernameShape`) and the full check for
+  writes. A reserved word has to stay **routable** while being unclaimable —
+  merging them 404s a live profile the server still serves by address, which is
+  exactly what happened to the house bot's own page.
   Four traps. **`users` could hold two rows per wallet** until migration 0018 —
   `upsert_user` bound the address raw (checksummed, via `seat_wallets`) while
   `set_avatar` lowercased it; reads folded through `lower(wallet)` with
@@ -372,6 +377,11 @@ wallet.
   string `"House Bot"` — impossible now that an offer's label is a resolved
   username, since that string has a space in it. **Set `HOUSE_WALLET` on Fly
   before deploying**, or the button silently degrades to its `/play` demo.
+  That var also grants the bot its handle: `ensure_house_username` claims
+  `HOUSE_USERNAME` (default `HouseBot`) for it at boot, because `housebot` is
+  RESERVED to everyone else and so the bot cannot claim it through the API — the
+  server has to hand it over. Idempotent, and cosmetic enough that every failure
+  is a log line rather than a refused boot.
 
 ## Conventions
 - Money is `rust_decimal` / `U256`, never `f64`. USDC has 6 decimals.

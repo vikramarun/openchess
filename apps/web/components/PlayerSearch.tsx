@@ -88,31 +88,35 @@ export function PlayerSearch({ placeholder }: { placeholder?: string }) {
           },
         ]
       : []),
-    ...hits.map((h) => ({
-      key: h.address,
-      // Prefer the handle in the URL — it's the canonical form (see the
-      // per-segment canonical in the route's generateMetadata).
-      ident: h.username || h.address,
-      node: (
-        <>
-          <span className="ps-av">
-            {avatarUrl(h.address, h.avatar_updated_at) ? (
-              <img src={avatarUrl(h.address, h.avatar_updated_at)!} alt="" />
-            ) : (
-              "♟"
-            )}
-          </span>
-          <span style={{ flex: 1 }}>{playerLabel({ username: h.username, address: h.address })}</span>
-          <span className="muted" style={{ fontSize: 12 }}>
-            {h.rating}
-          </span>
-        </>
-      ),
-    })),
+    ...hits.map((h) => {
+      const photo = avatarUrl(h.address, h.avatar_updated_at);
+      return {
+        key: h.address,
+        // Prefer the handle in the URL — it's the canonical form (see the
+        // per-segment canonical in the route's generateMetadata).
+        ident: h.username || h.address,
+        node: (
+          <>
+            <span className="ps-av">{photo ? <img src={photo} alt="" /> : "♟"}</span>
+            <span style={{ flex: 1 }}>
+              {playerLabel({ username: h.username, address: h.address })}
+            </span>
+            <span className="muted" style={{ fontSize: 12 }}>
+              {h.rating}
+            </span>
+          </>
+        ),
+      };
+    }),
   ];
 
+  // Clamp once, and use it for the highlight too: `rows` is rebuilt on every
+  // keystroke, so a list that shrinks under a held-down ArrowDown would leave
+  // `at` past the end — highlighting nothing while Enter still picked a row.
+  const cursor = rows.length ? Math.min(at, rows.length - 1) : 0;
+
   const submit = () => {
-    if (rows.length) return go(rows[Math.min(at, rows.length - 1)].ident);
+    if (rows.length) return go(rows[cursor].ident);
     // Never push an unvalidated string into a route.
     if (addr || isUsernameShape(term)) return go(addr ?? term);
     setErr("No player by that name.");
@@ -156,8 +160,8 @@ export function PlayerSearch({ placeholder }: { placeholder?: string }) {
             <li
               key={r.key}
               role="option"
-              aria-selected={i === at}
-              className={i === at ? "on" : undefined}
+              aria-selected={i === cursor}
+              className={i === cursor ? "on" : undefined}
               onMouseEnter={() => setAt(i)}
               onMouseDown={(e) => {
                 // mousedown, not click: the input's blur would close the list

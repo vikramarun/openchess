@@ -104,7 +104,12 @@ pub fn validate_username(s: &str) -> Result<&str, UsernameError> {
     if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(UsernameError::Charset);
     }
-    if s.len() >= 2 && s[..2].eq_ignore_ascii_case("0x") {
+    // `starts_with`, never `s[..2]`: a byte slice off a char boundary panics,
+    // and the only thing standing between this line and that panic would be the
+    // ASCII charset check above. That is an ordering dependency nothing pins —
+    // reorder the two and this becomes a crash. See `is_address_shape`, where
+    // the same slice really did panic.
+    if s.starts_with("0x") || s.starts_with("0X") {
         return Err(UsernameError::AddressShape);
     }
     if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(s)) {
@@ -113,15 +118,44 @@ pub fn validate_username(s: &str) -> Result<&str, UsernameError> {
     Ok(s)
 }
 
+/// Whether `s` could be a username: the GRAMMAR only, with no reserved-word
+/// check. This is the ROUTING gate; [`validate_username`] is the write gate.
+///
+/// The two are deliberately different strictnesses, and collapsing them breaks
+/// routing rather than validation — which is the harder failure to spot. A name
+/// the server has already issued must keep resolving even if its word later
+/// joins `RESERVED`; otherwise `/players/{that name}` 404s a profile the server
+/// is happily serving by address. That is not hypothetical: the house bot holds
+/// `HouseBot` precisely BECAUSE the word is reserved to everyone else, and
+/// routing through the write gate made its own profile unreachable.
+///
+/// `lib/address.ts` carries the same pair for the same reason.
+pub fn is_username_shape(s: &str) -> bool {
+    let len = s.chars().count();
+    (USERNAME_MIN..=USERNAME_MAX).contains(&len)
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !(s.starts_with("0x") || s.starts_with("0X"))
+}
+
 /// Whether `s` is a hex address as `/players/{ident}` recognises one: `0x` plus
 /// exactly 40 hex digits, case-insensitively.
 ///
 /// Deliberately strict — the ident router asks this question first, and a loose
 /// answer would swallow usernames.
+///
+/// Byte-oriented on purpose, but never by SLICING. `len()` counts bytes while a
+/// slice needs a char boundary, so `s[..2]` panics on a 42-byte ident whose
+/// first character is multi-byte — and this is called on an unauthenticated URL
+/// path, so that was a crafted-request panic on three public routes. `bytes()`
+/// and `starts_with` ask the same question without the boundary hazard: a real
+/// address is 42 ASCII bytes, so "42 bytes, all of them the right ASCII" is
+/// exactly the test, and any multi-byte input simply fails the hexdigit check.
 pub fn is_address_shape(s: &str) -> bool {
-    s.len() == 42
-        && s[..2].eq_ignore_ascii_case("0x")
-        && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    let b = s.as_bytes();
+    b.len() == 42
+        && b[0] == b'0'
+        && (b[1] | 0x20) == b'x'
+        && b[2..].iter().all(|c| c.is_ascii_hexdigit())
 }
 
 /// A search prefix, escaped for `LIKE … ESCAPE '\'`.
@@ -210,6 +244,29 @@ mod tests {
         }
     }
 
+    /// The routing gate and the write gate must NOT agree, and this is the pair
+    /// a refactor would "simplify" into one function.
+    ///
+    /// Reserved words have to stay ROUTABLE while being unclaimable: the house
+    /// bot holds `HouseBot` because that word is reserved to everyone else, and
+    /// resolving idents through the write gate made `/players/HouseBot` 404 a
+    /// profile that `/players/0xeebe…` served perfectly well.
+    #[test]
+    fn a_reserved_name_is_unclaimable_but_still_routable() {
+        for name in ["HouseBot", "housebot", "admin", "openchess"] {
+            assert!(is_username_shape(name), "{name} must still resolve");
+            assert_eq!(
+                validate_username(name),
+                Err(UsernameError::Reserved),
+                "{name} must not be claimable"
+            );
+        }
+        // The shape gate is still a gate: it rejects everything the grammar does.
+        for bad in ["ab", "a-b", "0xdead", "日本語", &"a".repeat(21)] {
+            assert!(!is_username_shape(bad), "{bad:?}");
+        }
+    }
+
     /// Every static child of `/players/` must be unclaimable, or its route would
     /// shadow the profile of whoever holds that name. Today the list is just
     /// `search`; this test is what makes adding the next one loud.
@@ -250,6 +307,41 @@ mod tests {
         assert!(!is_address_shape("alice"));
         // And the two never both claim the same string.
         assert!(!is_address_shape("0xdeadbeef"));
+    }
+
+    /// Every helper here is reached from an unauthenticated URL path, so none of
+    /// them may slice a `&str` by byte offset.
+    ///
+    /// `is_address_shape` did: it gated on `s.len() == 42` (BYTES) and then took
+    /// `s[..2]`, which panics when byte 2 is inside a character. A 42-byte ident
+    /// starting with one 3-byte char reached it through `/players/{ident}`,
+    /// `/players/{ident}/games` and `/players/{ident}/avatar` and killed the
+    /// connection every time. `short_addr` carries the same test for the same
+    /// reason (`short_addr_is_char_safe_on_multibyte_input` in main.rs) — this
+    /// bug class has bitten this codebase before.
+    #[test]
+    fn the_string_helpers_are_char_safe_on_multibyte_input() {
+        // 42 BYTES, 40 chars: passes a byte-length gate, panics a byte slice.
+        let crafted = format!("日{}", "a".repeat(39));
+        assert_eq!(crafted.len(), 42);
+        assert_ne!(crafted.chars().count(), 42);
+        assert!(!is_address_shape(&crafted));
+
+        // A sweep of widths and positions, since the boundary that matters
+        // depends on where the multi-byte character lands.
+        for filler in ["a", "0", "é", "→", "😀"] {
+            for n in 0..8 {
+                let s = format!("{}{}", filler.repeat(n), "b".repeat(42));
+                assert!(!is_address_shape(&s) || s.is_ascii());
+                let _ = validate_username(&s);
+                let _ = like_prefix(&s);
+                let _ = guest_label(&s);
+            }
+        }
+        // Nothing multi-byte is ever a valid username, however it is shaped.
+        for s in ["日本語", "0😀", "é".repeat(20).as_str()] {
+            assert!(validate_username(s).is_err(), "{s:?}");
+        }
     }
 
     #[test]

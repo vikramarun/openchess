@@ -132,6 +132,53 @@ pub fn seat_wallets(wager: Option<WagerSeats>, meta: &[SeatMeta; 2]) -> [Option<
     ]
 }
 
+/// The house bot's wallet (lowercased) from `HOUSE_WALLET`, if configured.
+fn house_wallet() -> Option<String> {
+    std::env::var("HOUSE_WALLET")
+        .ok()
+        .map(|w| w.trim().to_lowercase())
+        .filter(|w| !w.is_empty())
+}
+
+/// The house bot's own display name (`HOUSE_USERNAME`, default `HouseBot`).
+fn house_username() -> String {
+    std::env::var("HOUSE_USERNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "HouseBot".into())
+}
+
+/// Give the house bot's wallet its handle at boot, if it hasn't got one.
+///
+/// Without this the lobby's own bot renders as a hex address, because a seat's
+/// label is now resolved from its wallet's username and `scripts/house-bot.sh`
+/// has no way to claim one: `house`/`housebot` are on `username::RESERVED`, so
+/// `PUT /profile/username` refuses them — deliberately, since a lookalike in the
+/// offers table is exactly what that list exists to prevent. The bot may not
+/// claim it and nobody else may either, which leaves the server to grant it.
+///
+/// Idempotent, and cheap to leave in: `set_username` treats re-submitting the
+/// name a wallet already holds as a no-op that doesn't touch the cooldown, so
+/// every restart after the first is one query that changes nothing. Purely
+/// cosmetic, so every failure is a log line — a server that cannot name its bot
+/// must still boot and serve games.
+async fn ensure_house_username(state: &AppState) {
+    let (Some(db), Some(wallet)) = (state.0.db.as_ref(), house_wallet()) else {
+        return;
+    };
+    let name = house_username();
+    match db.set_username(&wallet, &name).await {
+        Ok(persistence::SetUsernameOutcome::Set { username }) => {
+            tracing::info!(%wallet, %username, "house bot username")
+        }
+        // Somebody else holds it, or the bot renamed too recently. Neither is
+        // worth failing a boot over; the lobby falls back to the short address.
+        Ok(other) => tracing::warn!(%wallet, %name, ?other, "house bot username not set"),
+        Err(e) => tracing::warn!(%wallet, "house bot username failed: {e:#}"),
+    }
+}
+
 /// Clean a client-supplied display label: strip control characters, collapse
 /// surrounding whitespace, and cap the length so the lobby can't be defaced.
 pub fn sanitize_label(s: &str) -> Option<String> {
@@ -337,6 +384,8 @@ async fn main() -> anyhow::Result<()> {
     // Recover tournaments interrupted by a restart: settle completed ones by
     // result, mark interrupted ones abandoned (entrants refund onchain).
     matchmaking::recover_tournaments(&state).await;
+
+    ensure_house_username(&state).await;
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
     // A malformed WEB_ORIGIN logs and falls back rather than panicking at boot.
@@ -677,10 +726,7 @@ async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
         siwe_domain: auth::expected_domain(),
         maintenance: state.maintenance_on(),
         admin_wallet: state.0.admin_wallet.lock().clone(),
-        house_wallet: std::env::var("HOUSE_WALLET")
-            .ok()
-            .map(|w| w.trim().to_lowercase())
-            .filter(|w| !w.is_empty()),
+        house_wallet: house_wallet(),
     })
 }
 

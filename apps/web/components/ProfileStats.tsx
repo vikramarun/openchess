@@ -93,6 +93,14 @@ export function ProfileStats({ ident, editable }: { ident: string; editable?: bo
 
   useEffect(() => {
     let live = true;
+    // Drop the previous player's data first. Navigating /player/alice ->
+    // /player/bob keeps this component mounted and only changes `ident`, so
+    // without this the head renders alice's handle, address and stats under
+    // bob's URL until his fetch lands — and a stale `err` ("No player found."
+    // from a bad lookup) renders as a panel ABOVE a profile that loaded fine,
+    // since it is a sibling of the profile rather than a short-circuit.
+    setP(null);
+    setErr(null);
     // Validate before interpolating into the API path — a route param is
     // user-controlled, and this route now accepts two shapes.
     const lower = ident.toLowerCase();
