@@ -306,7 +306,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     // Evict finished games' rooms + tokens; periodically sweep stale lobby state.
-    tokio::spawn(cleanup_task(state.clone(), cleanup_rx));
+    // Supervised like every other long-lived worker: if this dies silently,
+    // rooms/tokens never evict and `max_rooms` eventually 503s every new game.
+    // The mpsc receiver can't be recreated on restart, so it rides an Arc-Mutex
+    // that each incarnation re-locks.
+    {
+        let st = state.clone();
+        let rx = Arc::new(tokio::sync::Mutex::new(cleanup_rx));
+        supervise("cleanup", move || cleanup_task(st.clone(), rx.clone()));
+    }
     {
         let st = state.clone();
         supervise("sweep", move || sweep_task(st.clone()));
@@ -315,8 +323,14 @@ async fn main() -> anyhow::Result<()> {
     // machine. deploy-server.sh asserts the count, but only for deploys that go
     // through it — a bare `fly deploy` re-adds the HA machine and never does.
     supervise("single-node-watch", singlenode::watch);
-    // Update mode standings (gauntlet/tournament) as games finish.
-    tokio::spawn(matchmaking::results_task(state.clone(), results_rx));
+    // Update mode standings (gauntlet/tournament) as games finish. Supervised:
+    // if this dies, every running tournament stalls mid-round forever and its
+    // pool never settles.
+    {
+        let st = state.clone();
+        let rx = Arc::new(tokio::sync::Mutex::new(results_rx));
+        supervise("results", move || matchmaking::results_task(st.clone(), rx.clone()));
+    }
     // Recover tournaments interrupted by a restart: settle completed ones by
     // result, mark interrupted ones abandoned (entrants refund onchain).
     matchmaking::recover_tournaments(&state).await;
@@ -641,7 +655,11 @@ async fn shutdown_signal() {
 /// Remove a finished game's room handle and its launch tokens, and free any
 /// agents seated in it (the server owns the busy flag — a crashed or silent
 /// client can't leave its bot claimed forever).
-async fn cleanup_task(state: AppState, mut rx: mpsc::Receiver<GameId>) {
+///
+/// The receiver arrives in an Arc-Mutex because `supervise` re-invokes this on
+/// panic, and an owned receiver would die with the first incarnation.
+async fn cleanup_task(state: AppState, rx: Arc<tokio::sync::Mutex<mpsc::Receiver<GameId>>>) {
+    let mut rx = rx.lock().await;
     while let Some(game_id) = rx.recv().await {
         state.0.rooms.lock().remove(&game_id);
         state.0.live_games.lock().remove(&game_id);
@@ -1258,6 +1276,19 @@ impl AppState {
     pub fn reject_if_rate_limited_create(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
         let ip = ratelimit::client_ip(headers);
         if self.0.limits.create.check(&ip).is_some() {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        Ok(())
+    }
+
+    /// Per-IP throttle for the matchmaking **polling GETs** (`/park/offers`,
+    /// `/tournaments`, `/queue/{id}`, …). Same in-handler pattern as `create`
+    /// and for the same reason (shared router paths); its own generous bucket
+    /// so a scripted flood of the heavy tournament view can't ride for free,
+    /// while a poll-heavy tab never eats the budget needed to start a game.
+    pub fn reject_if_rate_limited_polls(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let ip = ratelimit::client_ip(headers);
+        if self.0.limits.polls.check(&ip).is_some() {
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
         Ok(())

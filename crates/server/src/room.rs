@@ -493,6 +493,19 @@ impl Room {
 
         match applied {
             Ok(applied) => {
+                // A flag detected on arrival applied NOTHING: the mover's time
+                // was gone before the move landed (empty SAN is play_move's
+                // marker). Don't ack it, don't echo the submitted string to the
+                // opponent/spectators as a played move, and don't persist it —
+                // at ply 0 there is no existing row for append_move's
+                // ON CONFLICT to swallow it, so an arbitrary ≤6-char string
+                // would land in the permanent replay. Just finish on the flag.
+                if applied.san.is_empty() {
+                    if let Some(result) = applied.result {
+                        self.finish(result).await;
+                    }
+                    return;
+                }
                 // Ack to mover.
                 self.send_to(
                     turn,
@@ -604,6 +617,19 @@ impl Room {
                     .await
                 {
                     tracing::error!(game_id = %self.game_id, "finish_and_enqueue failed: {e:#}");
+                    // A wagered result that never reached the outbox has NO
+                    // retry — the drain worker only sees enqueued rows — so
+                    // both stakes sit locked until the contract's claimTimeout.
+                    // This is exactly the failure class alert.rs exists for.
+                    if wagered {
+                        crate::alert::fire(format!(
+                            "🚨 OpenChess: could not persist the result of WAGERED game {} \
+                             ({e:#}). No settlement was enqueued and nothing retries it; \
+                             both stakes stay locked until claimTimeout unless settled \
+                             manually.",
+                            self.game_id
+                        ));
+                    }
                 }
                 // Move Elo for contested games with two known wallets (no-op
                 // otherwise); the row's own `rated` flag picks the ladder.

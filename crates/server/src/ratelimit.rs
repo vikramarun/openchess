@@ -163,6 +163,13 @@ pub struct RateLimits {
     /// Public read endpoints (`/players/*`, `/leaderboard`) — cheap per hit but
     /// the leaderboard query is heavy, so bound the rate an IP can trigger it.
     pub reads: TokenBucket,
+    /// Matchmaking/lobby polling GETs (`/park/offers`, `/tournaments`,
+    /// `/queue/{id}`, `/gauntlet/{id}`, …). Checked inside the handlers, like
+    /// `create`, because the router shares paths between throttled POSTs and
+    /// these GETs. Generous — several UI surfaces poll every 1.5–3s and a NAT
+    /// can hide many browsers — this stops a scripted flood of the
+    /// O(entrants²) tournament view, not real users.
+    pub polls: TokenBucket,
     /// Profile-photo writes (`POST`/`DELETE /profile/avatar`). Its own bucket,
     /// and the one keyed by **wallet** rather than IP: the route is
     /// authenticated and writes exactly one row, so the wallet is the thing
@@ -185,6 +192,11 @@ pub struct RateLimits {
     /// looping `POST /tournaments {buy_in}`. Casual (no-pool) tournaments are
     /// not counted.
     pub max_open_tournaments: usize,
+    /// Global ceiling on tournaments held in the lobby map, casual included.
+    /// Casual tournaments cost nothing to create and live for a day, and every
+    /// one of them is walked by every `GET /tournaments` under the lobby mutex
+    /// — unbounded, that walk becomes the single node's throughput ceiling.
+    pub max_lobby_tournaments: usize,
     /// Global ceiling on concurrent in-memory game rooms (room actor tasks +
     /// map entries). Unstarted casual rooms only self-reap after 60s, so without
     /// a ceiling a creation flood could exhaust memory/tasks on the single node.
@@ -221,6 +233,10 @@ impl RateLimits {
                 env_parse("RL_READS_BURST", 60),
                 env_parse("RL_READS_PER_SEC", 5.0),
             ),
+            polls: TokenBucket::new(
+                env_parse("RL_POLLS_BURST", 120),
+                env_parse("RL_POLLS_PER_SEC", 10.0),
+            ),
             // Deliberately tight: settling on a photo is a handful of tries,
             // not a stream, and every accepted one rewrites a row with up to
             // 256 KiB of bytes attached.
@@ -251,6 +267,7 @@ impl RateLimits {
             // small allowance covers back-to-back events without letting one
             // wallet open dozens of oracle-funded pools.
             max_open_tournaments: env_parse("RL_MAX_OPEN_TOURNAMENTS", 3),
+            max_lobby_tournaments: env_parse("RL_MAX_TOURNAMENTS", 256),
             max_rooms: env_parse("RL_MAX_ROOMS", 4096),
         }
     }
