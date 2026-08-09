@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { BRAND_NAME, LEGAL_UPDATED, SOCIALS } from "@/lib/brand";
+import { BRAND_NAME, GITHUB_URL, LEGAL_UPDATED } from "@/lib/brand";
 
 // A Server Component, so the metadata lives here rather than in a sibling
 // layout: the "every page needs a layout.tsx for its title" rule in CLAUDE.md
@@ -12,8 +12,6 @@ export const metadata: Metadata = {
     "The terms you accept by using OpenChess: non-custodial stakes, how a game settles onchain, and what we do and don't promise.",
   alternates: { canonical: "/terms" },
 };
-
-const GITHUB = SOCIALS.find((s) => s.id === "github")!.url;
 
 export default function TermsPage() {
   return (
@@ -169,7 +167,7 @@ export default function TermsPage() {
       <p>
         The client, the server and the contract are open source under the MIT licence and are
         available on{" "}
-        <a href={GITHUB} target="_blank" rel="noopener noreferrer">
+        <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
           GitHub
         </a>
         . The licence governs the code; these terms govern this hosted service.
@@ -184,7 +182,7 @@ export default function TermsPage() {
       <h2>12. Contact</h2>
       <p>
         Questions, bug reports and disclosure of security issues:{" "}
-        <a href={`${GITHUB}/issues`} target="_blank" rel="noopener noreferrer">
+        <a href={`${GITHUB_URL}/issues`} target="_blank" rel="noopener noreferrer">
           open an issue on GitHub
         </a>
         . See also our <Link href="/privacy">Privacy Policy</Link>.

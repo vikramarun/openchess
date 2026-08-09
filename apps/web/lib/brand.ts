@@ -86,12 +86,18 @@ export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://openchess.a
 /** The X handle, in the `@name` form Twitter cards want. */
 export const X_HANDLE = "@openchessai";
 
+/** The repo. Named separately from SOCIALS because the legal pages link it
+ *  directly (and its /issues) — reaching it through
+ *  `SOCIALS.find(s => s.id === "github")!` needs a non-null assertion that is
+ *  only true by inspection. */
+export const GITHUB_URL = "https://github.com/vikramarun/openchess";
+
 /** Where we are, off-site. One list, so the footer, the social icons and the
  *  card metadata can't drift apart. `label` is what a screen reader announces —
  *  the links are icon-only. */
 export const SOCIALS = [
   { id: "x", label: "X", url: `https://x.com/${X_HANDLE.slice(1)}` },
-  { id: "github", label: "GitHub", url: "https://github.com/vikramarun/openchess" },
+  { id: "github", label: "GitHub", url: GITHUB_URL },
 ] as const;
 
 /** The legal pages, and the date they last changed. Bump BOTH the date and the

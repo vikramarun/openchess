@@ -1690,10 +1690,15 @@ table.standings tr.me td {
   color: var(--text-strong);
   margin: 30px 0 8px;
 }
+/* Line-height only, deliberately NO `color`. A colour here would be `.legal p`
+   at (0,1,1), which outranks every single-class modifier put on those same
+   elements no matter what order they appear in — it silently ate both
+   `.legal-meta.muted` and `.legal-lede`'s `--text-strong`, leaving the lede
+   styled as body text. `body` already sets `--text`, so it was redundant as
+   well as harmful. */
 .legal p,
 .legal li {
   line-height: 1.65;
-  color: var(--text);
 }
 .legal p {
   margin: 10px 0;

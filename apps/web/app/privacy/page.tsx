@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { BRAND_NAME, LEGAL_UPDATED, SOCIALS } from "@/lib/brand";
+import { BRAND_NAME, GITHUB_URL, LEGAL_UPDATED } from "@/lib/brand";
 
 // A Server Component, so the metadata lives here rather than in a sibling
 // layout — see the note in ../terms/page.tsx.
@@ -11,8 +11,6 @@ export const metadata: Metadata = {
     "What OpenChess knows about you: a wallet address, the games you played, and nothing else. No accounts, no tracking cookies, no analytics.",
   alternates: { canonical: "/privacy" },
 };
-
-const GITHUB = SOCIALS.find((s) => s.id === "github")!.url;
 
 export default function PrivacyPage() {
   return (
@@ -79,8 +77,10 @@ export default function PrivacyPage() {
       <h2>Wallets and the blockchain</h2>
       <p>
         Connecting a wallet and signing in means talking to your wallet software and to a Base
-        RPC endpoint, which can see your address and IP. Those are your wallet provider’s and
-        that endpoint’s systems, under their own privacy policies, not ours.
+        RPC endpoint, which can see your address and IP. Pairing a mobile wallet also goes
+        through WalletConnect’s relay, which sees the connection metadata. Those are your wallet
+        provider’s, that endpoint’s and WalletConnect’s systems, under their own privacy
+        policies, not ours.
       </p>
       <p>
         Anything that settles onchain — a deposit, a stake, a payout — is written to a public
@@ -128,7 +128,7 @@ export default function PrivacyPage() {
       <p>
         We may update this policy; the date at the top is when it last changed. To ask anything
         about it,{" "}
-        <a href={`${GITHUB}/issues`} target="_blank" rel="noopener noreferrer">
+        <a href={`${GITHUB_URL}/issues`} target="_blank" rel="noopener noreferrer">
           open an issue on GitHub
         </a>
         . {BRAND_NAME}’s <Link href="/terms">Terms of Use</Link> cover the rest of the
