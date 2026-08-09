@@ -650,11 +650,14 @@ function TournamentClient() {
           (openT.status === "open" || openT.status === "running") && (
             <div className="panel" style={{ marginBottom: 16 }}>
               <b style={{ color: "var(--text-strong)" }}>Prize pool</b>
+              {/* Only the pool figure and how ENTRY works — both true of any
+                  escrow. Anything about sponsorship belongs to `SponsorPool`,
+                  which hides itself when the configured escrow can't take one;
+                  saying it here would leave the claim on screen with nothing
+                  behind it. */}
               <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
                 {poolLabel(openT.pool) ?? "Nothing in the pot yet"}
-                {kindOf(openT) === "free"
-                  ? " — entry is free, so the prizes are whatever sponsors put up."
-                  : " — entries plus sponsorship."}
+                {kindOf(openT) === "free" ? " — entry is free." : " — from entries."}
               </div>
               <SponsorPool
                 tid={openT.id}
