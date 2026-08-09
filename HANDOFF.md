@@ -76,8 +76,8 @@ docs.
   load-bearing, since the web `/connect` page links to
   `releases/latest/download/<name>`; the client uses **rustls** so wss:// works
   with no system OpenSSL). Cut a release with
-  `git tag v0.1.0 && git push origin v0.1.0`. `scripts/house-bot.sh` runs one
-  casual autopilot per lobby time control under an UNFUNDED wallet so the park is
+  `git tag v0.1.0 && git push origin v0.1.0`. `scripts/house-bot.sh` runs `SEATS`
+  casual autopilots per lobby time control under an UNFUNDED wallet so the park is
   never empty; it is deployed as its own Fly app. See `fly.housebot.toml`.
 - **Bot leaderboard:** the lobby shows a ranked board of top players by Elo
   (`GET /leaderboard` → `crates/server/src/players.rs` + `crates/persistence`,
@@ -112,9 +112,27 @@ docs.
   that image), and `publish` needs every build job. The Intel binary now
   cross-compiles on the Apple Silicon runner, so no Intel runner is needed.
 - **The lobby is never empty.** The house bot runs as its **own Fly app**
-  (`openchess-housebot`, `Dockerfile.housebot` + `fly.housebot.toml`), with one
-  autopilot per lobby tile under a fresh, unfunded wallet. Verified holding four
-  wallet-bound offers steady.
+  (`openchess-housebot`, `Dockerfile.housebot` + `fly.housebot.toml`), with
+  `SEATS` autopilots per lobby tile under a fresh, unfunded wallet. Verified
+  holding wallet-bound offers steady.
+- **A time control no longer vanishes when someone plays it** *(needs a
+  house-bot deploy)*. One autopilot plays one game at a time, and there was one
+  per time control, so the first visitor to accept the 3+0 challenge took the
+  only 3+0 seat and that tile left "Open challenges" for everyone else until
+  their game ended. Observed live on 2026-08-08: `/park/offers` held 1+0, 5+0
+  and 10+0 while `/games/live` showed the House Bot in a 180+0 game. Fixed by
+  `SEATS` (default 2 concurrent seats per tile, `scripts/house-bot.sh`); same
+  wallet across seats is safe because `compatible()` skips our own wallet's
+  offers, so two house seats never pair with each other. Two follow-on pieces:
+  `RL_MAX_OPEN_OFFERS` defaults to 16 for headroom (TCS×SEATS = 8 offers now
+  stand under one wallet; the old cap of 8 fit that exactly, with nothing spare
+  for a fifth tile or a third seat, so the server deploy is *not* a
+  prerequisite for the house-bot one), and the lobby collapses identical offers
+  from one wallet into a single "N seats free" row that walks the group's ids
+  when a click loses the race for the first seat (`apps/web/lib/offers.ts`,
+  `pnpm test:offers`). The house-bot VM went `shared-cpu-2x` → `shared-cpu-4x`
+  (~+$1.60/mo, no RAM surcharge, since 1gb is 4x's default) because the ceiling
+  on simultaneous house games doubled along with SEATS.
 - **Postgres is attached and live**, so persistence and the durable settlement
   outboxes are running again (see the incidents below for how long they weren't).
 - **`REQUIRE_ONCHAIN=1`** *(needs deploy)*. Set in `fly.toml`, so a
