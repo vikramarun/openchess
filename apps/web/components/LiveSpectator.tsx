@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
-import { MoveList, MoveNav } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/MoveNav";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { shortAddress } from "@/lib/address";
@@ -236,12 +236,13 @@ export function LiveSpectator({ id }: { id: string }) {
             </div>
           )}
 
-          <div className="panel">
-            <div className="muted" style={{ marginBottom: 8 }}>
-              Moves {!nav.live && <span className="behind">· viewing move {nav.at}</span>}
-            </div>
-            <MoveList sans={moves} at={nav.at} onSelect={nav.go} emptyText="waiting…" />
-          </div>
+          <MovePanel
+            sans={moves}
+            at={nav.at}
+            onSelect={nav.go}
+            emptyText="waiting…"
+            behind={!nav.live}
+          />
         </div>
       </div>
     </div>

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { MoveList, MoveNav } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/MoveNav";
 import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
 import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
@@ -368,12 +368,7 @@ export function SeatGame({
           </div>
         )}
 
-        <div className="panel">
-          <div className="muted" style={{ marginBottom: 8 }}>
-            Moves {!nav.live && <span className="behind">· viewing move {nav.at}</span>}
-          </div>
-          <MoveList sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" />
-        </div>
+        <MovePanel sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" behind={!nav.live} />
 
         {/* No early exit after declining, staked or not: leaving closes the
             socket, and the server only voids a game whose seats are both still

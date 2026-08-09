@@ -16,6 +16,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
+(cd apps/web && pnpm test:nav)     # move nav (following the live tip vs. parked on a ply)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book

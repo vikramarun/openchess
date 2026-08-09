@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { MoveList, MoveNav } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/MoveNav";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { ensureBookLoaded } from "@/lib/browserBot";
@@ -198,12 +198,7 @@ export default function PlayPage() {
             </div>
           )}
 
-          <div className="panel">
-            <div className="muted" style={{ marginBottom: 8 }}>
-              Moves {!nav.live && <span className="behind">· viewing move {nav.at}</span>}
-            </div>
-            <MoveList sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" />
-          </div>
+          <MovePanel sans={moves} at={nav.at} onSelect={nav.go} emptyText="…" behind={!nav.live} />
 
           <button className="primary" onClick={() => setNonce((n) => n + 1)}>
             New game
