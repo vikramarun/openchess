@@ -48,9 +48,11 @@ export type EvalState = {
  *  viewed position changes. This runs on the VIEWER's CPU (the whole point of
  *  the browser engine), so it is opt-outable and pauses while the tab is hidden.
  *
- *  Only observer views use this. A seat that is actually playing a wagered game
- *  runs its own engine; adding a second searcher there would take CPU away from
- *  the engine whose move quality is on the line. */
+ *  A seat that is actually playing gets most of its bar for free from the engine
+ *  already playing its move (`onEval` in lib/play.ts → SeatGame) and uses this
+ *  only while that engine is idle — searching here during our own turn would
+ *  take CPU from the engine whose move quality, and stake, is on the line. All
+ *  callers share the `useEvalPref` switch, so the bar follows the viewer. */
 export function useEval(fen: string | null, enabled: boolean): EvalState {
   const { engine, status } = useEngine();
   const [score, setScore] = useState<EvalScore | null>(null);

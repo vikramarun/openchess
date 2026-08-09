@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
+import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
@@ -12,6 +13,7 @@ import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
 import { DEFAULT_TC, TIME_CONTROLS, tcByLabel, type TimeControl } from "@/lib/timeControls";
+import { useEval, useEvalPref } from "@/lib/useEval";
 import { usePlyNav } from "@/lib/usePlyNav";
 import { useSpectatorBoard } from "@/lib/useSpectatorBoard";
 import { shortAddr } from "@/lib/verify";
@@ -25,6 +27,12 @@ export default function PlayPage() {
   const [status, setStatus] = useState("loading engines…");
   const [nonce, setNonce] = useState(0); // bump to start a new game
   const [tc, setTc] = useState<TimeControl | null>(null); // resolved on mount
+  // Nobody at this board is playing for anything: both seats are engines and the
+  // viewer is a spectator, so the eval bar belongs here for the same reason it
+  // does on /game/[id]. It runs on the shared singleton engine (a third worker
+  // beside the two seats), which is why it stays opt-outable.
+  const [evalOn, setEvalOn] = useEvalPref();
+  const engineEval = useEval(view.fen, evalOn);
 
   // Resolve the time control from the ?tc= query param (set by the homepage),
   // defaulting to 3+0. Done in an effect so SSR/CSR markup matches.
@@ -150,6 +158,9 @@ export default function PlayPage() {
             lastMove={lastMoveFromUci(view.lastUci)}
             check={view.check}
             onFlip={flip}
+            showEval={evalOn && !engineEval.failed}
+            evalScore={engineEval.score}
+            evalThinking={engineEval.thinking}
           />
           {bar(orientation)}
           {nav.total > 0 && (
@@ -191,6 +202,12 @@ export default function PlayPage() {
             <div className="muted" style={{ marginTop: 8 }}>
               Status: {status}
             </div>
+            <EvalToggle
+              on={evalOn}
+              onChange={setEvalOn}
+              loading={engineEval.loading}
+              failed={engineEval.failed}
+            />
           </div>
 
           {result && (

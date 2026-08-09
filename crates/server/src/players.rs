@@ -80,6 +80,10 @@ struct GameDetailView {
     initial_secs: u64,
     increment_secs: u64,
     finished_at: Option<String>,
+    /// Self-declared engines, [white, black]. Unverified by design — display
+    /// only, never a basis for anything (ARCHITECTURE.md's trust model).
+    white_engine: Option<String>,
+    black_engine: Option<String>,
     moves: Vec<MoveView>,
 }
 
@@ -117,6 +121,8 @@ async fn game_detail(
         initial_secs: (g.time_initial_ms / 1000).max(0) as u64,
         increment_secs: (g.time_increment_ms / 1000).max(0) as u64,
         finished_at: g.finished_at.map(|t| t.to_rfc3339()),
+        white_engine: g.white_engine,
+        black_engine: g.black_engine,
         moves: moves
             .into_iter()
             .map(|m| MoveView {

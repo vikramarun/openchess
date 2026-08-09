@@ -3,14 +3,27 @@
 
 import { Chess } from "chessops/chess";
 
-import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserBot";
+import {
+  ensureBookLoaded,
+  ensureRepertoireLoaded,
+  getBrowserBotConfig,
+  probeRepertoire,
+  probeUserBook,
+} from "./browserBot";
 import { SERVER_WS } from "./config";
-import { BrowserEngine } from "./engine";
+import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
+import { budgetMs, goCommand } from "./timePolicy";
 import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
+  /** Scores from THIS seat's own search, as it thinks about its move. `ply` is
+   *  the position being searched (moves played so far), so the side to move —
+   *  whose perspective the UCI score is from — is `ply % 2`. Lets the UI show an
+   *  eval bar without a second engine: this search is happening anyway. Silent
+   *  on a book move, since no search runs. */
+  onEval?: (info: EngineInfo, ply: number) => void;
   /** Asked once, before this seat declares itself ready. Resolving false holds
    *  the seat back: the server starts a game only when BOTH seats ready, so
    *  this is the hook a "confirm the stakes" prompt hangs off. Omit to ready
@@ -21,6 +34,11 @@ export type PlayHandlers = {
    *  is created, so by the time the engine has booted and this socket is up,
    *  some of it is already gone. Null on a server too old to say. */
   confirmStart?: (deadlineMs: number | null) => Promise<boolean>;
+  /** Called at most once, when the seat's engine fails outright mid-game (a
+   *  dead worker, not a bad move — that is handled by retryAfterResync).
+   *  Returning a working engine lets the seat play on instead of resigning,
+   *  which matters because a resignation forfeits a real stake. */
+  onEngineFallback?: () => Promise<BrowserEngine>;
 };
 
 /** Reset the engine and ask once more, for a seat whose engine just answered
@@ -66,10 +84,29 @@ async function retryAfterResync(
  *  move-sequence PREFIX, so a history in the king-takes-rook notation would
  *  miss every entry from the castle onwards. */
 function legalBookMove(pos: Chess, history: string[]): string | null {
-  const maxPly = getBrowserBotConfig().bookMaxPly;
-  const user = probeUserBook(pos, history.length, maxPly);
+  const cfg = getBrowserBotConfig();
+  const ply = history.length;
+
+  // Two books, two depth settings, each governed by the control next to it:
+  // `bookMaxPly` belongs to the uploaded .bin, `repertoire.maxPly` to the
+  // built-in repertoire (and to the broad fallback book, which is the same
+  // kind of thing). Sharing one of them here meant the repertoire picker's
+  // "leave book after ply" changed the preview and nothing else.
+  const user = probeUserBook(pos, ply, cfg.bookMaxPly);
   const userStd = user ? toStandardUci(pos, user) : null;
   if (userStd) return userStd;
+
+  // The chosen repertoire. Normalized like everything else: a .bin stores
+  // castling as king-takes-rook by spec, so decodeMove already converts it —
+  // this is the belt to that braces.
+  const repMaxPly = cfg.repertoire.maxPly;
+  const rep = probeRepertoire(pos, ply, repMaxPly, cfg.repertoire.pick);
+  const repStd = rep ? toStandardUci(pos, rep) : null;
+  if (repStd) return repStd;
+
+  // The broad book honours a depth limit too — it used to be exempt, which
+  // made "leave book after N plies" quietly untrue for it.
+  if (ply >= repMaxPly) return null;
   const builtin = bookMove(history);
   return builtin ? toStandardUci(pos, builtin) : null;
 }
@@ -79,16 +116,25 @@ function legalBookMove(pos: Chess, history: string[]): string | null {
 export function playSeat(
   gameId: string,
   token: string,
-  engine: BrowserEngine,
+  engineIn: BrowserEngine,
   movetimeMs: number,
   handlers: PlayHandlers = {},
   cancelled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
-  // Warm the uploaded-book cache; resolves long before the first your_turn.
+  // Reassignable: a dead engine is swapped for a replacement mid-game (below).
+  let engine = engineIn;
+  let onFallback = handlers.onEngineFallback ?? null;
+  // Warm both book caches; they resolve long before the first your_turn.
   void ensureBookLoaded();
+  void ensureRepertoireLoaded();
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
+  // `deadline_server_ms` is stamped in the SERVER's clock, so it needs an
+  // offset to be usable. `welcome` carries `server_time_ms` for exactly that.
+  // Estimated once and ignoring one-way latency, which is fine because the
+  // deadline is only ever an upper bound with OVERHEAD_MS subtracted.
+  let serverOffsetMs = 0;
   const send = (msg: Record<string, unknown>) => {
     seq += 1;
     ws.send(JSON.stringify({ v: 1, seq, ts_ms: 0, ...msg }));
@@ -119,6 +165,7 @@ export function playSeat(
       }
       switch (m.type) {
         case "welcome": {
+          if (typeof m.server_time_ms === "number") serverOffsetMs = m.server_time_ms - Date.now();
           const deadlineMs =
             typeof m.start_deadline_ms === "number" ? m.start_deadline_ms : null;
           if (handlers.confirmStart && !(await handlers.confirmStart(deadlineMs))) {
@@ -161,17 +208,51 @@ export function playSeat(
             // Play to the authoritative clock when the server provides one, so
             // the time control is real (the engine self-allocates and can
             // flag). Fall back to a fixed think time if no clock is present.
+            // How the clock gets spent is configurable; the default `engine`
+            // mode reproduces the previous `go wtime/btime` command byte for
+            // byte. Every computed budget is clamped to a quarter of the clock,
+            // a tenth once under five seconds, and the server's own deadline.
             const c = m.clock;
-            const played =
-              booked ??
-              (c
-                ? await engine.bestMoveWithClock(
-                    history,
-                    c.white_ms,
-                    c.black_ms,
-                    c.increment_ms ?? 0,
-                  )
-                : await engine.bestMove(history, movetimeMs));
+            const ourMs = history.length % 2 === 0 ? c?.white_ms : c?.black_ms;
+            const deadlineInMs =
+              typeof m.deadline_server_ms === "number"
+                ? m.deadline_server_ms - serverOffsetMs - Date.now()
+                : undefined;
+            const policy = getBrowserBotConfig().time;
+            const plan = goCommand(policy, {
+              clock: c
+                ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 }
+                : null,
+              budgetMs: budgetMs(policy, {
+                remainingMs: ourMs ?? movetimeMs * 20,
+                incrementMs: c?.increment_ms ?? 0,
+                deadlineInMs,
+              }),
+            });
+            // The seat's eval bar rides on the search it is already running for
+            // its own move (#39), so it has to survive the time policy taking
+            // over the `go` command — otherwise the bar silently goes blank on
+            // every playing board.
+            const onInfo = handlers.onEval
+              ? (info: EngineInfo) => handlers.onEval!(info, history.length)
+              : undefined;
+            let played: string;
+            if (booked) {
+              played = booked;
+            } else {
+              try {
+                played = await engine.bestMoveWithPlan(history, plan, onInfo);
+              } catch (err) {
+                // The engine itself died. Resigning here forfeits a real stake
+                // over a crashed worker, so try once with a fresh default
+                // engine first. Once only — a loop would burn the clock.
+                if (!onFallback) throw err;
+                const swap = onFallback;
+                onFallback = null;
+                engine = await swap();
+                played = await engine.bestMoveWithPlan(history, plan, onInfo);
+              }
+            }
             if (cancelled()) {
               ws.close();
               return;
