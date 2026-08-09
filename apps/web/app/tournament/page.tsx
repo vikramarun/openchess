@@ -12,6 +12,13 @@ import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import {
+  DEFAULT_PAYOUT,
+  formatPayout,
+  parsePayout,
+  PAYOUT_PRESETS,
+  presetLabel,
+} from "@/lib/payouts";
+import {
   casualIdentity,
   fetchTournament,
   fetchTournaments,
@@ -54,6 +61,12 @@ export default function TournamentPage() {
   );
 }
 
+/** Sentinel for the "type your own percentages" option in the prizes picker. */
+const CUSTOM_PAYOUT = "custom";
+
+/** A tournament's prize structure, by preset name when it matches one. */
+const payoutLabel = (t: Tournament) => presetLabel(t.payout.bps) ?? formatPayout(t.payout.bps);
+
 const shortName = (p: string) =>
   p.startsWith("0x") && p.length === 42 ? `${p.slice(0, 6)}…${p.slice(-4)}` : p;
 
@@ -71,6 +84,11 @@ function TournamentClient() {
   const [name, setName] = useState("");
   const [buyIn, setBuyIn] = useState("");
   const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
+  // Prize structure for a tournament being created: a preset by label, or
+  // "custom" with percentages typed in. Parsed (and validated against the same
+  // rules the server enforces) before the request goes out.
+  const [payoutChoice, setPayoutChoice] = useState<string>(PAYOUT_PRESETS[0].label);
+  const [payoutCustom, setPayoutCustom] = useState("");
   const [casualName, setCasualName] = useState("");
 
   // Casual entrant identity, mirrored from localStorage so a reload doesn't turn
@@ -248,9 +266,22 @@ function TournamentClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openT?.id, openMe, openT?.current_round, openT?.games.length, token, address]);
 
+  // The structure the create form currently describes, or the reason it isn't
+  // one. Shown live under the field so a creator sees "these add up to 90%"
+  // while typing rather than after the form round-trips.
+  const payoutDraft = useMemo(() => {
+    if (payoutChoice !== CUSTOM_PAYOUT) {
+      const preset = PAYOUT_PRESETS.find((p) => p.label === payoutChoice);
+      return preset ? { bps: preset.bps } : DEFAULT_PAYOUT;
+    }
+    return parsePayout(payoutCustom);
+  }, [payoutChoice, payoutCustom]);
+  const payoutErr = "error" in payoutDraft ? payoutDraft.error : null;
+
   const create = async () => {
     setErr(null);
     if (!name.trim()) return setErr("Give the tournament a name.");
+    if ("error" in payoutDraft) return setErr(payoutDraft.error);
     let buyInBase: string | undefined;
     if (buyIn.trim()) {
       if (!token)
@@ -273,11 +304,18 @@ function TournamentClient() {
           buy_in: buyInBase,
           initial_secs: tc.initial,
           increment_secs: tc.inc,
+          payout: payoutDraft,
         }),
       });
       if (!r.ok)
         return setErr(
-          r.status === 503 ? MAINTENANCE_MSG : `Couldn’t create (${r.status}).`,
+          r.status === 503
+            ? MAINTENANCE_MSG
+            : // The server validates the structure too, and it is the authority
+              // — say so rather than blaming the whole form.
+              r.status === 400
+              ? "The server refused those terms. Check the prize structure and entry fee."
+              : `Couldn’t create (${r.status}).`,
         );
       setName("");
       setBuyIn("");
@@ -398,7 +436,11 @@ function TournamentClient() {
                   {fmtUsdc(openT.buy_in)} USDC entry{" "}
                   <span className="tag tag-rated" title="Ranked: moves your ranked Elo">
                     Ranked
-                  </span>
+                  </span>{" "}
+                  {/* The structure is fixed at creation and can't be changed
+                      afterwards, so it belongs next to the entry fee: it is half
+                      of what an entrant is agreeing to. */}
+                  · prizes {payoutLabel(openT)}
                 </>
               ) : (
                 "casual"
@@ -551,8 +593,9 @@ function TournamentClient() {
             seat that doesn&apos;t show up within a minute forfeits.
           </li>
           <li>
-            The pool is distributed by final standings: small fields directly, large fields via
-            a Merkle claim.
+            The pool is distributed by final standings, using the prize structure the
+            organizer set when they created it: small fields directly, large fields via a
+            Merkle claim.
           </li>
           <li>If it never settles, every entrant reclaims their entry after a timeout.</li>
         </ol>
@@ -591,9 +634,47 @@ function TournamentClient() {
               ))}
             </div>
           </label>
-          <button className="primary" onClick={create}>
+          <button className="primary" onClick={create} disabled={!!payoutErr}>
             Create
           </button>
+        </div>
+        <div className="offer-form" style={{ marginTop: 10 }}>
+          <label className="of-field">
+            <span className="muted">Prizes</span>
+            <select
+              value={payoutChoice}
+              onChange={(e) => setPayoutChoice(e.target.value)}
+              style={{ minWidth: 190 }}
+            >
+              {PAYOUT_PRESETS.map((p) => (
+                <option key={p.label} value={p.label}>
+                  {p.label}
+                </option>
+              ))}
+              <option value={CUSTOM_PAYOUT}>Custom…</option>
+            </select>
+          </label>
+          {payoutChoice === CUSTOM_PAYOUT && (
+            <label className="of-field" style={{ flex: 1 }}>
+              <span className="muted">Shares, best first (%)</span>
+              <input
+                value={payoutCustom}
+                onChange={(e) => setPayoutCustom(e.target.value)}
+                placeholder="50, 30, 20"
+              />
+            </label>
+          )}
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          {payoutErr ? (
+            <span style={{ color: "#e06c6c" }}>{payoutErr}</span>
+          ) : (
+            <>
+              Pays {formatPayout("bps" in payoutDraft ? payoutDraft.bps : [])} of the pool.
+              Entrants level on score split their places&apos; share equally, and a field
+              smaller than the structure shares the whole pool between whoever turned up.
+            </>
+          )}
         </div>
         <label className="of-field" style={{ marginTop: 10 }}>
           <span className="muted">Display name for casual tournaments</span>
@@ -628,7 +709,8 @@ function TournamentClient() {
                       {t.buy_in ? (
                         <>
                           {fmtUsdc(t.buy_in)} USDC entry{" "}
-                          <span className="tag tag-rated">Ranked</span>
+                          <span className="tag tag-rated">Ranked</span> · prizes{" "}
+                          <span title={formatPayout(t.payout.bps)}>{payoutLabel(t)}</span>
                         </>
                       ) : (
                         "casual"
@@ -692,9 +774,20 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
       </div>
     );
   const decided = isFinished(t) && t.status !== "abandoned";
+  // Only show money when the server sent a table for THIS field — the prizes
+  // array is index-aligned with standings, and a mismatched length means an
+  // older server or a stale poll. Guessing would put numbers on screen that the
+  // contract has no intention of sending.
+  const prizes = t.buy_in && t.prizes.length === t.standings.length ? t.prizes : null;
   return (
     <div className="panel">
       <b style={{ color: "var(--text-strong)" }}>Standings</b>
+      {t.buy_in && (
+        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+          Prizes: {payoutLabel(t)}
+          {prizes ? (decided ? " · final" : " · if it ended now") : ""}
+        </div>
+      )}
       <table className="standings">
         <thead>
           <tr>
@@ -702,10 +795,11 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
             <th>Entrant</th>
             <th>Score</th>
             <th>Played</th>
+            {prizes && <th>Prize</th>}
           </tr>
         </thead>
         <tbody>
-          {t.standings.map((s: Standing) => (
+          {t.standings.map((s: Standing, i: number) => (
             <tr key={s.player} className={sameEntrant(s.player, me) ? "me" : undefined}>
               {/* Equal scores share the place — honest only because the pool
                   shares the money to match. While payouts went strictly by
@@ -725,6 +819,11 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
                 {s.played}
                 {t.total_rounds > 0 ? `/${t.players.length - 1}` : ""}
               </td>
+              {prizes && (
+                <td className={prizes[i] === "0" ? "muted" : undefined}>
+                  {prizes[i] === "0" ? "—" : `${fmtUsdc(prizes[i])} USDC`}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

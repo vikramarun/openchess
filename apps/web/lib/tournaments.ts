@@ -1,4 +1,5 @@
 import { SERVER_HTTP } from "./config";
+import { DEFAULT_PAYOUT, type PayoutSpec } from "./payouts";
 
 /** A pairing in the schedule. `game_id` is null for a forfeit — the pairing was
  *  awarded without a game, so there is no room to spectate. */
@@ -17,8 +18,9 @@ export type Standing = {
   score: number;
   played: number;
   /** 1-based position in the payout order. Never shared between equal scores —
-   *  the pool is paid out by position (65/25/10 for a field of 3+), so showing
-   *  a shared rank would promise money the contract won't send. */
+   *  the pool is paid out by position (by the tournament's own `payout`
+   *  structure), so showing a shared rank would promise money the contract
+   *  won't send. */
   rank: number;
   /** Another entrant finished on this exact score, so this row's position — and
    *  its share of the pool — came from the tiebreak rather than from play. */
@@ -44,6 +46,13 @@ export type Tournament = {
   initial_secs: number;
   increment_secs: number;
   organizer: string | null;
+  /** How the pool is divided: basis points per finishing place, best first. */
+  payout: PayoutSpec;
+  /** What each `standings` row would take if the event ended now, in USDC base
+   *  units, INDEX-ALIGNED with `standings`. Empty when there is no pool (and on
+   *  a server that predates the field). Computed server-side by the same
+   *  function that settles, so this is the table that actually pays. */
+  prizes: string[];
   age_secs: number;
 };
 
@@ -95,6 +104,16 @@ function normalize(id: string, view: Partial<Omit<Tournament, "id">>): Tournamen
     initial_secs: view.initial_secs ?? 0,
     increment_secs: view.increment_secs ?? 0,
     organizer: view.organizer ?? null,
+    // A server that predates creator-defined structures paid the old hardcoded
+    // 65/25/10, which is what this default is — so the label a pre-deploy client
+    // shows is still the truth about how that tournament settles.
+    payout:
+      view.payout && Array.isArray(view.payout.bps) && view.payout.bps.length > 0
+        ? view.payout
+        : DEFAULT_PAYOUT,
+    // Never synthesized: an invented prize column would be a number the contract
+    // has no intention of sending. Absent means "don't show one".
+    prizes: Array.isArray(view.prizes) ? view.prizes : [],
     age_secs: view.age_secs ?? 0,
   };
 }
