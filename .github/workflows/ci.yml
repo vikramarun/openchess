@@ -99,4 +99,9 @@ jobs:
           # which a screenshot of a settled page would never catch. This runs
           # the script in a sandbox and diffs it against the React path.
           pnpm test:prefs
+          # The server's 256 KiB body cap is only workable because the browser
+          # crops and re-encodes to a 256px JPEG first. If that stopped
+          # happening, every phone photo would start arriving at full size and
+          # uploads would 413 — for users only, never in a test.
+          pnpm test:avatar
           pnpm build
