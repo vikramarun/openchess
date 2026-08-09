@@ -8,6 +8,7 @@ import { ensureBookLoaded } from "@/lib/browserBot";
 import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
+import { acquirePlayerEngine, fallbackEngine, releasePlayerEngine } from "@/lib/playerEngine";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
@@ -41,6 +42,7 @@ export function SeatGame({
 }) {
   const { fen, moves, lastUci, inCheck, clock, result, verified, applyFrame } = useSpectatorBoard();
   const [opponent, setOpponent] = useState<Opponent | null>(null);
+  const [engineSwapped, setEngineSwapped] = useState(false);
   const [status, setStatus] = useState("loading engine…");
   const [settleStatus, setSettleStatus] = useState<string | null>(null);
   const onResultRef = useRef(onResult);
@@ -50,13 +52,16 @@ export function SeatGame({
     let cancelled = false;
     const cancelledFn = () => cancelled;
     let engine: BrowserEngine | null = null;
+    let released = true;
     let spectator: { close: () => void } | null = null;
     let seat: { close: () => void } | null = null;
     let finished = false;
 
     const run = async () => {
-      engine = new BrowserEngine();
-      await engine.whenReady();
+      // Normally already warm: the lobby prewarms before it stakes anything,
+      // precisely so a 7 MB download can't fail with money escrowed.
+      engine = await acquirePlayerEngine();
+      released = false;
       if (cancelled) return;
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
@@ -90,6 +95,11 @@ export function SeatGame({
           onEvent: (m) => {
             if (m?.type === "game_start" && m.opponent) setOpponent(m.opponent);
           },
+          // A dead worker must not forfeit a stake — play on with a fresh one.
+          onEngineFallback: async () => {
+            setEngineSwapped(true);
+            return fallbackEngine();
+          },
         },
         cancelledFn,
       );
@@ -103,7 +113,12 @@ export function SeatGame({
       cancelled = true;
       spectator?.close();
       seat?.close();
-      engine?.dispose();
+      // Release rather than dispose: the seat engine is shared and stays warm
+      // for a minute, so the next game doesn't re-download 7 MB.
+      if (!released) {
+        released = true;
+        releasePlayerEngine();
+      }
     };
   }, [gameId, token, applyFrame]);
 
@@ -204,6 +219,12 @@ export function SeatGame({
           <div className="muted" style={{ marginTop: 8 }}>
             Status: {status}
           </div>
+          {engineSwapped && (
+            <div className="muted" style={{ marginTop: 6, fontSize: 13, color: "var(--danger)" }}>
+              Your engine stopped responding — this game is being played by a fresh Stockfish 18.
+              Your settings still apply from the next game.
+            </div>
+          )}
         </div>
 
         {result && (

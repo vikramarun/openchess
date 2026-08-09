@@ -71,7 +71,7 @@ class Eng {
   ready: Promise<void>;
 
   constructor() {
-    this.w = new Worker("/stockfish-18-lite-single.js");
+    this.w = new Worker("/engines/sf18-lite-single-a8fbc05e/stockfish-18-lite-single.js");
     this.w.onmessage = (e) => {
       const l = typeof e.data === "string" ? e.data : (e.data && e.data.data) || "";
       for (const fn of [...this.listeners]) fn(l);

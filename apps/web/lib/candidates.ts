@@ -1,11 +1,16 @@
 // Collecting the engine's top-N moves from a MultiPV search.
 //
-// This is the substrate for playing-style dials: ask Stockfish for several
-// moves, keep only those within a small centipawn window of the best (inside
-// that window every move is objectively sound), and let a personality pick
-// among them. Modern Stockfish has no style options at all — Contempt was
-// removed and never reimplemented for NNUE — so choosing among the engine's own
-// good moves is the only place character can come from.
+// NOT CURRENTLY IN THE MOVE LOOP. This was built as the substrate for
+// playing-style dials, then measurement killed the feature: see
+// apps/web/BENCH.md. Choosing among the engine's near-equal moves costs
+// ~144 Elo even at a 5-centipawn window, and ~130 even with a two-pass
+// `searchmoves` re-verification. The premise it rested on — that inside a
+// small window every move is objectively sound — is simply false; Stockfish's
+// ordering within a few centipawns is real information.
+//
+// Kept, with its tests, because it is correct and cheap to keep, and because
+// the collector is the only sane way to read a MultiPV stream if this is ever
+// revisited (or if analysis ever wants candidate lines).
 //
 // The overriding rule: this is an OVERLAY. It can only ever pick a move the
 // engine already endorsed, and every ambiguity resolves back to `bestmove`.

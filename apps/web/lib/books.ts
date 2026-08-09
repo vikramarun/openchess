@@ -186,6 +186,14 @@ export function concatBooks(books: BookEntry[][]): BookEntry[] {
   return all;
 }
 
+/** Bump when `pnpm build:books` regenerates the .bin files.
+ *
+ *  Books are served `immutable` for a year (next.config.mjs), and their
+ *  filenames are stable, so this query is the only thing that tells a returning
+ *  browser to fetch the new contents. Rebuilding without bumping it ships books
+ *  nobody downloads. */
+export const BOOKS_VERSION = 1;
+
 const cache = new Map<string, Promise<BookEntry[]>>();
 
 /** Fetch + parse one built-in book, memoized per session. A failed fetch is
@@ -193,7 +201,7 @@ const cache = new Map<string, Promise<BookEntry[]>>();
 export function loadBook(id: string): Promise<BookEntry[]> {
   const hit = cache.get(id);
   if (hit) return hit;
-  const p = fetch(`/books/${id}.bin`)
+  const p = fetch(`/books/${id}.bin?v=${BOOKS_VERSION}`)
     .then((r) => {
       if (!r.ok) throw new Error(`book ${id}: HTTP ${r.status}`);
       return r.arrayBuffer();

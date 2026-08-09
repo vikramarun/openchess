@@ -10,8 +10,14 @@
 
 import { CandidateCollector, type Harvest } from "./candidates";
 
-/** Worker script served from public/; the sibling .wasm is located next to it. */
-const ENGINE_URL = "/stockfish-18-lite-single.js";
+/** Worker script; the glue locates the sibling .wasm next to it.
+ *
+ *  The directory carries a content hash so the 7 MB binary can be served
+ *  `immutable` (see next.config.mjs). Next serves public/ with
+ *  `max-age=0, must-revalidate` by default, which meant a round trip for the
+ *  engine on every cold page. Re-hash the directory when the binary changes —
+ *  that is the whole point of the name. */
+const ENGINE_URL = "/engines/sf18-lite-single-a8fbc05e/stockfish-18-lite-single.js";
 /** Transposition-table size (MB). Modest fixed default — bigger helps slightly
  *  at longer time controls; two engines run at once on the self-play page. */
 const HASH_MB = 64;

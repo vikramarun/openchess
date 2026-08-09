@@ -14,11 +14,14 @@ import {
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
-import { acceptableMoves } from "./candidates";
 import { budgetMs, goCommand } from "./timePolicy";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
+  /** Called at most once, when the seat's engine fails mid-game. Returning a
+   *  working engine lets the seat play on instead of resigning — which matters
+   *  because a resignation forfeits a real stake. */
+  onEngineFallback?: () => Promise<BrowserEngine>;
 };
 
 /** True if `uci` is legal in `pos`. */
@@ -66,11 +69,14 @@ function legalBookMove(movesUci: string[]): string | null {
 export function playSeat(
   gameId: string,
   token: string,
-  engine: BrowserEngine,
+  engineIn: BrowserEngine,
   movetimeMs: number,
   handlers: PlayHandlers = {},
   cancelled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
+  // Reassignable: a mid-game engine failure swaps in a replacement (below).
+  let engine = engineIn;
+  let onFallback = handlers.onEngineFallback ?? null;
   // Warm both book caches; they resolve long before the first your_turn.
   void ensureBookLoaded();
   void ensureRepertoireLoaded();
@@ -140,18 +146,28 @@ export function playSeat(
               clock: c ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 } : null,
               budgetMs: budget,
             });
-            // Always go through the MultiPV-aware search, even though nothing
-            // styles the result yet. At MultiPV 1 with no style budget the
-            // outcome is exactly the engine's own move, so this is a no-op
-            // today — and it means the collector runs on real games now rather
-            // than arriving untested alongside the style dials.
-            const uci =
-              booked ??
-              (await (async () => {
-                const r = await engine.search(history, plan, 1);
-                const pool = acceptableMoves(r, { epsilonCp: 0, minDepth: 6, disableBeyondCp: 400 });
-                return pool.length ? pool[0].uci : r.bestmove;
-              })());
+            // The engine's own move, full strength. Playing-style selection was
+            // measured and dropped — see apps/web/BENCH.md — so there is no
+            // MultiPV collection in the move loop; `lib/candidates.ts` remains
+            // as tested substrate if that decision is ever revisited.
+            let uci: string;
+            if (booked) {
+              uci = booked;
+            } else {
+              try {
+                uci = await engine.bestMoveWithPlan(history, plan);
+              } catch (err) {
+                // The engine died mid-game. Resigning here used to be the only
+                // option, which meant a crashed worker cost a real stake — so
+                // try once with a fresh default engine before giving up. It
+                // costs some clock; a resignation costs the game.
+                if (!onFallback) throw err;
+                const swap = onFallback;
+                onFallback = null; // one attempt only; a loop would burn the clock
+                engine = await swap();
+                uci = await engine.bestMoveWithPlan(history, plan);
+              }
+            }
             if (cancelled()) {
               ws.close();
               return;
