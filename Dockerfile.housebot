@@ -34,6 +34,10 @@ RUN apt-get update \
 
 COPY --from=build /app/target/release/chess-client /usr/local/bin/chess-client
 COPY scripts/house-bot.sh /usr/local/bin/house-bot.sh
+# The opening book. Without it the bot searches every opening move from
+# scratch, which is where its clock was going (22s on move 1 of a 10+0 game).
+# Regenerate with `cargo run -p book-gen -- assets/house-book.bin`.
+COPY assets/house-book.bin /usr/local/share/openchess/house-book.bin
 
 # Debian installs the engine to /usr/games, which is not on a non-login PATH —
 # point at it absolutely (the script accepts a path as well as a PATH lookup).

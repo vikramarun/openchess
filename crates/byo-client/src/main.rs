@@ -21,6 +21,7 @@ use clap::{Args, Parser, Subcommand};
 use game_engine::{Game, Status};
 use protocol::TimeControl;
 
+use crate::book::BookPolicy;
 use crate::engine::UciEngine;
 use crate::net::{play, PlayOpts, TimePolicy, DEFAULT_MOVE_OVERHEAD_MS};
 
@@ -33,6 +34,50 @@ use crate::net::{play, PlayOpts, TimePolicy, DEFAULT_MOVE_OVERHEAD_MS};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Opening book, shared by every subcommand that plays over the network.
+#[derive(Args, Clone)]
+struct BookArgs {
+    /// Optional Polyglot opening book (.bin) consulted before the engine.
+    /// In-book moves are instant, which is the only real cure for an engine
+    /// spending tens of seconds on move 1.
+    #[arg(long)]
+    book: Option<String>,
+    /// Stop using the book after this many plies.
+    #[arg(long, default_value_t = 16)]
+    book_max_ply: u32,
+    /// How to pick among a position's book moves. `weighted` (the default, and
+    /// what Polyglot weights exist for) varies the openings; `best` always
+    /// takes the highest-weight move, so every game repeats one line.
+    #[arg(long, value_enum, default_value = "weighted")]
+    book_policy: BookPolicy,
+}
+
+impl BookArgs {
+    /// Load the book once, shared across every game of the session — real
+    /// books are large, and a fallible per-game open inside the seat loop
+    /// would turn a moved file into a silent forfeit machine.
+    ///
+    /// A configured-but-unreadable book is a hard error rather than a silent
+    /// fallback to bare search: that fallback is exactly the failure this
+    /// whole change exists to remove, and it would be invisible in the logs.
+    fn open(&self) -> Result<Option<std::sync::Arc<crate::book::OpeningBook>>> {
+        let Some(path) = self.book.as_deref() else {
+            return Ok(None);
+        };
+        let book = crate::book::OpeningBook::open(
+            std::path::Path::new(path),
+            self.book_max_ply,
+            self.book_policy,
+        )?;
+        println!(
+            "opening book: {path} ({} positions, ≤ ply {})",
+            book.positions(),
+            self.book_max_ply
+        );
+        Ok(Some(std::sync::Arc::new(book)))
+    }
 }
 
 /// Clock budgeting, shared by every subcommand that plays over the network.
@@ -100,12 +145,8 @@ enum Command {
         /// Extra argument to pass to the engine (repeatable).
         #[arg(long = "engine-arg")]
         engine_args: Vec<String>,
-        /// Optional Polyglot opening book (.bin) consulted before the engine.
-        #[arg(long)]
-        book: Option<String>,
-        /// Stop using the book after this many plies.
-        #[arg(long, default_value_t = 16)]
-        book_max_ply: u32,
+        #[command(flatten)]
+        book: BookArgs,
         #[command(flatten)]
         time: TimeArgs,
     },
@@ -128,10 +169,8 @@ enum Command {
         engine: String,
         #[arg(long = "engine-arg")]
         engine_args: Vec<String>,
-        #[arg(long)]
-        book: Option<String>,
-        #[arg(long, default_value_t = 16)]
-        book_max_ply: u32,
+        #[command(flatten)]
+        book: BookArgs,
         /// SIWE session token (Bearer), required for a staked gauntlet.
         #[arg(long)]
         auth_token: Option<String>,
@@ -151,12 +190,8 @@ enum Command {
         /// Extra argument to pass to the engine (repeatable).
         #[arg(long = "engine-arg")]
         engine_args: Vec<String>,
-        /// Optional Polyglot opening book (.bin) consulted before the engine.
-        #[arg(long)]
-        book: Option<String>,
-        /// Stop using the book after this many plies.
-        #[arg(long, default_value_t = 16)]
-        book_max_ply: u32,
+        #[command(flatten)]
+        book: BookArgs,
         /// Display name shown to opponents (defaults to the engine name).
         #[arg(long)]
         name: Option<String>,
@@ -247,16 +282,9 @@ async fn main() -> Result<()> {
             engine,
             engine_args,
             book,
-            book_max_ply,
             time,
         } => {
-            let book = match book {
-                Some(p) => Some(std::sync::Arc::new(crate::book::OpeningBook::open(
-                    std::path::Path::new(&p),
-                    book_max_ply,
-                )?)),
-                None => None,
-            };
+            let book = book.open()?;
             play(PlayOpts {
                 server,
                 game_id: game,
@@ -278,10 +306,10 @@ async fn main() -> Result<()> {
             engine,
             engine_args,
             book,
-            book_max_ply,
             auth_token,
             time,
         } => {
+            let book = book.open()?;
             gauntlet::run_gauntlet(gauntlet::GauntletOpts {
                 http_server: server,
                 stake,
@@ -290,8 +318,7 @@ async fn main() -> Result<()> {
                 count,
                 engine_path: engine,
                 engine_args,
-                book_path: book,
-                book_max_ply,
+                book,
                 auth_token,
                 time: time.into(),
             })
@@ -302,7 +329,6 @@ async fn main() -> Result<()> {
             engine,
             engine_args,
             book,
-            book_max_ply,
             name,
             uci_options,
             code,
@@ -314,13 +340,13 @@ async fn main() -> Result<()> {
             games,
             time,
         } => {
+            let book = book.open()?;
             connect::run_connect(connect::ConnectOpts {
                 http_server: server,
                 name,
                 engine_path: engine,
                 engine_args,
-                book_path: book,
-                book_max_ply,
+                book,
                 uci_options,
                 time: time.into(),
                 auth_token,

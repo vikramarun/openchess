@@ -27,6 +27,10 @@
 #                         per-move search ceiling is initial/MOVE_BUDGET
 #   MOVE_OVERHEAD_MS      default 250 — clock reserved per move for the round
 #                         trip to the server
+#   BOOK                  Polyglot .bin played before the engine; defaults to
+#                         the one shipped in the image, else the repo's
+#                         assets/house-book.bin. Set BOOK= (empty) to disable.
+#   BOOK_MAX_PLY          default 16 — leave the book after this many plies
 #   CLIENT                default: chess-client from PATH, else the repo's
 #                         release build
 set -euo pipefail
@@ -38,6 +42,19 @@ SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
 MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
+BOOK_MAX_PLY="${BOOK_MAX_PLY:-16}"
+
+# Opening book. `${BOOK-unset}` (no colon) distinguishes "not set" from
+# "deliberately empty", so BOOK= disables the book instead of silently falling
+# back to the default path.
+if [[ -z "${BOOK+set}" ]]; then
+  for candidate in \
+    /usr/local/share/openchess/house-book.bin \
+    "$(dirname "$0")/../assets/house-book.bin"
+  do
+    [[ -f "$candidate" ]] && { BOOK="$candidate"; break; }
+  done
+fi
 
 if [[ -z "${OPENCHESS_WALLET_KEY:-}" ]]; then
   echo "OPENCHESS_WALLET_KEY is required (a fresh, UNFUNDED key)." >&2
@@ -75,7 +92,13 @@ if [[ ! "$MOVE_BUDGET" =~ ^[0-9]+$ ]] || ((MOVE_BUDGET == 0)); then
   exit 1
 fi
 
+if [[ -n "${BOOK:-}" && ! -f "$BOOK" ]]; then
+  echo "BOOK '$BOOK' not found — generate it with 'cargo run -p book-gen -- assets/house-book.bin', or set BOOK= to play without one." >&2
+  exit 1
+fi
+
 echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS"
+echo "book: ${BOOK:-none (every opening move is a full search)}"
 
 # One autopilot per time control. Same wallet across instances is fine: the
 # server records poster_addr for authed offers and autopilots skip their own
@@ -90,11 +113,14 @@ run_tc() {
   # complaint — frozen in the opening, flagging in the endgame.
   #
   # The cap costs very little: 7.5s still reaches depth 27 at 10+0 (vs 33
-  # uncapped) and picks the same move; 2.25s reaches depth 24 at 3+0. Deep
-  # opening analysis is what a BOOK is for, and this bot has none — see the
-  # --book flag if you ever hand it a Polyglot file.
+  # uncapped) and picks the same move; 2.25s reaches depth 24 at 3+0. But the
+  # cap only bounds the symptom — BOOK is the actual cure, since an in-book
+  # move costs no time AND no depth.
   local max_move_ms=$(( initial * 1000 / MOVE_BUDGET ))
   ((max_move_ms < 300)) && max_move_ms=300
+  # Empty BOOK means "no book"; --book with an empty value would be an error.
+  local book_args=()
+  [[ -n "${BOOK:-}" ]] && book_args=(--book "$BOOK" --book-max-ply "$BOOK_MAX_PLY")
   while true; do
     # The client's own output already names the game/opponent; the autopilot
     # retries transient errors internally, so an exit here is unusual.
@@ -105,6 +131,7 @@ run_tc() {
       --uci-option "Skill Level=$SKILL" \
       --max-move-ms "$max_move_ms" \
       --move-overhead-ms "$MOVE_OVERHEAD_MS" \
+      "${book_args[@]}" \
       --initial-secs "$initial" --increment-secs "$increment" || true
     echo "[${initial}+${increment}] autopilot exited; restarting in ${delay}s"
     sleep "$delay"
