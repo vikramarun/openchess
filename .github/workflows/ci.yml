@@ -67,10 +67,23 @@ jobs:
 
       - name: Web build + tests
         run: |
+          # pipefail so the install's exit code survives the tee below; without
+          # it a failed install would be masked by tee's success.
+          set -o pipefail
           corepack enable
           # Frozen, like Vercel's production install: CI green must prove the
           # LOCKED tree builds, not whatever a caret dep resolved to today.
-          cd apps/web && pnpm install --frozen-lockfile
+          # The pnpm version itself is pinned by package.json's packageManager.
+          cd apps/web && pnpm install --frozen-lockfile 2>&1 | tee /tmp/pnpm-install.log
+          # A dependency whose build script is neither allowed nor refused is a
+          # hard error on pnpm 11 and a warning nobody reads on pnpm 10 — which
+          # is exactly how two of them (sharp, bigint-buffer) reached CI. Assert
+          # it here so the check belongs to this repo rather than to whichever
+          # pnpm happens to be resolved.
+          if grep -q "Ignored build scripts" /tmp/pnpm-install.log; then
+            echo "::error::A dependency's build script is neither allowed nor refused. Add it to apps/web/pnpm-workspace.yaml under allowBuilds (true to run it, false to decline)."
+            exit 1
+          fi
           # These suites existed but nothing ran them, so a regression in the
           # polyglot keys, the eval bar, or session handling would only have
           # shown up in a browser. Before the build: they are seconds, and a
