@@ -6,6 +6,8 @@
 // two different code paths — an inline script before first paint, and
 // applyBoardPrefs() after React mounts — and if they disagree the board visibly
 // changes on load. A screenshot of a settled page would never catch it.
+import { readdirSync, readFileSync } from "node:fs";
+
 import {
   ANIMATION_MS,
   DEFAULT_PREFS,
@@ -171,6 +173,37 @@ for (const stored of [
 ]) {
   const label = JSON.stringify(stored) ?? "nothing stored";
   check(`bootstrap matches applyBoardPrefs for ${label}`, runBootstrap(stored), boardCssVars(normalizePrefs(stored)));
+}
+
+// --- the CSS fallback is the THIRD copy of the defaults ---
+// app/board.css hardcodes brown + cburnett in :root so a board is never
+// invisible before the bootstrap runs (or when it can't run at all). That copy
+// can't be generated at build time, so this is what keeps it honest: edit a hex
+// in boardThemes.ts without touching the stylesheet and this fails.
+const boardCss = readFileSync(new URL("../app/board.css", import.meta.url), "utf8");
+for (const [name, value] of Object.entries(boardCssVars(DEFAULT_PREFS))) {
+  // `--x:` only ever appears as a declaration; `var(--x)` has no colon.
+  const declared = boardCss.match(new RegExp(`\\${name}:\\s*([^;]+);`))?.[1].trim();
+  check(`board.css :root fallback matches ${name}`, declared, value.trim());
+}
+
+// --- a registered set with no art on disk renders an invisible board ---
+// CREDITS.md advertises "drop 12 SVGs + one registry entry, no code change", so
+// a typo'd id or a half-copied directory is the likeliest future regression
+// here — and it would otherwise pass every other check in this file, build
+// clean, and only show up as pieces that aren't there.
+const EXPECTED_FILES = COLORS.flatMap(([, c]) => ROLES.map(([, r]) => `${c}${r}.svg`)).sort();
+check("a set is 12 files", EXPECTED_FILES.length, 12);
+for (const p of PIECE_SETS) {
+  let found: string[] = [];
+  try {
+    found = readdirSync(new URL(`../public/piece/${p.id}`, import.meta.url))
+      .filter((f) => f.endsWith(".svg"))
+      .sort();
+  } catch {
+    /* missing directory — reported by the mismatch below */
+  }
+  check(`piece set ${p.id} ships all 12 files`, found, EXPECTED_FILES);
 }
 
 console.log(failed === 0 ? "\nall board-preference checks passed" : `\n${failed} FAILED`);

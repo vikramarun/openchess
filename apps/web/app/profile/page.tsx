@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { BoardSettings } from "@/components/BoardSettings";
@@ -42,6 +42,7 @@ function ProfileClient() {
   // Suspense boundary and force this page to render dynamically. Deep links like
   // /profile#settings still work.
   const [tab, setTab] = useState<TabId>(tabFromHash);
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   useEffect(() => {
     const sync = () => setTab(tabFromHash());
@@ -52,19 +53,44 @@ function ProfileClient() {
   const select = (id: TabId) => {
     setTab(id);
     // replaceState, not a hash assignment: this shouldn't stack a history entry
-    // per tab click and make Back walk through them.
-    window.history.replaceState(null, "", id === "profile" ? window.location.pathname : `#${id}`);
+    // per tab click and make Back walk through them. Keep pathname + search so
+    // landing here with a query string doesn't lose it on the first tab click.
+    const bare = window.location.pathname + window.location.search;
+    window.history.replaceState(null, "", id === "profile" ? bare : `${bare}#${id}`);
+  };
+
+  // Roving tabindex: a tablist takes ONE tab stop, and arrows move within it.
+  // Without this the roles below would announce a tab widget that then behaves
+  // like a row of ordinary buttons.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const i = TABS.findIndex((t) => t.id === tab);
+    const to =
+      e.key === "ArrowRight" ? (i + 1) % TABS.length
+      : e.key === "ArrowLeft" ? (i - 1 + TABS.length) % TABS.length
+      : e.key === "Home" ? 0
+      : e.key === "End" ? TABS.length - 1
+      : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    select(TABS[to].id);
+    tabRefs.current[to]?.focus();
   };
 
   return (
     <>
-      <div className="tabs" role="tablist">
-        {TABS.map((t) => (
+      <div className="tabs" role="tablist" aria-label="Customize" onKeyDown={onKeyDown}>
+        {TABS.map((t, i) => (
           <button
             key={t.id}
+            id={`tab-${t.id}`}
+            ref={(el) => {
+              tabRefs.current[i] = el;
+            }}
             role="tab"
             type="button"
             aria-selected={tab === t.id}
+            aria-controls={`panel-${t.id}`}
+            tabIndex={tab === t.id ? 0 : -1}
             className={`tab${tab === t.id ? " on" : ""}`}
             onClick={() => select(t.id)}
           >
@@ -73,9 +99,14 @@ function ProfileClient() {
         ))}
       </div>
 
-      {tab === "profile" && <ProfileTab />}
-      {tab === "settings" && <BoardSettings />}
-      {tab === "advanced" && <AdvancedTab />}
+      {/* One panel per tab, so aria-controls always points at a real element.
+          No tabIndex: every panel here already contains focusable controls, so
+          making the panel itself a tab stop would just add a dead one. */}
+      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
+        {tab === "profile" && <ProfileTab />}
+        {tab === "settings" && <BoardSettings />}
+        {tab === "advanced" && <AdvancedTab />}
+      </div>
     </>
   );
 }

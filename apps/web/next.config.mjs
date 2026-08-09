@@ -42,7 +42,11 @@ const connectSrc = [
 // policy. React Refresh (HMR) additionally needs 'unsafe-eval' — dev only.
 const scriptSrc = [
   "'self'",
-  "'unsafe-inline'", // Next.js injects inline bootstrap/hydration scripts (no nonce middleware)
+  // Next.js injects inline bootstrap/hydration scripts (no nonce middleware).
+  // app/layout.tsx also inlines the board-theme bootstrap here, which has to run
+  // before the first paint — moving to a nonce means giving that script one too,
+  // or every navigation flashes the default board.
+  "'unsafe-inline'",
   "'wasm-unsafe-eval'",
   ...(isProd ? [] : ["'unsafe-eval'"]),
 ].join(" ");
