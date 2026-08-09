@@ -24,6 +24,7 @@
     "test:offers": "tsx scripts/offers.test.ts",
     "test:prefs": "tsx scripts/boardPrefs.test.ts",
     "test:brand": "tsx scripts/brand.test.ts",
+    "test:font": "tsx scripts/font.test.ts",
     "test:gamemeta": "tsx scripts/gameSummary.test.ts",
     "test:avatar": "tsx scripts/avatar.test.ts",
     "test:layout": "tsx scripts/layout.test.ts"

@@ -24,6 +24,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
+(cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
 (cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal

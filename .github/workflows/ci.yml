@@ -106,6 +106,12 @@ jobs:
           # resvg in a production bundle drops a nested SVG image and still
           # returns 200, which the dev server never reproduces.
           pnpm test:brand
+          # globals.css named "Noto Sans" for the life of the project while
+          # nothing loaded it, so everyone silently got the system font. The
+          # replacement has the same failure shape — globals.css asks for
+          # var(--font-sans), layout.tsx defines it, and if either side goes
+          # away the CSS still parses and still falls back forever.
+          pnpm test:font
           # What a shared game link says, in a browser tab and in an unfurl.
           # Also pins the two revalidate literals together: if the title and the
           # OG image expire on different schedules, a game crawled while live
