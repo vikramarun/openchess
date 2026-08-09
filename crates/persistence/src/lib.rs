@@ -654,17 +654,26 @@ impl Db {
         Ok(rows)
     }
 
-    /// Buy-in tournaments the wallet entered that have reached a finished state
-    /// (a payout or refund may be collectable onchain). DB-sourced so it
-    /// survives the restart that wipes the in-memory tournaments map. `address`
-    /// must be lowercased (entrants are stored lowercased).
+    /// Buy-in tournaments the wallet entered where a payout or refund may be
+    /// collectable onchain. DB-sourced so it survives the restart that wipes the
+    /// in-memory tournaments map. `address` must be lowercased (entrants are
+    /// stored lowercased).
+    ///
+    /// `paused` is in the list even though it is not a finished state. A paused
+    /// tournament that is never resumed is only marked `abandoned` by
+    /// `recover_tournaments`, i.e. by a restart — so without this, a server that
+    /// paused a round and then simply kept running would leave its entrants'
+    /// buy-ins locked, claimable onchain once the settle timeout lapses, and
+    /// invisible in the UI that exists to offer exactly that. The claim button
+    /// gates on the contract's own timeout, so listing one early promises
+    /// nothing.
     pub async fn claimable_tournaments(
         &self,
         address: &str,
     ) -> Result<Vec<ClaimableTournamentRow>> {
         let rows = sqlx::query_as::<_, ClaimableTournamentRow>(
             r#"SELECT id, name, status FROM tournaments
-               WHERE status IN ('complete','settled','abandoned')
+               WHERE status IN ('complete','settled','abandoned','paused')
                  AND buy_in IS NOT NULL
                  AND players @> to_jsonb($1::text)"#,
         )
@@ -1358,6 +1367,72 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paused tournament's entrants must still be able to find their money.
+    ///
+    /// `paused` is not a finished state, and only a RESTART ever turns one into
+    /// `abandoned` — so a server that paused a round and then kept running left
+    /// its entrants' buy-ins locked onchain, claimable once the settle timeout
+    /// lapsed, and absent from the only screen that offers the claim.
+    #[tokio::test]
+    async fn a_paused_tournament_is_still_claimable() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let wallet = format!("0x{:040x}", Uuid::new_v4().as_u128() >> 8);
+        let players = serde_json::json!([wallet]);
+        let empty = serde_json::json!({});
+        let payout = serde_json::json!({ "bps": [10000] });
+
+        // One tournament per status the claim list is meant to surface, plus
+        // `running`, which it must not.
+        let mut ids = Vec::new();
+        for status in ["paused", "abandoned", "complete", "settled", "running"] {
+            let id = Uuid::new_v4();
+            db.upsert_tournament(
+                id,
+                status,
+                Some("1000000"),
+                Some(&wallet),
+                60,
+                1,
+                status,
+                &players,
+                &empty,
+                &empty,
+                &empty,
+                &payout,
+                "open",
+                &empty,
+                &empty,
+            )
+            .await?;
+            ids.push((id, status));
+        }
+
+        let claimable = db.claimable_tournaments(&wallet).await?;
+        let got: std::collections::HashSet<Uuid> = claimable.iter().map(|r| r.id).collect();
+        for (id, status) in &ids {
+            let want = *status != "running";
+            assert_eq!(
+                got.contains(id),
+                want,
+                "status {status}: expected claimable={want}"
+            );
+        }
+
+        for (id, _) in &ids {
+            sqlx::query("DELETE FROM tournaments WHERE id = $1")
+                .bind(id)
+                .execute(&db.pool)
+                .await?;
+        }
+        Ok(())
+    }
 
     // Runs only when DATABASE_URL is set (local Postgres).
     #[tokio::test]

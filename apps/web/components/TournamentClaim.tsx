@@ -134,7 +134,15 @@ export function TournamentClaim({
           ? "claim"
           : refundReady
             ? "refund"
-            : refundable && status === "abandoned" && !settled && settleTimeout != null
+            : // `paused` counts alongside `abandoned`: the round stopped, the
+              // entry is still locked, and the countdown to `claimRefund` runs
+              // exactly the same way. A paused tournament nobody resumes is only
+              // marked abandoned by a restart, so without this its entrants see
+              // nothing at all.
+              refundable &&
+                (status === "abandoned" || status === "paused") &&
+                !settled &&
+                settleTimeout != null
               ? "pending"
               : null;
 
