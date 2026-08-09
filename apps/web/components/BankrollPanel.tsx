@@ -85,10 +85,10 @@ export function BankrollPanel({
     try {
       amt = parseUsdc(amount);
     } catch {
-      setError("enter a valid amount");
+      setError("Enter a valid amount.");
       return;
     }
-    if (amt <= 0n) return setError("amount must be positive");
+    if (amt <= 0n) return setError("Amount must be positive.");
     setBusy("deposit");
     try {
       await ensureChain(expected);
@@ -114,7 +114,7 @@ export function BankrollPanel({
       setAmount("");
       refetchAll();
     } catch (e: any) {
-      setError(e?.shortMessage ?? e?.message ?? "deposit failed");
+      setError(e?.shortMessage ?? e?.message ?? "Deposit failed.");
     } finally {
       setBusy("");
       setStage("");
@@ -127,11 +127,11 @@ export function BankrollPanel({
     try {
       amt = parseUsdc(amount);
     } catch {
-      setError("enter a valid amount");
+      setError("Enter a valid amount.");
       return;
     }
-    if (amt <= 0n) return setError("amount must be positive");
-    if (amt > ((available as bigint) ?? 0n)) return setError("exceeds available balance");
+    if (amt <= 0n) return setError("Amount must be positive.");
+    if (amt > ((available as bigint) ?? 0n)) return setError("That exceeds your available balance.");
     setBusy("withdraw");
     try {
       await ensureChain(expected);
@@ -146,7 +146,7 @@ export function BankrollPanel({
       setAmount("");
       refetchAll();
     } catch (e: any) {
-      setError(e?.shortMessage ?? e?.message ?? "withdraw failed");
+      setError(e?.shortMessage ?? e?.message ?? "Withdraw failed.");
     } finally {
       setBusy("");
       setStage("");
@@ -156,7 +156,7 @@ export function BankrollPanel({
   if (!enabled) {
     return (
       <div className="panel">
-        <b style={{ color: "var(--text-strong)" }}>Bankroll</b>
+        <b style={{ color: "var(--text-strong)" }}>Balance</b>
         <div className="muted" style={{ marginTop: 6 }}>
           Connect your wallet to deposit USDC and play for stakes.
         </div>
@@ -168,7 +168,7 @@ export function BankrollPanel({
 
   return (
     <div className="panel">
-      <b style={{ color: "var(--text-strong)" }}>Bankroll</b>
+      <b style={{ color: "var(--text-strong)" }}>Balance</b>
       <div className="bankroll-stats">
         <div className="bk">
           <span className="bk-v">{fmtUsdc(available as bigint)}</span>
@@ -186,7 +186,7 @@ export function BankrollPanel({
 
       {wrongChain && (
         <div className="muted" style={{ marginTop: 8, color: "#e0a96c" }}>
-          Wrong network — deposits will prompt a switch to chain {expected}.
+          Wrong network. Deposits will prompt a switch to chain {expected}.
         </div>
       )}
 

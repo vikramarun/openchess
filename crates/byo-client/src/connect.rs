@@ -194,7 +194,7 @@ async fn run_agent(
         {
             Ok(AgentExit::Closed) => {
                 // Server closed the socket (deploy/restart) — reconnect.
-                eprintln!("connection closed; reconnecting…");
+                eprintln!("connection closed; reconnecting...");
                 backoff = 3;
             }
             // The credential is dead, not the socket. Without this the bot
@@ -202,7 +202,7 @@ async fn run_agent(
             // and never coming back online — silently offline until someone
             // notices and restarts it by hand.
             Ok(AgentExit::Unauthorized) => {
-                eprintln!("session rejected; re-authenticating…");
+                eprintln!("session rejected; re-authenticating...");
                 match sign_in(client, http, opts).await {
                     Ok(s) => {
                         println!("signed in as {}", s.address);
@@ -421,7 +421,7 @@ async fn run_autopilot(
             // would spin forever, so mint a new one and rescan. Without this
             // the server's strict-auth rejection would just stall the bot.
             Err(e) if is_unauthorized(&e) => {
-                eprintln!("session rejected; re-authenticating…");
+                eprintln!("session rejected; re-authenticating...");
                 match sign_in(client, http, opts).await {
                     Ok(s) => {
                         println!("signed in as {}", s.address);
@@ -556,7 +556,7 @@ async fn find_and_accept(
         .as_str()
         .or(offer["poster_addr"].as_str())
         .unwrap_or("anonymous");
-    println!("found open challenge from {poster}, joining…");
+    println!("found open challenge from {poster}, joining...");
     accept_offer(client, http, id, opts, session, engine_name).await
 }
 
@@ -616,7 +616,7 @@ async fn post_and_wait(
         .to_string();
     let cancel_key = resp["cancel_key"].as_str().unwrap_or_default().to_string();
     *posted.lock().unwrap() = Some((offer_id.clone(), cancel_key.clone()));
-    println!("challenge posted, waiting for an opponent… (Ctrl-C to withdraw)");
+    println!("challenge posted, waiting for an opponent... (Ctrl-C to withdraw)");
 
     let mut ticks = 0u32;
     loop {
@@ -679,7 +679,7 @@ async fn post_and_wait(
         }
         *posted.lock().unwrap() = None;
         let foreign_id = foreign["offer_id"].as_str().unwrap_or_default().to_string();
-        println!("switching to a newly posted challenge…");
+        println!("switching to a newly posted challenge...");
         return accept_offer(client, http, &foreign_id, opts, session, engine_name).await;
     }
 }

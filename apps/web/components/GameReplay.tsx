@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
-import { MoveList, MoveNav } from "@/components/MoveNav";
+import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { shortAddress } from "@/lib/address";
 import { lastMoveFromUci, material } from "@/lib/board";
@@ -100,18 +100,18 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
 
   const settleLine = (() => {
     if (aborted) {
-      // No on-chain settlement happens for an aborted game; any locked stake is
-      // refunded on abort. Don't show the misleading "Settling on-chain…".
-      return detail.stake ? { cls: "", text: "The game didn’t start — your stake was refunded." } : null;
+      // No onchain settlement happens for an aborted game; any locked stake is
+      // refunded on abort. Don't show the misleading "Settling onchain…".
+      return detail.stake ? { cls: "", text: "The game didn’t start, so your stake was refunded." } : null;
     }
     if (!detail.stake) return null;
     switch (detail.settlement_status) {
       case "settled":
-        return { cls: "won", text: "Settled on-chain ✓" };
+        return { cls: "won", text: "Settled onchain ✓" };
       case "failed":
-        return { cls: "lost", text: "Settlement failed — funds recoverable on-chain" };
+        return { cls: "lost", text: "Settlement failed. Funds are recoverable onchain." };
       case "pending":
-        return { cls: "", text: "Settling on-chain…" };
+        return { cls: "", text: "Settling onchain…" };
       default:
         return null;
     }
@@ -195,21 +195,16 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
               </div>
             )}
             {verified?.signed && (
-              <div className="verified">✓ Verified — signed by oracle {shortAddr(verified.oracle)}</div>
+              <div className="verified">✓ Verified, signed by oracle {shortAddr(verified.oracle)}</div>
             )}
           </div>
 
-          <div className="panel">
-            <div className="muted" style={{ marginBottom: 8 }}>
-              Moves
-            </div>
-            <MoveList
-              sans={detail.moves.map((m) => m.san)}
-              at={at}
-              onSelect={nav.go}
-              emptyText="No moves recorded."
-            />
-          </div>
+          <MovePanel
+            sans={detail.moves.map((m) => m.san)}
+            at={at}
+            onSelect={nav.go}
+            emptyText="No moves recorded."
+          />
 
           <div style={{ display: "flex", gap: 8 }}>
             <Link href="/" className="ghost">

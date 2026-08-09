@@ -1,8 +1,8 @@
-# OpenChess — Architecture
+# OpenChess Architecture
 
-Engine-vs-engine chess with non-custodial USDC wagers on Base. The server is the
+Engine-vs-engine chess for non-custodial USDC stakes on Base. The server is the
 sole authority on legality, clock, and result; engines run on the *players'*
-machines (native client) or in their *browser* (WASM) — never on our servers.
+machines (native client) or in their *browser* (WASM), never on our servers.
 
 ## System overview
 
@@ -46,7 +46,7 @@ the server is **single-node** (lobby, tokens, sessions, and rooms are in-process
 
 ## Authoritative move loop
 
-The server never trusts a client move — it re-validates legality + clock with
+The server never trusts a client move. It re-validates legality + clock with
 `shakmaty`. The browser and native clients speak the identical protocol.
 
 ```mermaid
@@ -77,17 +77,17 @@ sequenceDiagram
 The default experience is a free, in-browser casual lobby (`apps/web` +
 `crates/server`):
 
-- **Play** — pick a time control; "Play now" runs two in-browser engines
+- **Play.** Pick a time control. "Play now" runs two in-browser engines
   instantly, or **post an open challenge** (`POST /park/offers`, no stake) that
   another player's engine joins (`/park/offers/:id/accept`). The in-browser
   engine uses a curated opening book so openings are instant.
-- **Watch** — `GET /games/live` lists games that have actually **started** (each
+- **Watch.** `GET /games/live` lists games that have actually **started** (each
   room carries a shared `started` flag; un-started/abandoned rooms are hidden and
   reaped). Clicking one opens the spectator (`/game/:id`); on join the room
   replays the full move history to that socket (a `Snapshot` command → `GameStart`
   + one `OpponentMoved` per move) so a **mid-game** spectator rebuilds the board,
   then streams live.
-- **Leaderboard** — `GET /leaderboard` ranks wallets with ≥1 finished rated game
+- **Leaderboard.** `GET /leaderboard` ranks wallets with ≥1 finished rated game
   by Elo (updated by `update_ratings` as games finish; one overall rating today).
   A game is **rated only if both sides made ≥1 move** (`room.rs finish()`), so a
   no-show / hung engine loses the game and stake but not its rating.
@@ -131,18 +131,18 @@ If the oracle never settles, `claimTimeout` refunds both stakes.
 
 ## Tournament settlement (format-agnostic pool)
 
-A tournament collects equal buy-ins into a pool and distributes a signed payout
-vector — so Swiss / knockout / round-robin / arena all share one contract.
+A tournament collects equal entries into a pool and distributes a signed payout
+vector, so Swiss / knockout / round-robin / arena all share one contract.
 
 The round-robin runs **one round at a time** (circle method,
 `crates/server/src/matchmaking.rs`): each round pairs every entrant once, and the
 next round is dispatched only when the current round's games all finish. This is
-what lets a **bot entrant** — a single agent that can play one game at a time —
+what lets a **bot entrant**, a single agent that can play one game at a time,
 compete, and it stops the games a player isn't in yet from being reaped before
 they're played. An entrant whose bot is offline at a round's dispatch **forfeits**
 that pairing (opponent wins), so a round never hangs; a never-started game reports
-a draw on its reap. Tournament games are unwagered — only the pool is money —
-so a forfeit affects standings, not any per-game escrow.
+a draw on its reap. Tournament games carry no per-game stake, since only the
+pool is money, so a forfeit affects standings rather than any per-game escrow.
 
 ```mermaid
 flowchart TB
@@ -155,7 +155,7 @@ flowchart TB
   OPEN -.->|never settled, after timeout| REFUND["claimRefund(account)\npermissionless per-entrant"]
 ```
 
-## Data model (Postgres — durable truth)
+## Data model (Postgres, the durable truth)
 
 ```mermaid
 erDiagram
@@ -172,14 +172,14 @@ erDiagram
 ```
 
 Lobby/matchmaking state (park offers, queues, gauntlet sessions, live tournament
-standings) is **in-memory** — the Redis layer in production.
+standings) is **in-memory**, and becomes the Redis layer in production.
 
 ## Trust model
 
 | Concern | Who is trusted | Mitigation |
 |---|---|---|
 | Move legality / clock / result | **server (authority)** | re-validated server-side; result committed by SHA-256 over the move log |
-| Result correctness for settlement | **oracle key** (server) | oracle EIP-191-signs `result_hash`; clients verify the signer vs `/oracle` ("✓ Verified"). Same trust as any result oracle; an on-chain dispute window is a documented TODO |
+| Result correctness for settlement | **oracle key** (server) | oracle EIP-191-signs `result_hash`; clients verify the signer vs `/oracle` ("✓ Verified"). Same trust as any result oracle; an onchain dispute window is a documented TODO |
 | Custody of funds | **no one** (escrow contract) | funds in `ChessEscrow`; platform can only move *locked* stake between the two committed players per a signed result; `claimTimeout`/`claimRefund` recover funds if the oracle vanishes |
 | Engine fairness | not a concern | engines are allowed; a human override just plays worse and loses their own stake |
 

@@ -18,7 +18,7 @@ export function AuthButton() {
 }
 
 /** One button for the whole entry flow. Connecting a wallet auto-switches to the
- *  server's expected chain and, on a wagering server, immediately prompts the
+ *  server's expected chain and, on a staked server, immediately prompts the
  *  SIWE signature — so there's a single "Sign in", never a separate connect +
  *  sign-in step. The session token is bound to the wallet it was issued for and
  *  cleared on disconnect / account switch. */
@@ -83,7 +83,7 @@ function AuthButtonInner() {
 
   const ready = isConnected && !!address && expected != null;
 
-  // Auto-complete sign-in once connected on a wagering server: runSignIn
+  // Auto-complete sign-in once connected on a staked server: runSignIn
   // switches to the expected chain (if needed) and then prompts the SIWE
   // signature, so this is the whole connect → switch → sign flow in one step.
   useEffect(() => {
@@ -107,7 +107,7 @@ function AuthButtonInner() {
           );
         }
 
-        // Connected but the wagering session isn't established yet.
+        // Connected but the signed-in session isn't established yet.
         if (wagerOn && !signedIn) {
           return (
             <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
@@ -124,7 +124,7 @@ function AuthButtonInner() {
         if (wagerOn && expected != null && chainId !== expected) {
           return (
             <button className="wrong-net" onClick={() => ensureChain(expected).catch(() => {})}>
-              Wrong network — switch
+              Wrong network, switch
             </button>
           );
         }

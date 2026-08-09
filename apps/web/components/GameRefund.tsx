@@ -97,7 +97,7 @@ export function GameRefund({
       await publicClient!.waitForTransactionReceipt({ hash });
       refetch();
     } catch (e: any) {
-      setError(e?.shortMessage ?? e?.message ?? "transaction failed");
+      setError(e?.shortMessage ?? e?.message ?? "Transaction failed.");
     } finally {
       setBusy(false);
     }
@@ -111,7 +111,7 @@ export function GameRefund({
         </button>
       ) : (
         <span className="muted" style={{ fontSize: 13 }}>
-          {`Unsettled game · ${fmtUsdc(stake)} USDC — refundable in ${hoursUntil(windowOpensAt)}`}
+          {`Unsettled game · ${fmtUsdc(stake)} USDC · refundable in ${hoursUntil(windowOpensAt)}`}
         </span>
       )}
       {error ? <span style={{ color: "#e06c6c", fontSize: 12 }}>{error}</span> : null}

@@ -154,7 +154,7 @@ pub struct RateLimits {
     /// Game/queue/gauntlet/tournament **creation** routes (`POST /games`,
     /// `/queue`, `/gauntlet/start`, `/tournaments`, `/tournaments/{id}/join`,
     /// `/tournaments/{id}/start`). Each spawns a room actor and/or an
-    /// oracle-gas-costing on-chain call, so they're the most expensive things to
+    /// oracle-gas-costing onchain call, so they're the most expensive things to
     /// spam. Kept off the shared router layer so it never throttles the UI's
     /// frequent read/poll GETs on the same paths.
     pub create: TokenBucket,
@@ -171,7 +171,7 @@ pub struct RateLimits {
     /// anonymous casual offers) may hold.
     pub max_open_offers: usize,
     /// Max not-yet-finished **buy-in** tournaments a single organizer wallet may
-    /// have open at once. Each buy-in tournament opens an on-chain pool at
+    /// have open at once. Each buy-in tournament opens an onchain pool at
     /// creation (oracle-paid gas) while the attacker locks nothing until someone
     /// joins, so without this cap one authed wallet could drain oracle ETH by
     /// looping `POST /tournaments {buy_in}`. Casual (no-pool) tournaments are
@@ -223,11 +223,15 @@ impl RateLimits {
                 // IP; the global cap protects the node.
                 env_parse("RL_GAME_CONNS_PER_IP", 128),
             ),
-            // Per wallet (or IP for anonymous casual offers). Comfortably above
-            // the house bot's one-open-offer-per-time-control
-            // (scripts/house-bot.sh defaults to 4 TCs under one wallet); bump
-            // RL_MAX_OPEN_OFFERS if you run more.
-            max_open_offers: env_parse("RL_MAX_OPEN_OFFERS", 8),
+            // Per wallet (or IP for anonymous casual offers). Sized with room
+            // above the house bot's standing offers, which is TCS×SEATS under
+            // ONE wallet — 4 time controls × 2 concurrent seats = 8 by default
+            // (scripts/house-bot.sh). 8 would *fit* exactly, since the check
+            // rejects at `open >= max`, but with zero headroom: a fifth time
+            // control or a third seat then silently 429s, and the only symptom
+            // is that one tile quietly stops being doubly available. Raise this
+            // alongside SEATS rather than discovering the ceiling in prod.
+            max_open_offers: env_parse("RL_MAX_OPEN_OFFERS", 16),
             // A legitimate organizer runs one buy-in tournament at a time; a
             // small allowance covers back-to-back events without letting one
             // wallet open dozens of oracle-funded pools.

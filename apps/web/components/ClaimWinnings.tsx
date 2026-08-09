@@ -61,7 +61,7 @@ export function ClaimWinnings({ escrow, chainId }: { escrow: `0x${string}`; chai
 
   if (!isConnected || !address || (items.length === 0 && games.length === 0)) return null;
 
-  // Keep the panel mounted (children need to run their on-chain reads) but hide
+  // Keep the panel mounted (children need to run their onchain reads) but hide
   // it until at least one tournament resolves to something claimable.
   const anyClaimable = Object.values(resolved).some(Boolean);
 
@@ -75,7 +75,7 @@ export function ClaimWinnings({ escrow, chainId }: { escrow: `0x${string}`; chai
         ...(anyClaimable ? {} : { display: "none" }),
       }}
     >
-      <b style={{ color: "var(--text-strong)" }}>Winnings &amp; refunds</b>
+      <b style={{ color: "var(--text-strong)" }}>Payouts &amp; refunds</b>
       <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
         {games.map((g) => (
           <GameRefund

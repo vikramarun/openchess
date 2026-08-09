@@ -178,7 +178,7 @@ enum Command {
         time: TimeArgs,
     },
     /// Put your engine online as a bot bound to your wallet. By default you
-    /// then drive it from the website (start/join games there — the seat is
+    /// then drive it from the website (start/join games there; the seat is
     /// pushed here and the engine plays). `--auto` instead matches unattended.
     Connect {
         /// HTTP base URL of the server (ws URL is derived from it).
@@ -369,7 +369,7 @@ async fn main() -> Result<()> {
                 })?;
             println!("address: {}", session.address);
             println!("token:   {}", session.token);
-            println!("(session bearer token, expires in 24h — treat it like a password)");
+            println!("(session bearer token, expires in 24h; treat it like a password)");
             Ok(())
         }
     }

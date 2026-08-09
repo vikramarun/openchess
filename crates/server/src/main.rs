@@ -4,7 +4,7 @@
 //!
 //! Durable state (games, moves, results) is persisted to Postgres when
 //! `DATABASE_URL` is set; lobby/matchmaking state is in-memory (the Redis layer
-//! in production). On-chain settlement is wired when `RPC_URL`/`ESCROW_ADDR`/
+//! in production). Onchain settlement is wired when `RPC_URL`/`ESCROW_ADDR`/
 //! `ORACLE_KEY` are set, else it logs.
 
 mod admin;
@@ -137,7 +137,7 @@ pub enum SeatDelivery {
     },
 }
 
-/// On-chain seats + stake for a wagered game.
+/// Onchain seats + stake for a wagered game.
 #[derive(Clone, Copy)]
 pub struct WagerSeats {
     pub white: Address,
@@ -183,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let settlement = ledger::from_env();
-    // Who may toggle maintenance: ADMIN_WALLET override, else the on-chain
+    // Who may toggle maintenance: ADMIN_WALLET override, else the onchain
     // escrow owner (read live so it tracks ownership transfers).
     let admin_wallet = resolve_admin_wallet(&*settlement).await;
     // Restore the durable maintenance flag. A read failure defaults OFF but is
@@ -230,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
             problems.push("DATABASE_URL unset");
         }
         if !state.0.settlement.is_onchain() {
-            problems.push("on-chain settlement not configured (RPC_URL/ESCROW_ADDR/ORACLE_KEY)");
+            problems.push("onchain settlement not configured (RPC_URL/ESCROW_ADDR/ORACLE_KEY)");
         }
         if std::env::var("SIWE_DOMAIN").is_err() {
             problems.push("SIWE_DOMAIN unset");
@@ -245,11 +245,11 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         tracing::info!(
-            "production profile OK (db + on-chain settlement + SIWE_DOMAIN + WEB_ORIGIN)"
+            "production profile OK (db + onchain settlement + SIWE_DOMAIN + WEB_ORIGIN)"
         );
     }
 
-    // Drain the per-game + tournament settlement outboxes on-chain (durable).
+    // Drain the per-game + tournament settlement outboxes onchain (durable).
     // Supervised: restarted if they ever exit/panic so settlement never stops.
     if let Some(db) = state.0.db.clone() {
         let s = state.0.settlement.clone();
@@ -279,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
     // Update mode standings (gauntlet/tournament) as games finish.
     tokio::spawn(matchmaking::results_task(state.clone(), results_rx));
     // Recover tournaments interrupted by a restart: settle completed ones by
-    // result, mark interrupted ones abandoned (entrants refund on-chain).
+    // result, mark interrupted ones abandoned (entrants refund onchain).
     matchmaking::recover_tournaments(&state).await;
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
@@ -461,7 +461,7 @@ async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode
             }
         }
         // No database at all. Fine for a casual-only node — nothing is at stake
-        // and in-memory state is the whole design. NOT fine once on-chain
+        // and in-memory state is the whole design. NOT fine once onchain
         // settlement is live: the settlement outbox workers are only spawned
         // when a DB exists, so such a node accepts real wagers and settles them
         // "best-effort inline" (see `room.rs finish()`) with no retry — one
@@ -472,7 +472,7 @@ async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode
         None => {
             if state.0.settlement.is_onchain() {
                 tracing::error!(
-                    "not ready: on-chain settlement is configured but DATABASE_URL is unset — \
+                    "not ready: onchain settlement is configured but DATABASE_URL is unset — \
                      no settlement outbox, so wagers would settle with no retry. Attach Postgres \
                      (and set REQUIRE_ONCHAIN=1 to fail the boot instead of serving)."
                 );
@@ -502,7 +502,7 @@ struct ConfigInfo {
     escrow: Option<String>,
     /// Chain the SIWE messages + escrow live on (matches `SIWE_CHAIN_ID`).
     chain_id: u64,
-    /// Whether wagered play is available (on-chain settlement is configured).
+    /// Whether wagered play is available (onchain settlement is configured).
     wager_enabled: bool,
     /// Domain SIWE messages must be bound to — native clients need it to build
     /// a message this server will accept.
@@ -510,8 +510,8 @@ struct ConfigInfo {
     /// Whether the server is in maintenance/drain mode: no new games start,
     /// existing ones play out. Clients show a banner + disable "create".
     maintenance: bool,
-    /// The wallet allowed to toggle maintenance (the on-chain escrow owner).
-    /// Public — it's readable on-chain — so the UI can show the admin control
+    /// The wallet allowed to toggle maintenance (the onchain escrow owner).
+    /// Public — it's readable onchain — so the UI can show the admin control
     /// only to that wallet. `None` ⇒ admin actions disabled on this server.
     admin_wallet: Option<String>,
 }
@@ -560,7 +560,7 @@ async fn live_games(State(state): State<AppState>) -> Json<Vec<LiveGame>> {
     Json(list)
 }
 
-/// Publishes the on-chain config the web app needs to wire deposits/wagers:
+/// Publishes the onchain config the web app needs to wire deposits/wagers:
 /// the escrow address and expected chain — single-sourced from the server.
 async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
     let chain_id = std::env::var("SIWE_CHAIN_ID")
@@ -624,7 +624,7 @@ async fn sweep_task(state: AppState) {
     }
 }
 
-/// Background worker: claims pending settlements and submits them on-chain.
+/// Background worker: claims pending settlements and submits them onchain.
 /// Transient failures are requeued with an attempt cap; crashed-worker rows are
 /// reaped back to pending; an already-settled game (crash-after-submit / replay
 /// revert) is treated as success.
@@ -635,7 +635,7 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
         tick.tick().await;
 
         // Reap rows stranded in `processing` by a crashed worker. The lease must
-        // exceed worst-case on-chain confirmation so we don't requeue an
+        // exceed worst-case onchain confirmation so we don't requeue an
         // in-flight submit.
         if let Err(e) = db.requeue_stale(300).await {
             tracing::warn!("outbox reaper failed: {e:#}");
@@ -672,7 +672,7 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                     let _ = db
                         .finalize_settlement(row.id, row.game_id, "settled", None)
                         .await;
-                    tracing::info!(game_id = %row.game_id, "outbox: settled on-chain");
+                    tracing::info!(game_id = %row.game_id, "outbox: settled onchain");
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -682,15 +682,15 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
                         let _ = db
                             .finalize_settlement(row.id, row.game_id, "settled", None)
                             .await;
-                        tracing::info!(game_id = %row.game_id, "outbox: already settled on-chain");
+                        tracing::info!(game_id = %row.game_id, "outbox: already settled onchain");
                     } else if row.attempts >= persistence::MAX_SETTLE_ATTEMPTS {
                         let _ = db
                             .finalize_settlement(row.id, row.game_id, "failed", Some(&msg))
                             .await;
                         tracing::error!(game_id = %row.game_id, attempts = row.attempts, "outbox: giving up: {msg}");
                         alert::fire(format!(
-                            "🚨 OpenChess: settlement outbox GAVE UP on game {} after {} attempts \
-                             — the wager was not paid out on-chain. err: {msg}",
+                            "🚨 OpenChess: settlement outbox GAVE UP on game {} after {} attempts. \
+                             The stake was not paid out onchain. err: {msg}",
                             row.game_id, row.attempts
                         ));
                     } else {
@@ -726,7 +726,7 @@ async fn tournament_settlement_worker(db: Arc<Db>, settlement: Arc<dyn Settlemen
                     let _ = db
                         .set_tournament_settlement_status(row.id, "settled", None)
                         .await;
-                    tracing::info!(tid = %row.tid, "tournament outbox: settled on-chain");
+                    tracing::info!(tid = %row.tid, "tournament outbox: settled onchain");
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -741,7 +741,7 @@ async fn tournament_settlement_worker(db: Arc<Db>, settlement: Arc<dyn Settlemen
                         tracing::error!(tid = %row.tid, "tournament outbox: giving up: {msg}");
                         alert::fire(format!(
                             "🚨 OpenChess: tournament settlement outbox GAVE UP on tournament {} \
-                             after {} attempts — payouts were not made on-chain. err: {msg}",
+                             after {} attempts. Payouts were not made onchain. err: {msg}",
                             row.tid, row.attempts
                         ));
                     } else {
@@ -933,7 +933,7 @@ impl AppState {
 
         // Global room ceiling: bound concurrent room actors so a creation flood
         // can't exhaust memory/tasks on the single node. Checked here (before any
-        // escrow opens) so a rejected wagered game never locks funds on-chain.
+        // escrow opens) so a rejected wagered game never locks funds onchain.
         // Best-effort: the check isn't atomic with the insert below, so a
         // concurrent burst can overshoot by the number of in-flight creates —
         // that's bounded by the per-IP create throttle and fine for a DoS backstop.
@@ -948,11 +948,11 @@ impl AppState {
             black: w.black,
         });
 
-        // Fail-closed: never accept a wager we cannot settle on-chain, or with
+        // Fail-closed: never accept a wager we cannot settle onchain, or with
         // identical / overflowing seats.
         if let Some(w) = wager {
             if !self.0.settlement.is_onchain() {
-                tracing::warn!(%game_id, "refusing wagered game: no on-chain settlement configured");
+                tracing::warn!(%game_id, "refusing wagered game: no onchain settlement configured");
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
             if w.white == w.black || w.stake == U256::ZERO || w.stake > U256::from(MAX_STAKE) {
@@ -992,7 +992,7 @@ impl AppState {
             }
         }
 
-        // Lock stakes on-chain BEFORE spawning the room. If this fails for a
+        // Lock stakes onchain BEFORE spawning the room. If this fails for a
         // wagered game, abort — never let an unbacked wagered game play.
         if let Some(w) = wager {
             if let Err(e) = self
@@ -1199,7 +1199,7 @@ impl AppState {
     }
 
     /// Per-IP throttle for the game/tournament **creation** routes. Each such
-    /// call spawns a room actor and/or an oracle-gas-costing on-chain tx, so
+    /// call spawns a room actor and/or an oracle-gas-costing onchain tx, so
     /// they must not be spammable. Call at the top of every creation handler
     /// (`create_game`, `queue_join`, `gauntlet_start`, `tourney_create/join/start`)
     /// — these live on the un-throttled matchmaking router (a shared route layer
@@ -1347,7 +1347,7 @@ mod tests {
         increment_ms: 0,
     };
 
-    /// Claims to settle on-chain without touching a chain, so the readiness
+    /// Claims to settle onchain without touching a chain, so the readiness
     /// test can cover the dangerous combination: money live, durability absent.
     struct OnchainStub;
 
