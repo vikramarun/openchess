@@ -33,6 +33,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
 (cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
+(cd apps/web && pnpm test:username) # a username's shape, and what a player is called
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -256,7 +257,7 @@ wallet.
   `layout.tsx`.** `"use client"` and `export const metadata` are mutually
   exclusive, which is why each route has a three-line server layout next to its
   page. A new route inherits the root title until you add one. The dynamic
-  routes (`/game/[id]`, `/player/[address]`) use `generateMetadata` there, and
+  routes (`/game/[id]`, `/player/[ident]`) use `generateMetadata` there, and
   both must degrade to a generic title rather than throw: a crawler hitting a
   dead id must not 500 the page.
 - **One `bestmove` answers one `go`, in order.** `BrowserEngine` hands each one
@@ -335,6 +336,42 @@ wallet.
   put casual Elo on a public board, and never thread a seat wallet into the
   unauthenticated `POST /games`: that would make a ladder writable with no SIWE
   at all.
+
+- **A seat's display name is the server's to decide, never the client's.** A
+  wallet claims one **username** (`users.username`, unique on
+  `lower(username)`); `start_game`'s `seat_info` (`main.rs`) resolves each seat
+  to that handle, else its short address, and **never reads `SeatMeta.name` for
+  a seat that has a wallet**. That single rule is the whole impersonation
+  defence: while the browser declared its own label, any signed-in player could
+  type somebody else's handle and the board would print it. Only a seat with NO
+  wallet carries a chosen label, and it is `~`-decorated (`username::guest_label`)
+  — `~` is outside `[A-Za-z0-9_]`, so a guest string is *incapable* of equalling
+  a username. `park_create` snapshots `poster_name` from the poster's wallet for
+  the same reason. Anything that reintroduces a client-supplied name on a
+  wallet-bound seat re-opens this; `a_seat_shows_its_wallets_username_not_the_string_the_client_sent`
+  is what fails. The rules live in TWO places by necessity — `crates/server/src/username.rs`
+  enforces, `apps/web/lib/username.ts` mirrors for instant feedback, and the
+  reserved lists are hand-synced (divergence fails soft, in the safe direction).
+  Four traps. **`users` could hold two rows per wallet** until migration 0018 —
+  `upsert_user` bound the address raw (checksummed, via `seat_wallets`) while
+  `set_avatar` lowercased it; reads folded through `lower(wallet)` with
+  `fetch_optional` so it silently picked one, which a rating survives and a
+  username does not. `users_wallet_lower_uidx` now makes a mixed-case insert fail
+  loudly; keep `upsert_user`'s `.to_lowercase()`. **A username may not start with
+  `0x`** and must never be reported as an address: `/players/{ident}` resolves
+  BOTH, so an addressish name is unresolvable ambiguity and a lookalike squat.
+  **`_` is both a legal username character and LIKE's wildcard** — the search
+  prefix goes through `username::like_prefix` + `ESCAPE '\'`, and its btree needs
+  `text_pattern_ops` or the typeahead seq-scans `users` per keystroke. And **the
+  cooldown is a 403, not a 429**: this router already answers 429 from two
+  different rate limits, and telling a throttled user "you can change again in 7
+  days" is both wrong and unrecoverable-sounding.
+- **The house bot is identified by WALLET, not by its name.** The lobby's
+  play-now button finds its standing free offer via `house_wallet` on
+  `GET /config` (from the `HOUSE_WALLET` env var). It used to match the literal
+  string `"House Bot"` — impossible now that an offer's label is a resolved
+  username, since that string has a space in it. **Set `HOUSE_WALLET` on Fly
+  before deploying**, or the button silently degrades to its `/play` demo.
 
 ## Conventions
 - Money is `rust_decimal` / `U256`, never `f64`. USDC has 6 decimals.

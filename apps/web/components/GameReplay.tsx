@@ -10,7 +10,7 @@ import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
-import { shortAddress } from "@/lib/address";
+import { playerLabel } from "@/lib/playerLabel";
 import { lastMoveFromUci, material, type Side } from "@/lib/board";
 import { other, useFlip } from "@/lib/useFlip";
 import { fmtUsdc } from "@/lib/escrow";
@@ -21,10 +21,12 @@ import { useEval, useEvalPref } from "@/lib/useEval";
 import { usePlyNav } from "@/lib/usePlyNav";
 import { shortAddr, verifyResultSig, type Verification } from "@/lib/verify";
 
-/** Best display name for a seat: short wallet, else "Engine" (casual). */
-function seatName(addr: string | null): string {
-  return addr ? shortAddress(addr) : "Engine";
-}
+/** Best display name for a seat: short wallet, else "Engine" (casual).
+ *
+ *  No username here, and that's a payload gap rather than a helper gap:
+ *  `/players/{addr}/games` and `GET /games/{id}` carry wallets only. Upgrading
+ *  it needs `white_username`/`black_username` on those responses. */
+const seatName = (addr: string | null) => playerLabel({ address: addr, fallback: "Engine" });
 
 /** Replay a finished game move-by-move: navigable board (click a move, ←/→,
  *  Home/End), per-move clocks, player name-plates, and the result + settlement

@@ -1,6 +1,11 @@
-// The user's BROWSER bot: a personalized in-browser Stockfish — display name,
-// and an uploaded Polyglot opening book — with zero downloads. The
-// native client (chess-client) is the power tier; this is the on-ramp.
+// The user's BROWSER bot: a personalized in-browser Stockfish — an opening
+// repertoire, a thinking style, and an uploaded Polyglot book — with zero
+// downloads. The native client (chess-client) is the power tier; this is the
+// on-ramp.
+//
+// No display name lives here any more. A seat is labelled by the USERNAME of the
+// wallet sitting in it, resolved server-side, because a name the client chose
+// can name anybody — see `seat_info` in crates/server/src/main.rs.
 //
 // Settings live in localStorage; the (potentially large) book lives in
 // IndexedDB and is parsed once per session into memory for synchronous
@@ -21,8 +26,6 @@ import { readMigrated, writeKey } from "./storage";
 import { DEFAULT_TIME_POLICY, normalizeTimePolicy, timePolicyLabel, type TimePolicy } from "./timePolicy";
 
 export type BrowserBotConfig = {
-  /** Display name shown to opponents; "" = default. */
-  name: string;
   /** Stop using an opening book after this many plies. */
   bookMaxPly: number;
   /** Which built-in opening books this bot plays, per colour/reply slot. */
@@ -32,7 +35,6 @@ export type BrowserBotConfig = {
 };
 
 export const DEFAULT_CONFIG: BrowserBotConfig = {
-  name: "",
   bookMaxPly: 16,
   repertoire: DEFAULT_REPERTOIRE,
   time: DEFAULT_TIME_POLICY,
@@ -45,12 +47,15 @@ function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
 }
 
 /** Field-by-field parse with per-field defaults, so a config written before
- *  repertoires existed keeps its name and book setting and simply gains the
- *  new field. Exported for the tests, which have no localStorage. */
+ *  repertoires existed keeps its book setting and simply gains the new field.
+ *  Exported for the tests, which have no localStorage.
+ *
+ *  This rebuilds into a fresh object rather than spreading, which is also what
+ *  makes the removal of `name` free: a blob still carrying one is simply never
+ *  read, so no migration is needed. */
 export function parseBrowserBotConfig(raw: unknown): BrowserBotConfig {
   const r = (raw ?? {}) as Record<string, unknown>;
   return {
-    name: typeof r.name === "string" ? r.name.slice(0, 48) : "",
     bookMaxPly: clampInt(r.bookMaxPly, 0, 60, DEFAULT_CONFIG.bookMaxPly),
     repertoire: normalizeRepertoire(r.repertoire),
     time: normalizeTimePolicy(r.time),
@@ -67,7 +72,13 @@ export function getBrowserBotConfig(): BrowserBotConfig {
 }
 
 /** Read-modify-write, so an older tab writing a subset of the fields can't
- *  erase settings it doesn't know about. */
+ *  erase settings it doesn't know about.
+ *
+ *  A side effect worth knowing before you go looking: because this merges over
+ *  the RAW stored blob, a `name` written before usernames existed survives in
+ *  `openchess.browserBot` indefinitely. Nothing reads it (see
+ *  `parseBrowserBotConfig`), so it is inert — but it is confusing in devtools,
+ *  and it is not worth a migration to remove. */
 export function saveBrowserBotConfig(cfg: Partial<BrowserBotConfig>) {
   let stored: unknown = {};
   try {
@@ -87,19 +98,19 @@ export function browserEngineLabel(cfg: BrowserBotConfig = getBrowserBotConfig()
   return parts.length ? `Stockfish 18 · ${parts.join(" · ")}`.slice(0, 48) : "Stockfish 18 (browser)";
 }
 
-/** The identity a BROWSER seat declares when creating or joining a game.
+/** What a BROWSER seat declares when creating or joining a game: the engine, and
+ *  nothing else.
  *
- *  Lives here rather than in the lobby because all three modes need it. The
- *  gauntlet and tournament pages used to send nothing, so a browser bot's games
- *  in those modes recorded no engine at all while its park games did. */
-export function browserSeat(cfg: BrowserBotConfig = getBrowserBotConfig()): {
-  name?: string;
-  engine: string;
-} {
-  return {
-    ...(cfg.name.trim() ? { name: cfg.name.trim() } : {}),
-    engine: browserEngineLabel(cfg),
-  };
+ *  Kept as a function rather than inlined at the four call sites because of the
+ *  bug it exists to prevent — the gauntlet and tournament pages used to send
+ *  nothing, so a browser bot's games in those modes recorded no engine at all
+ *  while its park games did.
+ *
+ *  It no longer declares a NAME. The server resolves a seat's label from the
+ *  username of the wallet in it and ignores anything the client sends, because
+ *  a client-chosen name can name anybody. */
+export function browserSeat(cfg: BrowserBotConfig = getBrowserBotConfig()): { engine: string } {
+  return { engine: browserEngineLabel(cfg) };
 }
 
 // ---------------------------------------------------------------------------

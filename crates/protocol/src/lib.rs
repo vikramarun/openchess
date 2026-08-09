@@ -92,7 +92,19 @@ impl GameResult {
 /// Lightweight description of an opponent shown to a player/spectator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpponentInfo {
+    /// What to render. Server-resolved for a wallet-bound seat (its username,
+    /// else its shortened address); a `~`-prefixed guest label otherwise. Never
+    /// a string the client chose for a seat it authenticated into.
     pub name: String,
+    /// The VERIFIED username behind `name`, when there is one.
+    ///
+    /// Separate from `name` so a client can badge a real handle without
+    /// re-deriving the trust boundary from string shape: `name` is a render
+    /// string and may be a guest label, while this is only ever a claimed
+    /// username. `#[serde(default)]` keeps a client built against the older
+    /// protocol deserializing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     /// Self-declared engine name (informational only — not verified).
     pub declared_engine: Option<String>,
 }
@@ -414,6 +426,7 @@ mod tests {
             },
             opponent: Some(OpponentInfo {
                 name: "0x1234…abcd".into(),
+                username: None,
                 declared_engine: Some("Stockfish 17".into()),
             }),
         };

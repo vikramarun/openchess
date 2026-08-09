@@ -6,7 +6,7 @@ import { useAccount, useAccountEffect, useChainId, useSignMessage } from "wagmi"
 
 import { authAddress, authToken, clearAuth } from "@/lib/escrow";
 import { signInWithEthereum } from "@/lib/siwe";
-import { useAvatar } from "@/lib/useAvatar";
+import { usePlayerCard } from "@/lib/usePlayerCard";
 import { useEnsureChain } from "@/lib/useEnsureChain";
 import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -31,11 +31,11 @@ function AuthButtonInner() {
 
   const { config, wagerOn } = useOnchainConfig();
   const expected = config?.chainId ?? null;
-  // The photo this wallet uploaded, if any. Takes precedence over the ENS
-  // avatar below: it is the picture the user chose *here*, so seeing a pawn (or
-  // an old ENS image) in the header right after setting one reads as the upload
-  // having failed.
-  const photo = useAvatar(address);
+  // The photo and handle this wallet set here, if any. Both take precedence
+  // over the ENS equivalents below: they are what the user chose *on this site*,
+  // so seeing a pawn (or an old ENS name) in the header right after setting one
+  // reads as the change having failed.
+  const { photo, username } = usePlayerCard(address);
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,7 +142,7 @@ function AuthButtonInner() {
               // eslint-disable-next-line @next/next/no-img-element
               <img src={photo ?? account.ensAvatar} alt="" className="chip-av" />
             : <span className="chip-av chip-av-fallback">♟</span>}
-            <span>{account.ensName ?? account.displayName}</span>
+            <span>{username ?? account.ensName ?? account.displayName}</span>
           </button>
         );
       }}

@@ -9,7 +9,7 @@ import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
 import { other, useFlip } from "@/lib/useFlip";
-import { shortAddress } from "@/lib/address";
+import { playerLabel } from "@/lib/playerLabel";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc } from "@/lib/escrow";
@@ -34,12 +34,9 @@ type Meta = {
   increment_secs: number;
 };
 
-/** Best display name for a seat: declared name, else short wallet, else engine. */
-function seatName(name: string | null, addr: string | null): string {
-  if (name) return name;
-  if (addr) return shortAddress(addr);
-  return "Engine";
-}
+/** Best display name for a seat: username, else short wallet, else engine. */
+const seatName = (name: string | null, addr: string | null) =>
+  playerLabel({ name, address: addr, fallback: "Engine" });
 
 /** Watch an in-progress game over a read-only spectator socket. The board is
  *  navigable while the game runs — stepping back doesn't stop the stream, and
