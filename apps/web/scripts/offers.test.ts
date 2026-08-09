@@ -2,11 +2,16 @@
 // in a screenshot and expensive: merging two *anonymous* posters would send a
 // joiner to a stranger's board, and failing to merge the house bot's identical
 // seats brings back the duplicate-row noise the grouping exists to remove.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { SESSION_EXPIRED } from "../lib/authedFetch";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "../lib/copy";
 import {
   acceptFromGroup,
   groupOffers,
+  HOUSE_BOT_NAME,
+  houseOfferGroup,
   joinErrorMessage,
   seatColor,
   type OfferLike,
@@ -137,6 +142,47 @@ check("empty park groups to nothing", groupOffers([]), []);
 // The row is rendered with the representative offer, so it must be a real
 // member of its own group (first seen), not a synthesised composite.
 check("representative is the first member", twoSeats[0]?.offer.offer_id, "a");
+
+// --- the lobby's play-now button: the house bot's standing free seat ---
+//
+// The button promises a free game against the house RIGHT NOW, so the finder
+// must only ever return the house bot's own free seat at exactly the clicked
+// clock. A miss falls back to the labeled demo; a wrong hit would seat someone
+// at a board the button didn't describe.
+const park = groupOffers([
+  offer({ offer_id: "h1" }),
+  offer({ offer_id: "h2" }),
+  offer({ offer_id: "staked", stake: "1000000", initial_secs: 600 }),
+  offer({ offer_id: "human", poster_name: "carl", poster_addr: "0xabc", initial_secs: 60 }),
+]);
+check("finds the house seat at the clicked clock", houseOfferGroup(park, 180, 0)?.ids, [
+  "h1",
+  "h2",
+]);
+check("no house seat at that clock → null", houseOfferGroup(park, 60, 0), null);
+check(
+  "a STAKED house offer never answers the free button",
+  houseOfferGroup(park, 600, 0),
+  null,
+);
+check(
+  "an anonymous poster named like the house never qualifies",
+  houseOfferGroup(
+    groupOffers([offer({ offer_id: "x", poster_addr: null })]),
+    180,
+    0,
+  ),
+  null,
+);
+// The name is the contract with scripts/house-bot.sh. A rename there quietly
+// downgrades the button to the demo everywhere — this is what makes that loud.
+check(
+  "HOUSE_BOT_NAME matches what house-bot.sh actually posts",
+  readFileSync(join(__dirname, "../../../scripts/house-bot.sh"), "utf8").includes(
+    `NAME="\${NAME:-${HOUSE_BOT_NAME}}"`,
+  ),
+  true,
+);
 
 // --- the join walk over a group's seats ---
 //

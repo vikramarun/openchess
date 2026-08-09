@@ -116,14 +116,23 @@ function GauntletClient() {
             void refreshStats();
             return;
           }
+          if (r.status === 401 && (wantStake || botPlays)) {
+            // A staked or bot seat can't re-queue without a fresh sign-in, and
+            // authedFetch has already dropped the dead token — so the 5s retry
+            // below could only 401 again, forever, into the rate limiter. Stop;
+            // SESSION_EXPIRED points at the sign-in button, and Stop → Start
+            // re-enters the loop once signed in.
+            setSearching(false);
+            setErr(SESSION_EXPIRED);
+            return;
+          }
           setErr(
             r.status === 424
               ? BOT_OFFLINE_MSG
               : r.status === 503
                 ? MAINTENANCE_MSG
-                : // authedFetch has already dropped the dead session, so the
-                  // retry below goes out clean (anonymous casual, or asking for
-                  // the sign-in a staked/bot gauntlet needs).
+                : // authedFetch has already dropped the dead session, so a
+                  // CASUAL browser retry goes out clean (anonymous) and works.
                   r.status === 401
                   ? SESSION_EXPIRED
                   : `Couldn’t join the queue (${r.status}).`,

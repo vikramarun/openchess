@@ -2,12 +2,14 @@
 //
 // This renders through Satori (next/og), which is not a browser. Two rules it
 // enforces that ordinary JSX does not: every element with more than one child
-// needs an explicit `display: flex`, and the mark has to arrive as an <img>
-// with a data URI rather than as inline SVG. Spacing uses margins rather than
-// `gap` for the same reason — fewer assumptions about what the renderer
-// implements.
+// needs an explicit `display: flex`, and the mark MUST be inline <svg> — never
+// an <img> with a data URI. The production bundle's resvg silently drops a
+// nested SVG image and still returns 200 (dev decodes it fine, so the
+// regression only shows once deployed; see lib/brand.ts). Spacing uses margins
+// rather than `gap` for the same reason — fewer assumptions about what the
+// renderer implements. pnpm test:brand greps this file for the inline form.
 
-import { MARK_ACCENT, MARK_LIGHT, MARK_TILE, ROOK_LEFT, ROOK_RIGHT } from "./brand";
+import { MARK_ACCENT, MARK_LIGHT, MARK_TILE, ROOK_LEFT, ROOK_RIGHT, SITE_URL } from "./brand";
 
 /** Facebook/Twitter/Discord all crop toward 1.91:1; this is the standard. */
 export const OG_SIZE = { width: 1200, height: 630 };
@@ -115,7 +117,8 @@ export function ogCard({ eyebrow, title, subtitle, detail }: OgCardProps) {
           color: FAINT,
         }}
       >
-        <div>openchess.ai</div>
+        {/* Host from SITE_URL so a preview deployment unfurls as itself. */}
+        <div>{new URL(SITE_URL).host}</div>
         {detail ? <div style={{ color: MUTED }}>{detail}</div> : null}
       </div>
     </div>

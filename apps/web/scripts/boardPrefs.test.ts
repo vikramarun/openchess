@@ -145,23 +145,30 @@ for (const name of [...REQUIRED_BOARD_VARS, ...pieceVarNames]) {
 
 // Run the bootstrap the way a browser would and compare what it stamps on
 // <html> against what the React path computes for the same stored preference.
-function runBootstrap(stored: unknown): Record<string, string> {
-  const applied: Record<string, string> = {};
+function runBootstrap(stored: unknown): {
+  vars: Record<string, string>;
+  attrs: Record<string, string>;
+} {
+  const vars: Record<string, string> = {};
+  const attrs: Record<string, string> = {};
   const sandbox = {
     localStorage: { getItem: () => (stored === undefined ? null : JSON.stringify(stored)) },
     document: {
       documentElement: {
         style: {
           setProperty(name: string, value: string) {
-            applied[name] = value;
+            vars[name] = value;
           },
+        },
+        setAttribute(name: string, value: string) {
+          attrs[name] = value;
         },
       },
     },
   };
   // eslint-disable-next-line no-new-func
   new Function("localStorage", "document", script)(sandbox.localStorage, sandbox.document);
-  return applied;
+  return { vars, attrs };
 }
 
 for (const stored of [
@@ -170,9 +177,20 @@ for (const stored of [
   { board: "blue", pieces: "celtic" },
   { board: "midnight", pieces: "rhosgfx" },
   { board: "bogus", pieces: "bogus" },
+  // Coordinates ride the same script: the html-level data-coords stamp is what
+  // stops a server-rendered board flashing labels the user turned off.
+  { coords: "off" },
+  { coords: "all" },
+  { coords: "bogus" },
 ]) {
   const label = JSON.stringify(stored) ?? "nothing stored";
-  check(`bootstrap matches applyBoardPrefs for ${label}`, runBootstrap(stored), boardCssVars(normalizePrefs(stored)));
+  const got = runBootstrap(stored);
+  check(`bootstrap matches applyBoardPrefs for ${label}`, got.vars, boardCssVars(normalizePrefs(stored)));
+  check(
+    `bootstrap stamps the same coords React would for ${label}`,
+    got.attrs["data-coords"],
+    normalizePrefs(stored).coords,
+  );
 }
 
 // --- the CSS fallback is the THIRD copy of the defaults ---

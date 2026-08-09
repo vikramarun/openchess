@@ -50,7 +50,9 @@ export const DEFAULT_PREFS: BoardPrefs = {
 
 export const STORAGE_KEY = "openchess.board";
 
-const COORDS: CoordsMode[] = ["off", "inside", "all"];
+/** Exported for the bootstrap script, which embeds the same list so its
+ *  normalization can't drift from `normalizePrefs`. */
+export const COORDS_MODES: CoordsMode[] = ["off", "inside", "all"];
 const SPEEDS: AnimationSpeed[] = ["none", "fast", "normal", "slow"];
 
 function oneOf<T extends string>(value: unknown, allowed: T[], fallback: T): T {
@@ -69,7 +71,7 @@ export function normalizePrefs(raw: unknown): BoardPrefs {
     // boardTheme()/pieceSet() already fall back to the first entry on a miss.
     board: boardTheme(typeof o.board === "string" ? o.board : "").id,
     pieces: pieceSet(typeof o.pieces === "string" ? o.pieces : "").id,
-    coords: oneOf(o.coords, COORDS, DEFAULT_PREFS.coords),
+    coords: oneOf(o.coords, COORDS_MODES, DEFAULT_PREFS.coords),
     animation: oneOf(o.animation, SPEEDS, DEFAULT_PREFS.animation),
     highlightLastMove: bool(o.highlightLastMove, DEFAULT_PREFS.highlightLastMove),
     highlightCheck: bool(o.highlightCheck, DEFAULT_PREFS.highlightCheck),
@@ -161,6 +163,10 @@ export function applyBoardPrefs(prefs: BoardPrefs) {
   for (const [name, value] of Object.entries(boardCssVars(prefs))) {
     target.style.setProperty(name, value);
   }
+  // Coordinates are the one DISPLAY pref CSS can honor before React mounts —
+  // the bootstrap script stamps this same attribute pre-paint, and
+  // globals.css hides coords under html[data-coords="off"].
+  target.setAttribute("data-coords", prefs.coords);
 }
 
 /** The chessground config a live board can adopt through `api.set()`.

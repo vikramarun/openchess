@@ -17,6 +17,7 @@ import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
 import {
   acceptFromGroup,
   groupOffers,
+  houseOfferGroup,
   joinErrorMessage,
   seatColor,
   type OfferGroup,
@@ -125,6 +126,11 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
         if (alive) {
           setOffers(o);
           setLive(l);
+          // A healthy poll retracts the unreachable banner; without this a
+          // 3-second blip left a red error latched under the Play card while
+          // the lobby quietly repopulated behind it. Only the connectivity
+          // message is cleared — a join error stays until the user acts.
+          setErr((e) => (e === "Server unreachable." ? null : e));
         }
       } catch {
         if (alive) setErr("Server unreachable.");
@@ -192,7 +198,31 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
   const modalUnderfunded =
     !!modalStake.trim() && modalStakeBig != null && available != null && available < modalStakeBig;
 
-  const playNow = (tc: TimeControl) => {
+  // Whether the House Bot has a free seat standing at the picked clock — it
+  // decides what the modal's instant-play button honestly promises.
+  const houseSeat = pickTc
+    ? houseOfferGroup(groupOffers(offers), pickTc.initial, pickTc.inc)
+    : null;
+
+  // "Play the bot" means a real seat against the house, not the self-play
+  // demo: take the House Bot's standing free offer for this clock through the
+  // normal join walk. Only when no house seat stands (all taken, or the bot is
+  // down) does it fall back to /play — and the button says so.
+  const playNow = async (tc: TimeControl) => {
+    setErr(null);
+    let pool = offers;
+    if (pool.length === 0) {
+      // The modal can be reached before the first offers poll lands; one
+      // direct read beats sending an early clicker to the demo by accident.
+      try {
+        const r = await fetch(`${SERVER_HTTP}/park/offers`);
+        if (r.ok) pool = await r.json();
+      } catch {
+        /* fall through to the demo */
+      }
+    }
+    const group = houseOfferGroup(groupOffers(pool), tc.initial, tc.inc);
+    if (group) return acceptOffer(group);
     router.push(`/play?tc=${encodeURIComponent(tc.label)}`);
   };
 
@@ -380,7 +410,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
               )}
             </div>
             <div className="qp-desc muted">
-              Pick a time control. Play the OpenChess bot right now, or open a challenge for
+              Pick a time control. Play the House Bot right now, or open a challenge for
               another player{wagerOn ? " (free or for a USDC stake)" : ""}.
               {!bot.online && (
                 <>
@@ -608,7 +638,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
               {pickTc.label} · {TC_NAME[pickTc.label] ?? "Custom"}
             </div>
             <button className="primary modal-play" onClick={() => playNow(pickTc)}>
-              ⚡ Play the OpenChess bot, free
+              {houseSeat ? "⚡ Play the House Bot, free" : "⚡ Watch an engine demo, free"}
             </button>
             <div className="modal-div">or open a challenge for another player</div>
             {wagerOn && (
