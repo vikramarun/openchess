@@ -79,8 +79,12 @@ export function AvatarEditor({
             Remove
           </button>
         )}
+        {/* "Any image", not the server's PNG/JPEG storage formats: the picker
+            accepts image/*, and everything is re-encoded to a JPEG here before
+            it is sent, so naming the storage formats only talks people out of
+            files that would have worked. */}
         <span className="muted" style={{ fontSize: 12 }}>
-          PNG or JPEG, cropped to a square.
+          Any image, cropped to a square.
         </span>
       </div>
       {err && (

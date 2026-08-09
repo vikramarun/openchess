@@ -49,14 +49,20 @@ let blobSizeFor: (quality: number) => number = () => 20_000;
   revokeObjectURL: () => {},
 };
 
-// Image stub: `src = …` resolves onload with the dimensions the test asked for.
+// Image stub: `src = …` resolves onload with the dimensions the test asked for,
+// or fails like a format this browser can't decode.
 let sourceSize = { w: 800, h: 400 };
+let decodeFails = false;
 (globalThis as unknown as { Image: unknown }).Image = class {
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
   naturalWidth = 0;
   naturalHeight = 0;
   set src(_v: string) {
+    if (decodeFails) {
+      queueMicrotask(() => this.onerror?.());
+      return;
+    }
     this.naturalWidth = sourceSize.w;
     this.naturalHeight = sourceSize.h;
     queueMicrotask(() => this.onload?.());
@@ -64,10 +70,20 @@ let sourceSize = { w: 800, h: 400 };
 };
 
 const store = new Map<string, string>([["chess_token", "tok-123"]]);
+const dispatched: string[] = [];
 (globalThis as unknown as { window: unknown }).window = {
-  dispatchEvent: () => true,
+  dispatchEvent: (e: { type: string }) => {
+    dispatched.push(e.type);
+    return true;
+  },
   addEventListener: () => {},
   removeEventListener: () => {},
+};
+(globalThis as unknown as { Event: unknown }).Event = class {
+  type: string;
+  constructor(type: string) {
+    this.type = type;
+  }
 };
 (globalThis as unknown as { localStorage: unknown }).localStorage = {
   getItem: (k: string) => store.get(k) ?? null,
@@ -84,12 +100,12 @@ function check(name: string, got: unknown, want: unknown) {
   );
 }
 
-const fakeFile = (type = "image/png", size = 1000) => ({ type, size }) as File;
+const fakeFile = (type = "image/png", size = 1000, name = "photo.png") =>
+  ({ type, size, name }) as File;
 
 async function main() {
-  const { AVATAR_PX, avatarUrl, removeAvatar, toSquareJpeg, uploadAvatar } = await import(
-    "../lib/avatar"
-  );
+  const { AVATAR_EVENT, AVATAR_PX, avatarUrl, removeAvatar, toSquareJpeg, uploadAvatar } =
+    await import("../lib/avatar");
   const { SERVER_HTTP } = await import("../lib/config");
 
   // --- the URL is the cache key -------------------------------------------
@@ -152,11 +168,43 @@ async function main() {
   // A non-image never reaches the canvas.
   let rejected = "";
   try {
-    await toSquareJpeg(fakeFile("application/pdf"));
+    await toSquareJpeg(fakeFile("application/pdf", 1000, "notes.pdf"));
   } catch (e) {
     rejected = (e as Error).message;
   }
   check("a non-image is refused", rejected, "That file isn’t an image.");
+
+  // --- the HEIC dead end ---------------------------------------------------
+  // An iPhone photo decodes in Safari and not in desktop Chrome, so the same
+  // file works on someone's phone and fails on their laptop. A bare "couldn't
+  // read that image" sounds like the file is broken; this one says what to do.
+  decodeFails = true;
+  const heicMsg = async (file: File) => {
+    try {
+      await toSquareJpeg(file);
+      return "(no error)";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  check(
+    "a HEIC that won't decode says so",
+    (await heicMsg(fakeFile("image/heic", 1000, "IMG_1.HEIC"))).startsWith("This browser can’t"),
+    true,
+  );
+  // Dragged out of Photos, one can arrive with no MIME type at all — the name
+  // is then the only clue, and the generic "isn't an image" would have won.
+  check(
+    "…even with an empty MIME type",
+    (await heicMsg(fakeFile("", 1000, "IMG_2.heic"))).startsWith("This browser can’t"),
+    true,
+  );
+  check(
+    "any other undecodable image stays generic",
+    await heicMsg(fakeFile("image/png", 1000, "broken.png")),
+    "Couldn’t read that image.",
+  );
+  decodeFails = false;
 
   // --- what goes on the wire ----------------------------------------------
   const calls: { url: string; method?: string; type: string | null; auth: string | null }[] = [];
@@ -182,11 +230,16 @@ async function main() {
   check("typed as jpeg, which is what the server sniffs", calls[0]?.type, "image/jpeg");
   check("carrying the SIWE session", calls[0]?.auth, "Bearer tok-123");
 
+  // The header chip lives in a different branch of the React tree, so without
+  // this event it keeps showing the old picture (or the pawn) until a reload.
+  check("a successful upload announces itself", dispatched, [AVATAR_EVENT]);
+
   await removeAvatar();
   check("remove deletes the same route", [calls[1]?.method, calls[1]?.url], [
     "DELETE",
     `${SERVER_HTTP}/profile/avatar`,
   ]);
+  check("and removing announces itself too", dispatched, [AVATAR_EVENT, AVATAR_EVENT]);
 
   // A dead session says so, rather than surfacing a bare status code.
   const { SESSION_EXPIRED } = await import("../lib/authedFetch");
@@ -207,6 +260,15 @@ async function main() {
     unsupported = (e as Error).message;
   }
   check("so is a format the server won't store", unsupported.includes("PNG or JPEG"), true);
+  // A failed write must not tell the header to go and refetch a photo that
+  // didn't change — the pawn would flash back for no reason. Counted by type,
+  // not by total: the 401 above legitimately fires AUTH_EVENT as it drops the
+  // dead session.
+  check(
+    "a rejected write announces no photo change",
+    dispatched.filter((e) => e === AVATAR_EVENT).length,
+    2,
+  );
 
   console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
   process.exit(failed ? 1 : 0);

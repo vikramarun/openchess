@@ -36,7 +36,12 @@ export function avatarUrl(address: string, version: string | null | undefined): 
  *  a 256px PNG of one is ~10x larger for no visible gain; the white fill is
  *  what keeps a transparent PNG source from coming out on a black square. */
 export async function toSquareJpeg(file: File): Promise<Blob> {
-  if (!file.type.startsWith("image/")) throw new Error("That file isn’t an image.");
+  // The HEIC arm matters: dragged out of Photos, one can arrive with an empty
+  // MIME type, and rejecting it here would hide the message that actually
+  // explains what to do about it.
+  if (!file.type.startsWith("image/") && !isHeic(file)) {
+    throw new Error("That file isn’t an image.");
+  }
   if (file.size > SOURCE_MAX_BYTES) throw new Error("That image is too large (12 MB max).");
 
   const img = await loadImage(file);
@@ -71,6 +76,18 @@ export async function toSquareJpeg(file: File): Promise<Blob> {
   throw new Error("Couldn’t shrink that image enough. Try a different one.");
 }
 
+/** Whether a file is one of Apple's HEIC/HEIF photos.
+ *
+ *  Worth naming, because it is the one failure a user can't reason about on
+ *  their own: an iPhone shoots HEIC, Safari decodes it, and desktop Chrome and
+ *  Firefox do not — so the same photo works on their phone and fails on their
+ *  laptop, and a bare "couldn't read that image" sounds like the file is
+ *  broken. Matches the name too: a file dragged out of Photos keeps the
+ *  extension but sometimes arrives with an empty MIME type. */
+function isHeic(file: File): boolean {
+  return /hei[cf]/i.test(file.type) || /\.hei[cf]$/i.test(file.name);
+}
+
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -81,7 +98,13 @@ function loadImage(file: File): Promise<HTMLImageElement> {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error("Couldn’t read that image."));
+      reject(
+        new Error(
+          isHeic(file) ?
+            "This browser can’t open HEIC photos. Export it as JPEG, or try again in Safari."
+          : "Couldn’t read that image.",
+        ),
+      );
     };
     // An <img> applies the source's EXIF orientation; `createImageBitmap`
     // defaults to ignoring it, which lands a phone portrait shot on its side.
@@ -99,6 +122,18 @@ function encode(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
   });
 }
 
+/** Fired after the signed-in wallet's photo changes.
+ *
+ *  The photo is rendered in two places that never meet in the React tree — the
+ *  profile head and the header's account chip — so without a signal the header
+ *  keeps showing the old picture (or the pawn) until a reload. Same shape as
+ *  `AUTH_EVENT`. */
+export const AVATAR_EVENT = "chess:avatar";
+
+function notifyAvatarChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(AVATAR_EVENT));
+}
+
 /** Upload the signed-in wallet's photo. The seat is the SIWE session, not an
  *  address in the body — the server picks the wallet from the session. */
 export async function uploadAvatar(blob: Blob): Promise<void> {
@@ -108,12 +143,14 @@ export async function uploadAvatar(blob: Blob): Promise<void> {
     body: blob,
   });
   if (!res.ok) throw new Error(failure(res.status, "save"));
+  notifyAvatarChanged();
 }
 
 /** Remove the signed-in wallet's photo. */
 export async function removeAvatar(): Promise<void> {
   const res = await authedFetch(`${SERVER_HTTP}/profile/avatar`, { method: "DELETE" });
   if (!res.ok) throw new Error(failure(res.status, "remove"));
+  notifyAvatarChanged();
 }
 
 function failure(status: number, verb: string): string {
