@@ -12,6 +12,7 @@ import { browserEngineLabel, getBrowserBotConfig } from "@/lib/browserBot";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
+import { groupOffers, type OfferGroup } from "@/lib/offers";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -235,19 +236,29 @@ export function Lobby() {
     }
   };
 
-  const acceptOffer = async (o: Offer) => {
+  const acceptOffer = async (group: OfferGroup<Offer>) => {
+    const o = group.offer;
     setErr(null);
     const wagered = !!o.stake;
     if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
     if (botPlays && !token) return setErr("Sign in to play with your bot.");
     try {
-      const r = await authedFetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
-        ),
-      });
+      // A row can stand for several identical seats (the house bot posts one
+      // per concurrent autopilot). Losing the race for the first — 404 gone,
+      // 409 already matching — is not a failure while another is free, so walk
+      // the group before reporting anything.
+      let r: Response | null = null;
+      for (const id of group.ids) {
+        r = await authedFetch(`${SERVER_HTTP}/park/offers/${id}/accept`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
+          ),
+        });
+        if (r.ok || (r.status !== 404 && r.status !== 409)) break;
+      }
+      if (!r) return; // empty group: unreachable, but never fall through as OK
       if (!r.ok)
         return setErr(
           r.status === 503
@@ -258,7 +269,9 @@ export function Lobby() {
                 ? "Your bot is offline — check the chess-client window."
                 : r.status === 410
                   ? "That challenger's bot went offline — the offer is gone."
-                  : `Couldn't join (${r.status}).`,
+                  : r.status === 404 || r.status === 409
+                    ? "Someone just took that challenge — the lobby will refresh."
+                    : `Couldn't join (${r.status}).`,
         );
       const j = await r.json();
       if (j.seat === "bot" || !j.token) {
@@ -417,7 +430,8 @@ export function Lobby() {
               </tr>
             </thead>
             <tbody>
-              {offers.map((o) => {
+              {groupOffers(offers).map((group) => {
+                const o = group.offer;
                 const mine = !!address && o.poster_addr?.toLowerCase() === address.toLowerCase();
                 return (
                   <tr key={o.offer_id}>
@@ -427,6 +441,16 @@ export function Lobby() {
                         <span className="muted" style={{ fontSize: 12 }}>
                           {" "}
                           🤖 {o.poster_engine}
+                        </span>
+                      )}
+                      {group.ids.length > 1 && (
+                        <span
+                          className="muted"
+                          style={{ fontSize: 12 }}
+                          title="This challenger has more than one seat free at this time control"
+                        >
+                          {" "}
+                          · {group.ids.length} seats free
                         </span>
                       )}
                     </td>
@@ -461,7 +485,7 @@ export function Lobby() {
                           need {fmtUsdc(o.stake)}
                         </span>
                       ) : (
-                        <button className="ghost" onClick={() => acceptOffer(o)}>
+                        <button className="ghost" onClick={() => acceptOffer(group)}>
                           Join &amp; play
                         </button>
                       )}

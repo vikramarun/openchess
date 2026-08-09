@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # House bot: keep the park populated so a first-time visitor always has an
-# opponent within seconds. Runs one autopilot (`chess-client connect --auto`)
+# opponent within seconds. Runs SEATS autopilots (`chess-client connect --auto`)
 # per time control under a single wallet, restarting each on failure with
 # backoff.
+#
+# SEATS is what makes a time control survive being *chosen*. One autopilot plays
+# one game at a time, so with SEATS=1 the first visitor to accept the 3+0
+# challenge takes the only 3+0 seat and the tile vanishes from the lobby for
+# everyone else until that game ends — which reads as "3+0 is broken", not "the
+# house is busy". Each idle autopilot costs a poll loop and nothing else (the
+# engine is launched per game, not at startup), so the only real cost is CPU
+# when several house games run at once — see the [[vm]] sizing note in
+# fly.housebot.toml before raising it much.
 #
 # The house wallet needs NO funds — house games are casual (no stake). Use a
 # fresh throwaway key that holds nothing and never will.
@@ -23,6 +32,9 @@
 #                         again, UCI_LimitStrength + UCI_Elo is the honest knob.
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
+#   SEATS                 default 2 — concurrent house games per time control.
+#                         TCS×SEATS offers stand at once, so it must stay under
+#                         the server's RL_MAX_OPEN_OFFERS (default 16).
 #   MOVE_BUDGET           default 80 — plan each game as this many moves; the
 #                         per-move search ceiling is initial/MOVE_BUDGET
 #   MOVE_OVERHEAD_MS      default 250 — clock reserved per move for the round
@@ -40,6 +52,7 @@ ENGINE="${ENGINE:-stockfish}"
 NAME="${NAME:-House Bot}"
 SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
+SEATS="${SEATS:-2}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
 MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
 BOOK_MAX_PLY="${BOOK_MAX_PLY:-16}"
@@ -106,19 +119,26 @@ if [[ ! "$MOVE_BUDGET" =~ ^[0-9]+$ ]] || ((MOVE_BUDGET == 0)); then
   exit 1
 fi
 
+if [[ ! "$SEATS" =~ ^[0-9]+$ ]] || ((SEATS == 0)); then
+  echo "SEATS must be a positive integer (concurrent house games per time control)." >&2
+  exit 1
+fi
+
 if [[ -n "${BOOK:-}" && ! -f "$BOOK" ]]; then
   echo "BOOK '$BOOK' not found — generate it with 'cargo run -p book-gen -- assets/house-book.bin', or set BOOK= to play without one." >&2
   exit 1
 fi
 
-echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS"
+echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS (${SEATS} seat(s) each)"
 echo "book: ${BOOK:-none (every opening move is a full search)}"
 
-# One autopilot per time control. Same wallet across instances is fine: the
-# server records poster_addr for authed offers and autopilots skip their own
-# wallet's offers, and different time controls never match each other anyway.
+# SEATS autopilots per time control. Same wallet across instances is fine — and
+# that is exactly why seats can be stacked: the server records poster_addr for
+# authed offers and `compatible()` skips an offer from our own wallet, so two
+# house autopilots on the same time control post two independent challenges and
+# never pair with each other. Different time controls never match anyway.
 run_tc() {
-  local initial="$1" increment="$2" delay=10
+  local initial="$1" increment="$2" seat="$3" delay=10
   # Ceiling on a single search. Sudden-death allocation lets one unstable root
   # eat several times the target, and the start position is the most unstable
   # root there is (d4/e4/c4/Nf3 keep trading places), so move 1 is the worst
@@ -151,7 +171,7 @@ run_tc() {
       --move-overhead-ms "$MOVE_OVERHEAD_MS" \
       ${book_args[@]+"${book_args[@]}"} \
       --initial-secs "$initial" --increment-secs "$increment" || true
-    echo "[${initial}+${increment}] autopilot exited; restarting in ${delay}s"
+    echo "[${initial}+${increment} #${seat}] autopilot exited; restarting in ${delay}s"
     sleep "$delay"
     delay=$((delay * 2))
     ((delay > 300)) && delay=300
@@ -173,8 +193,10 @@ trap '
 ' INT TERM
 
 for tc in $TCS; do
-  run_tc "${tc%%:*}" "${tc##*:}" &
-  pids+=($!)
+  for ((seat = 1; seat <= SEATS; seat++)); do
+    run_tc "${tc%%:*}" "${tc##*:}" "$seat" &
+    pids+=($!)
+  done
 done
 
 wait
