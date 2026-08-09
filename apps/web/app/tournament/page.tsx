@@ -158,13 +158,24 @@ function TournamentClient() {
 
   const openT = useMemo(() => tourneys.find((t) => t.id === openTid) ?? null, [tourneys, openTid]);
 
-  // My game in the round currently being played, if any.
+  // My game in the round currently being played, if any. Deliberately still
+  // returns it once it has FINISHED: the round doesn't advance until every
+  // pairing in it does, and unmounting the board the instant your own game
+  // resolves means you never get to see how it ended.
   const currentGame = useCallback(
     (t: Tournament): TournamentGame | undefined =>
       t.status === "running"
-        ? myGames(t).find((g) => g.round === t.current_round && !g.forfeit && !g.result)
+        ? myGames(t).find((g) => g.round === t.current_round && !g.forfeit)
         : undefined,
     [myGames],
+  );
+  // …but only a game still in progress should pull the board open.
+  const liveGame = useCallback(
+    (t: Tournament): TournamentGame | undefined => {
+      const g = currentGame(t);
+      return g && !g.result ? g : undefined;
+    },
+    [currentGame],
   );
 
   // Open the board automatically when a round I'm in is dispatched.
@@ -177,16 +188,17 @@ function TournamentClient() {
   useEffect(() => {
     if (openTid) return;
     const next = tourneys.find(
-      (t) => isEntrant(t) && currentGame(t) && (leftRound[t.id] ?? -1) < t.current_round,
+      (t) => isEntrant(t) && liveGame(t) && (leftRound[t.id] ?? -1) < t.current_round,
     );
     if (next) setOpenTid(next.id);
-  }, [tourneys, openTid, isEntrant, currentGame, leftRound]);
+  }, [tourneys, openTid, isEntrant, liveGame, leftRound]);
 
   // Keep my seat tokens in sync while a tournament is open. Retries so a blip
   // can't strand the player on "taking your seat…", and re-runs each round.
+  const openMe = openT ? identityIn(openT) : null;
   useEffect(() => {
     if (!openT || !isEntrant(openT)) return;
-    const me = identityIn(openT);
+    const me = openMe;
     if (!me) return;
     const tid = openT.id;
     const buyIn = openT.buy_in;
@@ -215,8 +227,11 @@ function TournamentClient() {
       clearInterval(iv);
     };
     // openT is re-created by every poll; key off the fields that actually matter.
+    // `openMe` has to be in here: it resolves from localStorage a render AFTER
+    // the lobby loads, and without it a casual entrant who opened the page
+    // before that landed would sit on "Taking your seat…" for the whole round.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openT?.id, openT?.current_round, openT?.games.length, token, address]);
+  }, [openT?.id, openMe, openT?.current_round, openT?.games.length, token, address]);
 
   const create = async () => {
     setErr(null);
@@ -330,8 +345,15 @@ function TournamentClient() {
     const current = currentGame(openT);
     const seat = current?.game_id ? myTokens[current.game_id] : undefined;
     const back = () => {
-      setLeftRound((m) => ({ ...m, [openT.id]: openT.current_round }));
+      // Only count as "left" a round that HAD a live game to leave. Recording it
+      // unconditionally suppressed auto-open for the round that hadn't started
+      // yet: join -> back out to the lobby to wait -> organizer starts round 0 ->
+      // `leftRound = 0` is not < `current_round = 0`, so the board never opened
+      // and the seat was reaped as a no-show. That is the forfeit this whole
+      // mechanism exists to prevent, reached by the most ordinary click there is.
+      if (liveGame(openT)) setLeftRound((m) => ({ ...m, [openT.id]: openT.current_round }));
       setOpenTid(null);
+      setMyTokens({}); // seat tokens are per-tournament; don't carry them over
     };
 
     return (
@@ -365,9 +387,11 @@ function TournamentClient() {
         {entrant && current && seat?.seat === "bot" && (
           <div className="panel" style={{ textAlign: "center", marginBottom: 16 }}>
             <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>
-              🤖 Your bot is playing round {openT.current_round + 1}
+              {current.result
+                ? `🤖 Your bot finished round ${openT.current_round + 1}`
+                : `🤖 Your bot is playing round ${openT.current_round + 1}`}
             </div>
-            <div className="spinner" style={{ margin: "8px auto" }} />
+            {!current.result && <div className="spinner" style={{ margin: "8px auto" }} />}
             {current.game_id && (
               <a
                 className="primary"
@@ -400,7 +424,11 @@ function TournamentClient() {
           </div>
         )}
 
-        {entrant && current && !seat && (
+        {/* Anything that isn't "bot seat" or "browser seat with a token" lands
+            here — a seat still loading, or the shouldn't-happen case of a
+            browser seat the server handed no token. Better a stated wait than a
+            blank page while the round's clock runs. */}
+        {entrant && current && !(seat?.seat === "bot") && !(seat && seat.token) && (
           <div className="panel" style={{ marginBottom: 16 }}>
             <span className="muted">Taking your seat…</span>
           </div>

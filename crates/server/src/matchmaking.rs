@@ -35,6 +35,10 @@ use crate::{
 /// Fields larger than this settle via a Merkle root (winners claim individually)
 /// instead of a single direct payout transaction.
 const ROOT_SETTLE_THRESHOLD: usize = 16;
+/// How many `open` tournaments a boot will rebuild from Postgres. TOURNEY_TTL
+/// evicts them after 24h anyway, and boot shouldn't drag in an unbounded
+/// backlog; hitting the cap is logged rather than passed over in silence.
+const OPEN_TOURNAMENT_RESTORE_LIMIT: i64 = 500;
 /// Hard cap on tournament entrants (bounds the O(n^2) round-robin + pool math).
 const MAX_TOURNAMENT_PLAYERS: usize = 128;
 
@@ -1792,12 +1796,26 @@ fn standings_of(t: &Tournament) -> Vec<Standing> {
     rows
 }
 
-/// Every pairing the schedule has produced so far, played and forfeited alike,
-/// ordered by round.
-fn pairings_of(t: &Tournament) -> Vec<TourneyPairing> {
+/// Pairings the schedule has produced, played and forfeited alike, ordered by
+/// round.
+///
+/// `scope` exists for one reason: a 128-entrant field is C(128,2) = 8128
+/// pairings, and the lobby list serializes EVERY tournament on a 3s poll for
+/// every connected client. The lobby only needs the round in progress (that is
+/// what tells a client its board should be open), so it asks for
+/// `Pairings::CurrentRound` and the detail route serves the rest.
+#[derive(Clone, Copy, PartialEq)]
+enum Pairings {
+    All,
+    CurrentRound,
+}
+
+fn pairings_of(t: &Tournament, scope: Pairings) -> Vec<TourneyPairing> {
+    let keep = |round: usize| scope == Pairings::All || round == t.current_round;
     let mut out: Vec<TourneyPairing> = t
         .games
         .iter()
+        .filter(|g| keep(g.round))
         .map(|g| TourneyPairing {
             game_id: Some(g.game_id),
             white: g.white.clone(),
@@ -1806,7 +1824,7 @@ fn pairings_of(t: &Tournament) -> Vec<TourneyPairing> {
             result: g.result.map(result_label),
             forfeit: false,
         })
-        .chain(t.forfeits.iter().map(|f| TourneyPairing {
+        .chain(t.forfeits.iter().filter(|f| keep(f.round)).map(|f| TourneyPairing {
             game_id: None,
             white: f.white.clone(),
             black: f.black.clone(),
@@ -1819,13 +1837,13 @@ fn pairings_of(t: &Tournament) -> Vec<TourneyPairing> {
     out
 }
 
-fn view_of(t: &Tournament) -> TourneyView {
+fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
     TourneyView {
         name: t.name.clone(),
         buy_in: t.buy_in.clone(),
         status: t.status.clone(),
         players: t.players.clone(),
-        games: pairings_of(t),
+        games: pairings_of(t, scope),
         standings: standings_of(t),
         current_round: t.current_round,
         total_rounds: t.rounds.len(),
@@ -1841,13 +1859,19 @@ async fn tourney_get(
     Path(id): Path<Uuid>,
 ) -> Result<Json<TourneyView>, StatusCode> {
     let t = state.0.lobby.tournaments.lock();
-    Ok(Json(view_of(t.get(&id).ok_or(StatusCode::NOT_FOUND)?)))
+    Ok(Json(view_of(
+        t.get(&id).ok_or(StatusCode::NOT_FOUND)?,
+        Pairings::All,
+    )))
 }
 
-/// The lobby, with each tournament's full view inlined. `tournament_id` is kept
-/// as its own field so a client built against the id-only version of this route
+/// The lobby, with each tournament's view inlined. `tournament_id` is kept as
+/// its own field so a client built against the id-only version of this route
 /// keeps working — worth the duplication, because the web app deploys on merge
 /// while this server only moves when someone runs the deploy script.
+///
+/// `games` here holds only the round in progress (see `Pairings`); fetch the
+/// tournament by id for the full crosstable.
 #[derive(Serialize)]
 struct TourneySummary {
     tournament_id: Uuid,
@@ -1861,7 +1885,7 @@ async fn tourney_list(State(state): State<AppState>) -> Json<Vec<TourneySummary>
         .iter()
         .map(|(id, t)| TourneySummary {
             tournament_id: *id,
-            view: view_of(t),
+            view: view_of(t, Pairings::CurrentRound),
         })
         .collect();
     // Newest first — the map's iteration order is arbitrary, and a lobby that
@@ -2223,6 +2247,17 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
     }
 }
 
+/// Can an `open` row be put back in the lobby?
+///
+/// A buy-in tournament may only be started by its organizer, so a row without
+/// one can never start. Rows written before that column existed are exactly
+/// that. Rehydrating one would invite fresh entrants to lock USDC into a pool
+/// that can never pay out — worse than leaving it invisible, which is what
+/// those rows already were; entrants recover via the contract's `claimRefund`.
+fn is_rehydratable(buy_in: Option<&str>, organizer: Option<&str>) -> bool {
+    buy_in.is_none() || organizer.is_some()
+}
+
 /// Recover tournaments after a restart.
 ///
 /// An **open** tournament is rebuilt in memory verbatim: it has no in-flight
@@ -2246,17 +2281,28 @@ pub async fn recover_tournaments(state: &AppState) {
 
     // Rehydrate the open lobby. Capped: TOURNEY_TTL evicts these after 24h
     // anyway, and boot shouldn't drag in an unbounded backlog.
-    match db.open_tournaments(500).await {
+    match db.open_tournaments(OPEN_TOURNAMENT_RESTORE_LIMIT).await {
         Ok(rows) => {
+            let found = rows.len();
             let mut restored = 0usize;
             let mut ts = state.0.lobby.tournaments.lock();
             for r in rows {
+                if !is_rehydratable(r.buy_in.as_deref(), r.organizer.as_deref()) {
+                    tracing::warn!(
+                        tournament = %r.id,
+                        "skipping rehydration: buy-in tournament has no organizer, so nobody could start it"
+                    );
+                    continue;
+                }
                 // Preserve the original age so TTL eviction still fires on
                 // schedule rather than restarting the clock on every deploy.
+                // `Instant` is monotonic-since-boot, so on a freshly restarted
+                // host subtracting hours can underflow: fall back to "now"
+                // rather than drop the row. Losing TTL precision is cosmetic;
+                // dropping the tournament is the exact data loss this whole
+                // function exists to prevent.
                 let age = Duration::from_secs(r.age_secs.max(0) as u64).min(TOURNEY_TTL);
-                let Some(created_at) = Instant::now().checked_sub(age) else {
-                    continue;
-                };
+                let created_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
                 let players: Vec<String> =
                     serde_json::from_value(r.players).unwrap_or_default();
                 ts.entry(r.id).or_insert_with(|| Tournament {
@@ -2279,8 +2325,16 @@ pub async fn recover_tournaments(state: &AppState) {
                 });
                 restored += 1;
             }
-            if restored > 0 {
-                tracing::info!("rehydrated {restored} open tournament(s) from the database");
+            if restored > 0 || found > 0 {
+                tracing::info!("rehydrated {restored}/{found} open tournament(s) from the database");
+            }
+            // Never let a cap hide work silently: if the query came back full,
+            // older open tournaments exist that this node will not serve.
+            if found as i64 == OPEN_TOURNAMENT_RESTORE_LIMIT {
+                tracing::warn!(
+                    "open-tournament rehydration hit its {OPEN_TOURNAMENT_RESTORE_LIMIT}-row cap — \
+                     older open tournaments were NOT restored"
+                );
             }
         }
         Err(e) => tracing::warn!("open-tournament rehydration query failed: {e:#}"),
@@ -3187,6 +3241,83 @@ mod tests {
         assert_eq!(t.games.len(), 0, "no game created — the pairing forfeited");
         assert_eq!(t.status, "settled");
         assert_eq!(t.scores.get("Bravo").copied(), Some(1.0), "Bravo wins the forfeit");
+    }
+
+    #[tokio::test]
+    async fn lobby_list_carries_only_the_round_in_progress() {
+        // The lobby list serializes EVERY tournament on a 3s poll for every
+        // client. Inlining the full crosstable there put C(128,2) = 8128
+        // pairings per tournament on that hot path. The list only needs the
+        // round in progress — that's what tells a client its board should be
+        // open — and the detail route still serves everything.
+        let (state, _c, _r) = test_state();
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        for name in ["Alpha", "Bravo", "Charlie", "Delta"] {
+            let _ = tourney_join(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(JoinReq { player: Some(name.into()), seat: None, uci_options: None }),
+            )
+            .await
+            .expect("join");
+        }
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("start");
+        // Pretend an earlier round already played, so "all" and "current" differ.
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            let t = ts.get_mut(&tid).unwrap();
+            for g in t.games.iter_mut() {
+                g.round = 0;
+                g.result = Some(Some(Color::White));
+            }
+            t.current_round = 1;
+            t.games.push(TourneyGame {
+                game_id: GameId::new_v4(),
+                white: "Alpha".into(),
+                black: "Charlie".into(),
+                round: 1,
+                result: None,
+                white_token: String::new(),
+                black_token: String::new(),
+            });
+        }
+
+        let detail = tourney_get(State(state.clone()), Path(tid)).await.expect("detail").0;
+        assert_eq!(detail.games.len(), 3, "the detail route still serves every pairing");
+
+        let list = tourney_list(State(state.clone())).await.0;
+        let row = list.iter().find(|r| r.tournament_id == tid).expect("in the lobby");
+        assert_eq!(row.view.games.len(), 1, "the lobby carries only the live round");
+        assert!(row.view.games.iter().all(|g| g.round == 1));
+        // Standings are cheap and the lobby shows the leader, so they stay.
+        assert_eq!(row.view.standings.len(), 4);
+    }
+
+    #[test]
+    fn a_buy_in_tournament_without_an_organizer_is_not_rehydrated() {
+        // Rows written before the organizer column existed can never be started
+        // (only the organizer may). Putting one back in the lobby would invite
+        // fresh entrants to lock USDC into a pool that can never pay out.
+        assert!(!is_rehydratable(Some("1000000"), None), "unstartable buy-in row is skipped");
+        assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "organized buy-in row is kept");
+        assert!(is_rehydratable(None, None), "a casual row needs no organizer — anyone may start it");
+        assert!(is_rehydratable(None, Some("0xabc")));
     }
 
     #[tokio::test]

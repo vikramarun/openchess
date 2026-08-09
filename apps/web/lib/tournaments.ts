@@ -27,6 +27,11 @@ export type Tournament = {
   buy_in: string | null;
   status: string;
   players: string[];
+  /** From `fetchTournament` this is every pairing the schedule has produced.
+   *  From `fetchTournaments` (the lobby list) it is ONLY the round in progress
+   *  — a 128-entrant field is 8128 pairings and the lobby is polled every 3s by
+   *  every client. The lobby only needs the current round anyway: that is what
+   *  tells it a board should be open. Don't build a crosstable from the list. */
   games: TournamentGame[];
   standings: Standing[];
   current_round: number;
