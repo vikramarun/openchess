@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
@@ -86,7 +85,7 @@ export function SeatGame({
   const [promptDeadlineMs, setPromptDeadlineMs] = useState<number | null>(null);
   const [awaitingOpponent, setAwaitingOpponent] = useState(false);
   const [declined, setDeclined] = useState(false);
-  const [evalOn, setEvalOn] = useEvalPref();
+  const [evalOn] = useEvalPref();
   // White-relative score per ply, filled in by our OWN seat engine as it thinks
   // (lib/play.ts `onEval`). Keyed by ply rather than kept as a single "current"
   // score so scrubbing back shows what the engine actually thought there instead
@@ -419,10 +418,6 @@ export function SeatGame({
               Your settings still apply from the next game.
             </div>
           )}
-          {/* No `failed` here on purpose: if the observer engine won't load, the
-              seat's own search still feeds the bar, so there is nothing for the
-              player to act on. */}
-          <EvalToggle on={evalOn} onChange={setEvalOn} note="· from your engine's own search" />
         </div>
 
         {declined && !result && (

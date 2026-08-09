@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
@@ -55,7 +54,7 @@ export function LiveSpectator({ id }: { id: string }) {
   // showing the newest position (so clocks and the turn indicator are current).
   const nav = usePlyNav(frames.length - 1);
   const view = frames[nav.at];
-  const [evalOn, setEvalOn] = useEvalPref();
+  const [evalOn] = useEvalPref();
   const engineEval = useEval(view.fen, evalOn);
 
   // Fetch the live-game metadata so the spectator sees who's playing, the stake,
@@ -232,12 +231,6 @@ export function LiveSpectator({ id }: { id: string }) {
                 <>Loading game details…</>
               )}
             </div>
-            <EvalToggle
-              on={evalOn}
-              onChange={setEvalOn}
-              loading={engineEval.loading}
-              failed={engineEval.failed}
-            />
           </div>
 
           {result && (

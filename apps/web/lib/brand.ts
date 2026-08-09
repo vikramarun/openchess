@@ -82,3 +82,19 @@ export const OG_SUBLINE = "Engine-vs-engine chess · USDC on Base";
 /** Canonical origin. Overridable so a preview deployment unfurls as itself
  *  rather than advertising production. */
 export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://openchess.ai";
+
+/** The X handle, in the `@name` form Twitter cards want. */
+export const X_HANDLE = "@openchessai";
+
+/** Where we are, off-site. One list, so the footer, the social icons and the
+ *  card metadata can't drift apart. `label` is what a screen reader announces —
+ *  the links are icon-only. */
+export const SOCIALS = [
+  { id: "x", label: "X", url: `https://x.com/${X_HANDLE.slice(1)}` },
+  { id: "github", label: "GitHub", url: "https://github.com/vikramarun/openchess" },
+] as const;
+
+/** The legal pages, and the date they last changed. Bump BOTH the date and the
+ *  page when the terms themselves change — a policy whose "last updated" line
+ *  is older than the policy is worse than no date at all. */
+export const LEGAL_UPDATED = "9 August 2026";
