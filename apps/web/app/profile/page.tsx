@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useAccount } from "wagmi";
 
 import { BoardSettings } from "@/components/BoardSettings";
@@ -62,7 +62,7 @@ function ProfileClient() {
   // Roving tabindex: a tablist takes ONE tab stop, and arrows move within it.
   // Without this the roles below would announce a tab widget that then behaves
   // like a row of ordinary buttons.
-  const onKeyDown = (e: React.KeyboardEvent) => {
+  const onKeyDown = (e: KeyboardEvent) => {
     const i = TABS.findIndex((t) => t.id === tab);
     const to =
       e.key === "ArrowRight" ? (i + 1) % TABS.length
@@ -89,7 +89,10 @@ function ProfileClient() {
             role="tab"
             type="button"
             aria-selected={tab === t.id}
-            aria-controls={`panel-${t.id}`}
+            // Only the selected tab's panel is mounted, so only it can name a
+            // panel: an aria-controls pointing at an id that isn't in the
+            // document is worse than none at all.
+            aria-controls={tab === t.id ? `panel-${t.id}` : undefined}
             tabIndex={tab === t.id ? 0 : -1}
             className={`tab${tab === t.id ? " on" : ""}`}
             onClick={() => select(t.id)}
@@ -99,7 +102,10 @@ function ProfileClient() {
         ))}
       </div>
 
-      {/* One panel per tab, so aria-controls always points at a real element.
+      {/* Only the selected panel is mounted, rather than all three with the
+          inactive ones hidden (the ARIA APG shape). Mounting them all would keep
+          a second chessground instance and ConnectEngine alive permanently, for
+          tabs nobody is looking at.
           No tabIndex: every panel here already contains focusable controls, so
           making the panel itself a tab stop would just add a dead one. */}
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>

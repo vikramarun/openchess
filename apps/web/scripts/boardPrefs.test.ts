@@ -181,11 +181,24 @@ for (const stored of [
 // can't be generated at build time, so this is what keeps it honest: edit a hex
 // in boardThemes.ts without touching the stylesheet and this fails.
 const boardCss = readFileSync(new URL("../app/board.css", import.meta.url), "utf8");
-for (const [name, value] of Object.entries(boardCssVars(DEFAULT_PREFS))) {
-  // `--x:` only ever appears as a declaration; `var(--x)` has no colon.
-  const declared = boardCss.match(new RegExp(`\\${name}:\\s*([^;]+);`))?.[1].trim();
-  check(`board.css :root fallback matches ${name}`, declared, value.trim());
+// Scoped to the :root block rather than the whole file, so a later @media or
+// theme-scoped override of the same variable can't be matched by mistake.
+const rootBlock = boardCss.match(/:root\s*\{([^}]*)\}/)?.[1] ?? "";
+check("board.css has a :root fallback block", rootBlock.length > 0, true);
+const declaredVars = Object.fromEntries(
+  [...rootBlock.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]),
+);
+const expectedVars = boardCssVars(DEFAULT_PREFS);
+for (const [name, value] of Object.entries(expectedVars)) {
+  check(`board.css :root fallback matches ${name}`, declaredVars[name], value.trim());
 }
+// Both directions: a variable dropped from the tables but left in the stylesheet
+// is dead weight that still looks authoritative.
+check(
+  "board.css declares no extra fallbacks",
+  Object.keys(declaredVars).filter((n) => !(n in expectedVars)),
+  [],
+);
 
 // --- a registered set with no art on disk renders an invisible board ---
 // CREDITS.md advertises "drop 12 SVGs + one registry entry, no code change", so
