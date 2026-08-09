@@ -8,6 +8,7 @@
     "start": "next start -p 3000",
     "test:book": "tsx scripts/polyglot.test.ts",
     "test:openings": "tsx scripts/book.test.ts",
+    "test:move": "tsx scripts/playMove.test.ts",
     "test:eval": "tsx scripts/eval.test.ts",
     "test:auth": "tsx scripts/authedFetch.test.ts",
     "test:seat": "tsx scripts/playSeat.test.ts"

@@ -15,6 +15,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd contracts && forge test)       # Foundry — 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
+(cd apps/web && pnpm test:move)   # what a seat sends: never an illegal move
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 cargo run -p server                # game server on 127.0.0.1:8080
@@ -140,7 +141,11 @@ wallet.
   no error anywhere. That shipped: `scripts/build-book.mjs` used chessops'
   `makeUci`, so 553 of 1817 lines in `public/book.json` carried it. Anything
   reaching an engine or the wire goes through `lib/uci.ts` first;
-  `pnpm test:openings` fails if a king-takes-rook move lands in the book again.
+  `pnpm test:openings` fails if a king-takes-rook move lands in the book again,
+  and `pnpm test:move` pins what a seat sends. The seat no longer resigns over
+  an illegal move either: it resets the engine, asks once more, and failing that
+  spends a legal move — resigning is a certain loss of a position that is
+  usually fine, and of the stake with it.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr` — which silently disabled the client's self-match

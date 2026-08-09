@@ -59,27 +59,36 @@ check(
 );
 
 // --- the converter itself ----------------------------------------------------
+
+/** Parse a UCI string as an ordinary (non-drop) move. Drops have no place in
+ *  standard chess, and makeStandardUci won't take one. */
+function normal(uci: string) {
+  const m = parseUci(uci);
+  if (!m || !("from" in m)) throw new Error(`not a normal move: ${uci}`);
+  return m;
+}
+
 {
   // Ruy Lopez to White's castle: both notations mean O-O and must serialize to
   // the king's two-square form.
   const pos = Chess.default();
   for (const u of "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6".split(" ")) pos.play(parseUci(u)!);
-  check("king-takes-rook castling normalizes", makeStandardUci(pos, parseUci("e1h1")!) === "e1g1");
-  check("standard castling stays put", makeStandardUci(pos, parseUci("e1g1")!) === "e1g1");
+  check("king-takes-rook castling normalizes", makeStandardUci(pos, normal("e1h1")) === "e1g1");
+  check("standard castling stays put", makeStandardUci(pos, normal("e1g1")) === "e1g1");
 }
 {
   // A rook that genuinely moves e1->h1 must NOT be mistaken for a castle.
   const pos = Chess.default();
   for (const u of "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 e1g1 g8f6 f1e1 e8g8".split(" "))
     pos.play(parseUci(u)!);
-  check("a real rook move e1h1 is left alone", makeStandardUci(pos, parseUci("e1h1")!) === "e1h1");
+  check("a real rook move e1h1 is left alone", makeStandardUci(pos, normal("e1h1")) === "e1h1");
 }
 {
   // Promotion suffixes survive the round trip.
   const pos = Chess.default();
   for (const u of "a2a4 b7b5 a4b5 a7a6 b5a6 g8f6 a6b7 f6g8".split(" ")) pos.play(parseUci(u)!);
-  check("promotions keep their suffix", makeStandardUci(pos, parseUci("b7a8q")!) === "b7a8q");
-  check("underpromotion to a knight is 'n'", makeStandardUci(pos, parseUci("b7a8n")!) === "b7a8n");
+  check("promotions keep their suffix", makeStandardUci(pos, normal("b7a8q")) === "b7a8q");
+  check("underpromotion to a knight is 'n'", makeStandardUci(pos, normal("b7a8n")) === "b7a8n");
 }
 
 console.log(failed === 0 ? "\nall checks passed" : `\n${failed} check(s) failed`);

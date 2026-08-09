@@ -7,7 +7,7 @@ import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserB
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
-import { makeStandardUci, replayHistory, toStandardUci } from "./uci";
+import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
@@ -23,14 +23,26 @@ export type PlayHandlers = {
   confirmStart?: (deadlineMs: number | null) => Promise<boolean>;
 };
 
-/** Any legal move in `pos`, as standard UCI — the fallback for a seat whose
- *  engine has gone out of sync. A poor move keeps a playable game; the
- *  alternative (resign, or stall until the flag) throws it away outright. */
-function firstLegalUci(pos: Chess): string | null {
-  for (const [from, dests] of pos.allDests()) {
-    for (const to of dests) return makeStandardUci(pos, { from, to });
+/** Reset the engine and ask once more, for a seat whose engine just answered
+ *  with a move that does not exist in this position. Bounded by a fixed think
+ *  time AND a hard wall-clock cap: recovery must not eat the clock it is trying
+ *  to save, and an engine that has stopped answering must not hold the seat for
+ *  the 120s the normal search watchdog allows. Null if it fails again. */
+async function retryAfterResync(
+  engine: BrowserEngine,
+  replay: Replay,
+  movetimeMs: number,
+): Promise<string | null> {
+  try {
+    await engine.resync();
+    const again = await Promise.race([
+      engine.bestMove(replay.history, movetimeMs),
+      new Promise<null>((r) => setTimeout(() => r(null), movetimeMs + 2000)),
+    ]);
+    return again ? toStandardUci(replay.pos, again) : null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /** A book move for `pos` — the user's uploaded Polyglot book first, then the
@@ -143,22 +155,26 @@ export function playSeat(
               return;
             }
             // Last gate before the wire. An illegal move is not survivable —
-            // the server rejects it and will not re-prompt this ply — so when
-            // the engine has desynced, spend a legal move rather than the whole
-            // game: resigning is a certain loss (wagered, a certain loss of the
+            // the server rejects it and will not re-prompt this ply — so an
+            // out-of-sync engine gets one reset and one more try, and failing
+            // that the seat spends a legal move rather than the whole game:
+            // resigning is a certain loss (wagered, a certain loss of the
             // stake) in a position that is usually perfectly fine.
             let uci = played;
             if (replay) {
-              const std = toStandardUci(replay.pos, played);
-              if (std) {
-                uci = std;
-              } else {
+              let std = toStandardUci(replay.pos, played);
+              if (!std) {
                 console.warn(
-                  `[openchess] illegal move ${played} at ply ${m.ply} — the ` +
-                    `engine is out of sync; playing a legal move instead`,
+                  `[openchess] engine answered ${played} at ply ${m.ply}, which ` +
+                    `is not legal here — resetting it and asking again`,
                 );
-                uci = firstLegalUci(replay.pos) ?? played;
+                std = await retryAfterResync(engine, replay, movetimeMs);
+                if (cancelled()) {
+                  ws.close();
+                  return;
+                }
               }
+              uci = std ?? anyLegalUci(replay.pos) ?? played;
             }
             send({
               type: "move",

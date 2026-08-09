@@ -154,6 +154,17 @@ export class BrowserEngine {
     return this.ready;
   }
 
+  /** Drop the engine's accumulated search state (`ucinewgame` clears the hash
+   *  and the position) and wait for it to settle. The recovery path for a seat
+   *  whose engine has gone out of sync with the real game — a dropped command,
+   *  a move it refused to parse — before deciding the engine is unusable. */
+  async resync(): Promise<void> {
+    await this.ready;
+    this.send("ucinewgame");
+    this.send("isready");
+    await this.waitFor((l) => l.includes("readyok"));
+  }
+
   /** Set the position and `go …`, resolving with the engine's bestmove. */
   private async go(movesUci: string[], goCmd: string): Promise<string> {
     await this.ready;
