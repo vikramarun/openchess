@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
@@ -31,7 +30,7 @@ export default function PlayPage() {
   // viewer is a spectator, so the eval bar belongs here for the same reason it
   // does on /game/[id]. It runs on the shared singleton engine (a third worker
   // beside the two seats), which is why it stays opt-outable.
-  const [evalOn, setEvalOn] = useEvalPref();
+  const [evalOn] = useEvalPref();
   const engineEval = useEval(view.fen, evalOn);
 
   // Resolve the time control from the ?tc= query param (set by the homepage),
@@ -202,12 +201,6 @@ export default function PlayPage() {
             <div className="muted" style={{ marginTop: 8 }}>
               Status: {status}
             </div>
-            <EvalToggle
-              on={evalOn}
-              onChange={setEvalOn}
-              loading={engineEval.loading}
-              failed={engineEval.failed}
-            />
           </div>
 
           {result && (

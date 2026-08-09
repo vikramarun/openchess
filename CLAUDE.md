@@ -31,7 +31,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
-(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
+(cd apps/web && pnpm test:layout)  # header stays on screen/under the modal; coords stay on the board
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 (cd apps/web && pnpm test:username) # a username's shape, and what a player is called
 cargo run -p server                # game server on 127.0.0.1:8080
@@ -222,7 +222,18 @@ wallet.
   **only when it builds the board**, so passing them through `api.set()` silently
   does nothing. Hiding coordinates is done in CSS
   (`.board-wrap[data-coords="off"]`), and only the "every square" layout
-  recreates the instance. And roughly a third of lichess's piece sets are
+  recreates the instance.
+  A third: **the vendored base CSS positions the a-h/1-8 labels in fixed
+  pixels** (`coords.ranks { top: -20px }`, `coords.files { left: 24px }`) —
+  lichess overrides those in its own stylesheet and we vendored only the base,
+  so every label was offset by an amount that meant nothing at our board sizes
+  (on the 380px settings preview the file letters straddled the boundary with
+  the file to their left, `h` hung off the board, and the row sat 4px BELOW the
+  last rank). `board.css` re-anchors both strips to the board in percentages and
+  sizes the text in `cqw` — which is why `.cg-wrap` carries
+  `container-type: inline-size`: without a query container a `cqw` falls back to
+  the VIEWPORT and the labels render ~3x too big. `pnpm test:layout` pins both
+  halves. And roughly a third of lichess's piece sets are
   CC BY-NC-SA or outright non-free; this repo is MIT and settles real money, so a
   new set needs its license checked and recorded in
   `apps/web/public/piece/CREDITS.md` (`test:prefs` fails if a registered set has
@@ -253,10 +264,13 @@ wallet.
   down the tree, so a canonical set in `app/layout.tsx` declares /gauntlet,
   /tournament and the rest duplicates of the homepage and drops them out of the
   index. There is deliberately none at the root; set one per segment if wanted.
-- **Every page is a Client Component, so metadata lives in a sibling
+- **Almost every page is a Client Component, so metadata lives in a sibling
   `layout.tsx`.** `"use client"` and `export const metadata` are mutually
   exclusive, which is why each route has a three-line server layout next to its
-  page. A new route inherits the root title until you add one. The dynamic
+  page. The two exceptions are `/terms` and `/privacy`, which are static prose
+  with no client state: they are Server Components and export their own
+  metadata, so don't "fix" them by adding a layout. A new route inherits the
+  root title until you add one. The dynamic
   routes (`/game/[id]`, `/player/[ident]`) use `generateMetadata` there, and
   both must degrade to a generic title rather than throw: a crawler hitting a
   dead id must not 500 the page.

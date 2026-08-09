@@ -70,6 +70,15 @@ cg-board square.check {
 /* Selector groups are chessground's; only the colors are ours. The first group
  * is every label sitting on a light square, the second on a dark square. */
 
+/* Makes the board a query container, so the labels can size themselves off its
+ * width (the `cqw` below). `inline-size` only, and safe here: the board's width
+ * is handed to it by the layout and its height follows from `aspect-ratio`, so
+ * nothing about its size depends on its contents. Without this the `cqw` would
+ * silently fall back to the VIEWPORT and the labels would be ~27px. */
+.cg-wrap {
+  container-type: inline-size;
+}
+
 /* chessground hardcodes `font-family: sans-serif` on coords, which after the
  * app started loading Noto Sans left the board's a-h/1-8 as the one text on
  * screen still in the browser's generic sans. Overridden here rather than in
@@ -77,6 +86,72 @@ cg-board square.check {
  * on a bump, which would silently drop the edit. */
 .cg-wrap coords {
   font-family: inherit;
+  /* And the size scales with the board rather than sitting at chessground's
+     flat 9px, which is a third the height of a piece on a 380px preview and a
+     fifth of one on a full-size board. cqw resolves against .cg-wrap, which is
+     the board itself (Chessground stamps the class on the element it is handed);
+     the clamp keeps it legible on a phone and stops it growing into the piece
+     art on a wide one. */
+  font-size: clamp(9px, 2.1cqw, 15px);
+}
+
+/* Placement, in board-relative units.
+ *
+ * chessground's base CSS positions the inside labels with FIXED PIXEL offsets —
+ * `coords.ranks { top: -20px }`, `coords.files { left: 24px; bottom: -4px }` —
+ * which only line up at whatever board size they were measured against. lichess
+ * overrides them in its own stylesheet; we vendored the base and nothing else,
+ * so we inherited the raw offsets. On the 380px settings preview that put the
+ * whole file strip 24px right of where it belongs (every letter centred on the
+ * boundary with the file to its LEFT, and `h` hanging off the board), sitting
+ * 4px BELOW the last rank on the page background rather than on it, while every
+ * rank digit rode up into the square above.
+ *
+ * Re-expressed as strips that cover exactly the a-file and rank-1 squares, so
+ * each label sits in its own square at any board size: ranks in the top-left
+ * corner, files in the bottom-right, which is where every other board puts
+ * them. Note the padding is in `em` on purpose — it is a nudge off the square's
+ * edge, so it should track the label, not the board.
+ *
+ * Not in chessground.base.css for the same reason as the font-family above. */
+.cg-wrap coords.ranks {
+  top: 0;
+  left: 0;
+  width: 12.5%;
+  height: 100%;
+}
+
+/* One square each, exactly. chessground's `flex: 1 1 auto` sizes a label from
+   its own glyph and then shares out what's left, so eight boxes of eight
+   different widths drift off the eight columns — measurably: the `h` in a 380px
+   board landed 3px right of where the a-file's padding said it should. A fixed
+   12.5% basis is the same 1/8 in either axis (it resolves against the strip's
+   main size, and both strips span the whole board). */
+.cg-wrap coords.ranks coord,
+.cg-wrap coords.files coord {
+  flex: 0 0 12.5%;
+}
+
+.cg-wrap coords.ranks coord {
+  /* Base CSS nudges each digit down by 39% of its own box to compensate for
+     the -20px; with the strip aligned to the board there is nothing to undo. */
+  transform: none;
+  padding: 0.3em 0 0 0.45em;
+}
+
+.cg-wrap coords.files {
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  /* The bottom rank, not a 16px band below the board. `flex-end` then drops the
+     letters onto that rank's lower edge whatever the square height is. */
+  height: 12.5%;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.cg-wrap coords.files coord {
+  padding: 0 0.45em 0.25em 0;
 }
 
 .cg-wrap coords:nth-child(odd) coord:nth-child(even),

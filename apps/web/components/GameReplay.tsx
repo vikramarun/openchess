@@ -7,7 +7,6 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
-import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { playerLabel } from "@/lib/playerLabel";
@@ -58,7 +57,7 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
   const nav = usePlyNav(total);
   const at = nav.at;
 
-  const [evalOn, setEvalOn] = useEvalPref();
+  const [evalOn] = useEvalPref();
   const fen = frames.fens[at];
   const engineEval = useEval(fen, evalOn);
 
@@ -198,12 +197,6 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
               {" · "}
               {tc} {TC_NAME[tc] ?? ""}
             </div>
-            <EvalToggle
-              on={evalOn}
-              onChange={setEvalOn}
-              loading={engineEval.loading}
-              failed={engineEval.failed}
-            />
           </div>
 
           <div className={`result-banner ${settleLine?.cls ?? ""}`}>
