@@ -24,7 +24,7 @@ use crate::auth::{resolve_session, Session};
 use crate::book::OpeningBook;
 use crate::engine::UciEngine;
 use crate::gauntlet::ws_base;
-use crate::net::{play, PlayOpts};
+use crate::net::{play, PlayOpts, TimePolicy};
 
 pub struct ConnectOpts {
     pub http_server: String,
@@ -32,10 +32,12 @@ pub struct ConnectOpts {
     pub name: Option<String>,
     pub engine_path: String,
     pub engine_args: Vec<String>,
-    pub book_path: Option<String>,
-    pub book_max_ply: u32,
+    /// Opening book, already loaded and shared across games (see BookArgs).
+    pub book: Option<Arc<OpeningBook>>,
     /// UCI options set from the CLI, applied to every game.
     pub uci_options: Vec<(String, String)>,
+    /// Per-move clock budgeting, applied to every game.
+    pub time: TimePolicy,
     pub auth_token: Option<String>,
     pub code: Option<String>,
     /// Autopilot: match unattended instead of being driven from the web.
@@ -67,17 +69,7 @@ pub async fn run_connect(opts: ConnectOpts) -> Result<()> {
         (name, options)
     };
     println!("engine: {engine_name}");
-    // Open the book ONCE and share it across games: real books are large
-    // (full read + sort), and a fallible per-game open inside the seat loop
-    // would turn a moved file into a silent forfeit machine.
-    let book: Option<Arc<OpeningBook>> = match &opts.book_path {
-        Some(b) => {
-            let book = OpeningBook::open(std::path::Path::new(b), opts.book_max_ply)?;
-            println!("opening book: {b} (≤ ply {})", opts.book_max_ply);
-            Some(Arc::new(book))
-        }
-        None => None,
-    };
+    let book = opts.book.clone();
 
     if opts.auto {
         run_autopilot(&client, &http, &opts, session, &engine_name, book).await
@@ -327,6 +319,7 @@ async fn agent_session(
                     engine_args: opts.engine_args.clone(),
                     book: book.clone(),
                     uci_options: options,
+                    time: opts.time,
                 })
                 .await
                 {
@@ -466,6 +459,7 @@ async fn run_autopilot(
             engine_args: opts.engine_args.clone(),
             book: book.clone(),
             uci_options: opts.uci_options.clone(),
+            time: opts.time,
         })
         .await
         {
@@ -701,9 +695,9 @@ mod tests {
             name: None,
             engine_path: "stockfish".into(),
             engine_args: vec![],
-            book_path: None,
-            book_max_ply: 0,
+            book: None,
             uci_options: vec![],
+            time: Default::default(),
             auth_token: None,
             code: None,
             auto: true,

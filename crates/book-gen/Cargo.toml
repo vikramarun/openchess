@@ -1,0 +1,17 @@
+[package]
+name = "book-gen"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Dev tool, not part of any deployed artifact: it builds `assets/house-book.bin`
+# from the repertoire in src/repertoire.rs. The house bot ships the .bin only.
+publish = false
+
+[[bin]]
+name = "gen-book"
+path = "src/main.rs"
+
+[dependencies]
+shakmaty.workspace = true
+anyhow = "1"

@@ -92,6 +92,13 @@ impl UciEngine {
             .await
     }
 
+    /// Did the engine advertise this option in its handshake? Option names are
+    /// case-sensitive in the UCI spec, but engines disagree in practice, so
+    /// compare loosely — a missed match would silently drop the setting.
+    pub fn supports_option(&self, name: &str) -> bool {
+        self.options.iter().any(|o| o.name.eq_ignore_ascii_case(name))
+    }
+
     /// Block until the engine reports `readyok`.
     pub async fn is_ready(&mut self) -> Result<()> {
         self.send("isready").await?;
@@ -110,6 +117,11 @@ impl UciEngine {
 
     /// Ask for the best move given the full UCI move history and clock state.
     /// Returns the chosen move in UCI long-algebraic notation.
+    ///
+    /// `cap_ms` adds a `movetime` ceiling on top of the clock. UCI allows both:
+    /// the engine still manages its own clock (and still moves fast when short
+    /// on time), it just may not exceed the cap on any single search. Left-hand
+    /// engines that ignore `movetime` simply behave as before.
     pub async fn best_move_with_clock(
         &mut self,
         moves_uci: &[String],
@@ -117,12 +129,11 @@ impl UciEngine {
         black_ms: u64,
         winc_ms: u64,
         binc_ms: u64,
+        cap_ms: Option<u64>,
     ) -> Result<String> {
         self.set_position(moves_uci).await?;
-        self.send(&format!(
-            "go wtime {white_ms} btime {black_ms} winc {winc_ms} binc {binc_ms}"
-        ))
-        .await?;
+        self.send(&go_command(white_ms, black_ms, winc_ms, binc_ms, cap_ms))
+            .await?;
         self.read_best_move().await
     }
 
@@ -171,6 +182,24 @@ impl UciEngine {
     }
 }
 
+/// Build the `go` line. Split out from the IO so it can be asserted on: the
+/// ` movetime` suffix is the entire clock fix, and a regression that dropped it
+/// would leave every other test passing while the bot went back to spending
+/// tens of seconds on move 1.
+fn go_command(
+    white_ms: u64,
+    black_ms: u64,
+    winc_ms: u64,
+    binc_ms: u64,
+    cap_ms: Option<u64>,
+) -> String {
+    let mut go = format!("go wtime {white_ms} btime {black_ms} winc {winc_ms} binc {binc_ms}");
+    if let Some(cap) = cap_ms {
+        go.push_str(&format!(" movetime {cap}"));
+    }
+    go
+}
+
 fn parse_option(line: &str) -> Option<UciOptionInfo> {
     // `option name <Name with spaces> type <t> [default <d>] [min <m>] [max <M>] [var ...]`
     let rest = line.strip_prefix("option name ")?;
@@ -195,4 +224,40 @@ fn parse_option(line: &str) -> Option<UciOptionInfo> {
         min: field("min"),
         max: field("max"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn go_without_a_cap_is_the_plain_clock_command() {
+        assert_eq!(
+            go_command(180_000, 175_000, 0, 0, None),
+            "go wtime 180000 btime 175000 winc 0 binc 0"
+        );
+    }
+
+    #[test]
+    fn go_carries_the_clock_and_the_ceiling_together() {
+        // Both must be present: `movetime` alone would throw away the engine's
+        // own time management (it would spend the full cap even in time
+        // trouble), and the clock alone is the unbounded behaviour that spends
+        // 22s on move 1 of a 10+0 game. Stockfish honours whichever fires
+        // first, which is exactly the "ceiling, not target" semantics wanted.
+        assert_eq!(
+            go_command(600_000, 600_000, 2_000, 2_000, Some(7_500)),
+            "go wtime 600000 btime 600000 winc 2000 binc 2000 movetime 7500"
+        );
+    }
+
+    #[test]
+    fn parses_an_option_line() {
+        let o = parse_option("option name Move Overhead type spin default 10 min 0 max 5000")
+            .expect("should parse");
+        assert_eq!(o.name, "Move Overhead"); // name may contain spaces
+        assert_eq!(o.kind, "spin");
+        assert_eq!(o.default.as_deref(), Some("10"));
+        assert_eq!(o.max.as_deref(), Some("5000"));
+    }
 }

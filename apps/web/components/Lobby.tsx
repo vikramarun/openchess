@@ -47,13 +47,24 @@ type LiveGame = {
   initial_secs: number;
   increment_secs: number;
 };
-type Active = { gameId: string; token: string; color: "white" | "black"; stake?: string | null };
+type Active = {
+  gameId: string;
+  token: string;
+  color: "white" | "black";
+  stake?: string | null;
+  /** Who we drew, resolved server-side, for the pre-game confirmation. */
+  opponent?: { name: string; declared_engine?: string | null } | null;
+  initialSecs?: number;
+  incrementSecs?: number;
+};
 type Pending = {
   offerId: string;
   cancelKey: string | null;
   label: string;
   stakeBase: string | null;
   bot: boolean;
+  initialSecs: number;
+  incrementSecs: number;
 };
 
 /** Offer body for a browser-driven seat: the user's configured bot name +
@@ -145,6 +156,9 @@ export function Lobby() {
             token: j.token,
             color: (j.color as "white" | "black") ?? "white",
             stake: pending.stakeBase,
+            opponent: j.opponent ?? null,
+            initialSecs: pending.initialSecs,
+            incrementSecs: pending.incrementSecs,
           });
           setPending(null);
         }
@@ -210,6 +224,8 @@ export function Lobby() {
         label: `${tc.label} · ${wantStake ? `${stakeStr} USDC` : "free"}`,
         stakeBase: stakeBase ?? null,
         bot: botPlays,
+        initialSecs: tc.initial,
+        incrementSecs: tc.inc,
       });
       setPickTc(null);
     } catch {
@@ -255,6 +271,9 @@ export function Lobby() {
         token: j.token,
         color: (j.color as "white" | "black") ?? "black",
         stake: o.stake,
+        opponent: j.opponent ?? { name: seatLabel(o.poster_name, o.poster_addr, "casual") },
+        initialSecs: o.initial_secs,
+        incrementSecs: o.increment_secs,
       });
     } catch {
       setErr("Server unreachable.");
@@ -268,6 +287,10 @@ export function Lobby() {
         token={active.token}
         color={active.color}
         stake={active.stake}
+        confirmStakes
+        opponentPreview={active.opponent ?? null}
+        initialSecs={active.initialSecs}
+        incrementSecs={active.incrementSecs}
         onDone={() => setActive(null)}
       />
     );
@@ -276,6 +299,8 @@ export function Lobby() {
   return (
     <>
       {/* Play: pick a time control */}
+      {/* `.quick-play` is a legacy class name — it styles THIS lobby card, not
+          the /play page that used to share the name (now "Test Engine"). */}
       <div className="quick-play" style={{ marginBottom: 16 }}>
         {pending ? (
           <div>

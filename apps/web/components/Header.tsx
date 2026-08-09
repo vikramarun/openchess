@@ -25,7 +25,7 @@ export function Header() {
         <Link href="/">Play</Link>
         <Link href="/gauntlet">Gauntlet</Link>
         <Link href="/tournament">Tournament</Link>
-        <Link href="/play">Quick&nbsp;Play</Link>
+        <Link href="/play">Test&nbsp;Engine</Link>
         <Link href="/profile">Profile</Link>
       </nav>
       <div className="header-actions">

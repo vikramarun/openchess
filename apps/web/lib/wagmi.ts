@@ -1,4 +1,12 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
+import {
+  coinbaseWallet,
+  metaMaskWallet,
+  rabbyWallet,
+  rainbowWallet,
+  safeWallet,
+  walletConnectWallet,
+} from "@rainbow-me/rainbowkit/wallets";
 import { base, baseSepolia } from "wagmi/chains";
 
 // WalletConnect requires a real projectId (from WalletConnect Cloud). Without
@@ -15,6 +23,20 @@ if (!projectId && typeof window !== "undefined") {
   );
 }
 
+// The connect-modal shortlist. RainbowKit's default "Popular" group is
+// [safe, rainbow, coinbase, metaMask, walletConnect] — Rabby is absent, so a
+// Rabby user saw only an "install a wallet" wall even with the extension
+// already installed. Spelling the group out is the only way to add to it;
+// keep the defaults in their original order and append Rabby.
+const POPULAR_WALLETS = [
+  safeWallet,
+  rainbowWallet,
+  coinbaseWallet,
+  metaMaskWallet,
+  rabbyWallet,
+  walletConnectWallet,
+];
+
 // Built lazily on the client (see providers.tsx) so getDefaultConfig — which
 // eagerly touches browser-only storage (indexedDB) — never runs during SSR /
 // static prerender.
@@ -23,6 +45,7 @@ export function makeWagmiConfig() {
     appName: "Chess Wager",
     projectId: projectId || "dev-only-no-walletconnect",
     chains: [base, baseSepolia],
+    wallets: [{ groupName: "Popular", wallets: POPULAR_WALLETS }],
     ssr: true,
   });
 }

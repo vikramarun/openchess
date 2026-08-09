@@ -11,6 +11,16 @@ import { bookMove } from "./openings";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
+  /** Asked once, before this seat declares itself ready. Resolving false holds
+   *  the seat back: the server starts a game only when BOTH seats ready, so
+   *  this is the hook a "confirm the stakes" prompt hangs off. Omit to ready
+   *  immediately (the previous behaviour).
+   *
+   *  `deadlineMs` is how long the SERVER will still wait, straight from
+   *  `welcome` — not a client-side constant. The window starts when the room
+   *  is created, so by the time the engine has booted and this socket is up,
+   *  some of it is already gone. Null on a server too old to say. */
+  confirmStart?: (deadlineMs: number | null) => Promise<boolean>;
 };
 
 /** True if `uci` is legal in `pos`. */
@@ -80,9 +90,23 @@ export function playSeat(
         return;
       }
       switch (m.type) {
-        case "welcome":
+        case "welcome": {
+          const deadlineMs =
+            typeof m.start_deadline_ms === "number" ? m.start_deadline_ms : null;
+          if (handlers.confirmStart && !(await handlers.confirmStart(deadlineMs))) {
+            // Declined. Deliberately stay attached instead of closing: the
+            // server voids a game neither side started as a draw (refunding a
+            // wagered stake), but hands the opponent a forfeit WIN if our seat
+            // is gone. Sitting here costs a minute and keeps the money.
+            return;
+          }
+          if (cancelled()) {
+            ws.close();
+            return;
+          }
           send({ type: "ready", game_id: gameId });
           break;
+        }
         case "your_turn": {
           try {
             const history: string[] = m.moves_uci ?? [];

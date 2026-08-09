@@ -2,14 +2,13 @@
 //! session is stopped (or a game cap is hit). This drives the existing tier
 //! queue + per-game escrow — each game is an independent 1v1 settlement.
 
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use crate::book::OpeningBook;
-use crate::net::{play, PlayOpts};
+use crate::net::{play, PlayOpts, TimePolicy};
 
 pub struct GauntletOpts {
     pub http_server: String,
@@ -19,9 +18,11 @@ pub struct GauntletOpts {
     pub count: u32,
     pub engine_path: String,
     pub engine_args: Vec<String>,
-    pub book_path: Option<String>,
-    pub book_max_ply: u32,
+    /// Opening book, already loaded and shared across the session's games.
+    pub book: Option<std::sync::Arc<OpeningBook>>,
     pub auth_token: Option<String>,
+    /// Per-move clock budgeting, applied to every game in the session.
+    pub time: TimePolicy,
 }
 
 pub(crate) fn ws_base(http: &str) -> String {
@@ -40,14 +41,7 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
     let ws = ws_base(&http);
     let client = reqwest::Client::new();
 
-    // Open the (potentially large) book once and share it across games.
-    let book = match &opts.book_path {
-        Some(p) => Some(std::sync::Arc::new(OpeningBook::open(
-            Path::new(p),
-            opts.book_max_ply,
-        )?)),
-        None => None,
-    };
+    let book = opts.book.clone();
 
     let auth = |rb: reqwest::RequestBuilder| match &opts.auth_token {
         Some(t) => rb.bearer_auth(t),
@@ -125,6 +119,7 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
             engine_args: opts.engine_args.clone(),
             book: book.clone(),
             uci_options: Vec::new(),
+            time: opts.time,
         })
         .await?;
 
