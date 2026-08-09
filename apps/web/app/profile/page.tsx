@@ -41,7 +41,7 @@ function ProfileClient() {
         <div className="panel">
           <b style={{ color: "var(--text-strong)" }}>Sign in to see your profile</b>
           <div className="muted" style={{ marginTop: 6 }}>
-            Connect your wallet (top right) to view your rating, game history, and net winnings.
+            Connect your wallet (top right) to view your rating, game history, and net USDC.
           </div>
         </div>
       )}
@@ -49,7 +49,7 @@ function ProfileClient() {
       {/* Engine: how the bot that plays your seats is configured. */}
       <h2 style={headingStyle}>Engine</h2>
       <p className="muted" style={{ marginTop: 0 }}>
-        Set up the bot that plays your seats — a full-strength engine in your browser, or your own
+        Set up the bot that plays your seats: a full-strength engine in your browser, or your own
         engine running on your machine.
       </p>
       <BrowserBotPanel />

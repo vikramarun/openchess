@@ -4,18 +4,18 @@
 # per time control under a single wallet, restarting each on failure with
 # backoff.
 #
-# The house wallet needs NO funds — house games are casual (no stake). Use a
+# The bot wallet needs NO funds: its games are casual (no stake). Use a
 # fresh throwaway key that holds nothing and never will.
 #
 # Usage:
 #   OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh
 #
 # Configuration (env):
-#   OPENCHESS_WALLET_KEY  required — house wallet private key (unfunded!)
+#   OPENCHESS_WALLET_KEY  required: bot wallet private key (unfunded!)
 #   SERVER                default https://openchess.fly.dev
 #   ENGINE                default stockfish (must be on PATH or a path)
 #   NAME                  default "House Bot"
-#   SKILL                 default 20 — Stockfish "Skill Level" 0..20. 20 is
+#   SKILL                 default 20: Stockfish "Skill Level" 0..20. 20 is
 #                         full strength (and Stockfish's own default). Below 20
 #                         the engine picks a deliberately worse move from the
 #                         top few, which reads as random blunders rather than
@@ -23,14 +23,14 @@
 #                         again, UCI_LimitStrength + UCI_Elo is the honest knob.
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
-#   MOVE_BUDGET           default 80 — plan each game as this many moves; the
+#   MOVE_BUDGET           default 80: plan each game as this many moves; the
 #                         per-move search ceiling is initial/MOVE_BUDGET
-#   MOVE_OVERHEAD_MS      default 250 — clock reserved per move for the round
+#   MOVE_OVERHEAD_MS      default 250: clock reserved per move for the round
 #                         trip to the server
 #   BOOK                  Polyglot .bin played before the engine; defaults to
 #                         the one shipped in the image, else the repo's
 #                         assets/house-book.bin. Set BOOK= (empty) to disable.
-#   BOOK_MAX_PLY          default 16 — leave the book after this many plies
+#   BOOK_MAX_PLY          default 16: leave the book after this many plies
 #   CLIENT                default: chess-client from PATH, else the repo's
 #                         release build
 set -euo pipefail
@@ -82,13 +82,13 @@ if [[ -z "${CLIENT:-}" ]]; then
   elif [[ -x "$(dirname "$0")/../target/release/chess-client" ]]; then
     CLIENT="$(dirname "$0")/../target/release/chess-client"
   else
-    echo "chess-client not found — download a release binary or 'cargo build --release -p byo-client'." >&2
+    echo "chess-client not found. Download a release binary, or run 'cargo build --release -p byo-client'." >&2
     exit 1
   fi
 fi
 
 command -v "$ENGINE" >/dev/null 2>&1 || [[ -x "$ENGINE" ]] || {
-  echo "engine '$ENGINE' not found — e.g. 'brew install stockfish' / 'apt install stockfish'." >&2
+  echo "engine '$ENGINE' not found. Try 'brew install stockfish' or 'apt install stockfish'." >&2
   exit 1
 }
 
@@ -96,7 +96,7 @@ command -v "$ENGINE" >/dev/null 2>&1 || [[ -x "$ENGINE" ]] || {
 # run a TC no lobby tile matches (e.g. "300" would parse as 300+300).
 for tc in $TCS; do
   if [[ "$tc" != *:* || ! "${tc%%:*}" =~ ^[0-9]+$ || ! "${tc##*:}" =~ ^[0-9]+$ ]]; then
-    echo "bad TCS entry '$tc' — expected initial:increment seconds, e.g. 180:0" >&2
+    echo "bad TCS entry '$tc'. Expected initial:increment seconds, e.g. 180:0" >&2
     exit 1
   fi
 done
@@ -107,11 +107,11 @@ if [[ ! "$MOVE_BUDGET" =~ ^[0-9]+$ ]] || ((MOVE_BUDGET == 0)); then
 fi
 
 if [[ -n "${BOOK:-}" && ! -f "$BOOK" ]]; then
-  echo "BOOK '$BOOK' not found — generate it with 'cargo run -p book-gen -- assets/house-book.bin', or set BOOK= to play without one." >&2
+  echo "BOOK '$BOOK' not found. Generate it with 'cargo run -p book-gen -- assets/house-book.bin', or set BOOK= to play without one." >&2
   exit 1
 fi
 
-echo "house bot: $NAME (skill $SKILL) on $SERVER — time controls: $TCS"
+echo "house bot: $NAME (skill $SKILL) on $SERVER; time controls: $TCS"
 echo "book: ${BOOK:-none (every opening move is a full search)}"
 
 # One autopilot per time control. Same wallet across instances is fine: the

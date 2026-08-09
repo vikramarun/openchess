@@ -7,6 +7,7 @@ import { useAccount } from "wagmi";
 import { SeatGame } from "@/components/SeatGame";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import {
   casualIdentity,
@@ -43,7 +44,7 @@ export default function TournamentPage() {
         <h1>🏆 Tournament</h1>
         <p>
           Buy in to a prize pool. A round-robin runs (Swiss &amp; knockout coming), and the
-          pool is distributed on-chain by final standings.
+          pool is distributed onchain by final standings.
         </p>
       </div>
       {mounted ? <TournamentClient /> : null}
@@ -250,11 +251,12 @@ function TournamentClient() {
     if (!name.trim()) return setErr("Give the tournament a name.");
     let buyInBase: string | undefined;
     if (buyIn.trim()) {
-      if (!token) return setErr("Sign in (top right) to create a buy-in tournament.");
+      if (!token)
+        return setErr("Sign in (top right) to create a tournament with an entry fee.");
       try {
         buyInBase = parseUsdc(buyIn).toString();
       } catch {
-        return setErr("Enter a valid USDC buy-in.");
+        return setErr("Enter a valid USDC entry fee.");
       }
     }
     try {
@@ -271,7 +273,10 @@ function TournamentClient() {
           increment_secs: tc.inc,
         }),
       });
-      if (!r.ok) return setErr(`Couldn't create (${r.status}).`);
+      if (!r.ok)
+        return setErr(
+          r.status === 503 ? MAINTENANCE_MSG : `Couldn’t create (${r.status}).`,
+        );
       setName("");
       setBuyIn("");
     } catch {
@@ -285,7 +290,7 @@ function TournamentClient() {
       return setErr(
         asBot
           ? "Sign in to enter with your bot."
-          : "Sign in (top right) to join a buy-in tournament.",
+          : "Sign in (top right) to join a tournament with an entry fee.",
       );
     const player = t.buy_in
       ? undefined
@@ -304,13 +309,15 @@ function TournamentClient() {
       });
       if (!r.ok) {
         setErr(
-          r.status === 502
-            ? "Couldn't move your buy-in into the pool — check your deposited balance."
-            : r.status === 424
-              ? "Your bot is offline — check the chess-client window."
-              : r.status === 409
-                ? "That display name is already taken in this tournament."
-                : `Couldn't join (${r.status}).`,
+          r.status === 503
+            ? MAINTENANCE_MSG
+            : r.status === 502
+              ? "Couldn’t move your entry into the pool. Check your deposited balance."
+              : r.status === 424
+                ? BOT_OFFLINE_MSG
+                : r.status === 409
+                  ? "That display name is already taken in this tournament."
+                  : `Couldn’t join (${r.status}).`,
         );
         return;
       }
@@ -338,11 +345,13 @@ function TournamentClient() {
       });
       if (!r.ok)
         setErr(
-          r.status === 409
-            ? "Need at least 2 entrants."
-            : r.status === 403
-              ? "Only the organizer can start this tournament."
-              : `Couldn't start (${r.status}).`,
+          r.status === 503
+            ? MAINTENANCE_MSG
+            : r.status === 409
+              ? "Need at least 2 entrants."
+              : r.status === 403
+                ? "Only the organizer can start this tournament."
+                : `Couldn’t start (${r.status}).`,
         );
       else setOpenTid(t.id);
     } catch {
@@ -378,7 +387,7 @@ function TournamentClient() {
             <b style={{ color: "var(--text-strong)" }}>{openT.name}</b>{" "}
             <span className={`status-pill ${openT.status}`}>{openT.status}</span>
             <div className="muted" style={{ fontSize: 13 }}>
-              {openT.buy_in ? `${fmtUsdc(openT.buy_in)} USDC buy-in` : "casual"} ·{" "}
+              {openT.buy_in ? `${fmtUsdc(openT.buy_in)} USDC entry` : "casual"} ·{" "}
               {openT.players.length} entrant{openT.players.length === 1 ? "" : "s"}
               {openT.total_rounds > 0 &&
                 ` · round ${Math.min(openT.current_round + 1, openT.total_rounds)} of ${openT.total_rounds}`}
@@ -416,7 +425,7 @@ function TournamentClient() {
               </a>
             )}
             <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-              Your bot plays every round automatically — leave this tab open.
+              Your bot plays every round automatically. Leave this tab open.
             </div>
           </div>
         )}
@@ -486,7 +495,7 @@ function TournamentClient() {
           <div className="panel" style={{ marginBottom: 16, textAlign: "center" }}>
             <span className="muted">
               {myGames(openT).some((g) => g.round === openT.current_round)
-                ? "Your game this round is done — waiting for the rest of the field."
+                ? "Your game this round is done. Waiting for the rest of the field."
                 : "You sit out this round. The next one starts automatically."}
             </span>
           </div>
@@ -499,8 +508,8 @@ function TournamentClient() {
             </b>
             <p className="muted" style={{ marginBottom: 0 }}>
               {openT.status === "abandoned"
-                ? "It was interrupted before it could settle — reclaim your buy-in from the wallet menu (top right)."
-                : "The pool is distributed by final standings. Small fields credit your share to your bankroll directly; large fields settle a Merkle root — claim it from the wallet menu (top right)."}
+                ? "It was interrupted before it could settle. Reclaim your entry from the wallet menu (top right)."
+                : "The pool is distributed by final standings. Small fields credit your share to your balance directly. Large fields settle a Merkle root, claimed from the wallet menu (top right)."}
             </p>
           </div>
         )}
@@ -521,16 +530,16 @@ function TournamentClient() {
       <div className="panel" style={{ marginBottom: 16 }}>
         <b style={{ color: "var(--text-strong)" }}>How it works</b>
         <ol className="muted" style={{ lineHeight: 1.8, marginBottom: 0 }}>
-          <li>Create or join; your uniform buy-in locks into the on-chain pool.</li>
+          <li>Create or join. Every entrant pays the same entry into the onchain pool.</li>
           <li>
-            The organizer starts a round-robin. Your board opens by itself each round — a seat
-            that doesn&apos;t show up within a minute forfeits.
+            The organizer starts a round-robin. Your board opens by itself each round, and a
+            seat that doesn&apos;t show up within a minute forfeits.
           </li>
           <li>
-            The pool is distributed by final standings — small fields directly, large fields via
+            The pool is distributed by final standings: small fields directly, large fields via
             a Merkle claim.
           </li>
-          <li>If it never settles, every entrant reclaims their buy-in after a timeout.</li>
+          <li>If it never settles, every entrant reclaims their entry after a timeout.</li>
         </ol>
       </div>
 
@@ -542,7 +551,7 @@ function TournamentClient() {
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Friday Arena" />
           </label>
           <label className="of-field">
-            <span className="muted">Buy-in (USDC)</span>
+            <span className="muted">Entry (USDC)</span>
             <input
               inputMode="decimal"
               value={buyIn}
@@ -587,7 +596,7 @@ function TournamentClient() {
         <b style={{ color: "var(--text-strong)" }}>Tournaments</b>
         {tourneys.length === 0 ? (
           <div className="muted" style={{ marginTop: 8 }}>
-            None yet — create one above. Watch engines free in <Link href="/play">Test Engine</Link>.
+            None yet. Create one above, or watch engines free in <Link href="/play">Test Engine</Link>.
           </div>
         ) : (
           <div className="tourney-list">
@@ -601,7 +610,7 @@ function TournamentClient() {
                       {t.name} <span className={`status-pill ${t.status}`}>{t.status}</span>
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
-                      {t.buy_in ? `${fmtUsdc(t.buy_in)} USDC buy-in` : "casual"} · {t.players.length}{" "}
+                      {t.buy_in ? `${fmtUsdc(t.buy_in)} USDC entry` : "casual"} · {t.players.length}{" "}
                       entrant{t.players.length === 1 ? "" : "s"}
                       {t.total_rounds > 0 &&
                         ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}
@@ -680,7 +689,7 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
                   shares the money to match. While payouts went strictly by
                   position, two gold medals here meant 65% and 25% in the
                   wallets, decided by who joined first. */}
-              <td title={s.tied ? "level on score — shares the prize for these places" : undefined}>
+              <td title={s.tied ? "Level on score: shares the prize for these places" : undefined}>
                 {decided && s.rank === 1 ? "🥇" : s.rank}
                 {s.tied && <span className="muted">*</span>}
               </td>
@@ -700,7 +709,7 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
       </table>
       {t.standings.some((s) => s.tied) && (
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          * Level on score{t.buy_in ? " — they split the prize for those places equally" : ""}.
+          * Level on score{t.buy_in ? ", so they split the prize for those places equally" : ""}.
         </div>
       )}
     </div>

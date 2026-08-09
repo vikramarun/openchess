@@ -24,7 +24,7 @@ type Opponent = { name: string; declared_engine: string | null };
 
 /** Play ONE seat of a server game in the browser (the opponent runs theirs).
  *  Renders the live board from a spectator socket; drives the user's seat with
- *  an in-browser Stockfish. Used by the wager modes. */
+ *  an in-browser Stockfish. Used by the staked modes. */
 export function SeatGame({
   gameId,
   token,
@@ -106,7 +106,7 @@ export function SeatGame({
       await ensureBookLoaded();
 
       // The spectator socket renders the live board (shared reducer); it
-      // reconnects with backoff so a dropped connection mid-wager shows
+      // reconnects with backoff so a dropped connection mid-game shows
       // "reconnecting…" and recovers rather than freezing the board while money
       // is on the line.
       spectator = connectSpectator({
@@ -213,7 +213,7 @@ export function SeatGame({
     ? `you won +${fmtUsdc(profitForStake(stake ?? 0))} USDC`
     : youLost
       ? `you lost ${fmtUsdc(stake)} USDC`
-      : "draw — your stake was returned";
+      : "draw, so your stake was returned";
 
   const oppColor = color === "white" ? "black" : "white";
   const live = !result && status === "playing";
@@ -304,7 +304,7 @@ export function SeatGame({
             {subtitle ?? `Your game · ${color === "white" ? "White" : "Black"}`}
           </div>
           <div className="muted" style={{ fontSize: 14 }}>
-            Your engine plays your seat in your browser; your opponent runs theirs.
+            Your engine plays your seat in your browser. Your opponent runs theirs.
           </div>
           {stake && (
             <div className="stake-callout" style={{ marginTop: 10 }}>
@@ -313,8 +313,8 @@ export function SeatGame({
                 <b>+{fmtUsdc(profitForStake(stake))} USDC</b>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                Win to take your opponent’s stake, less a 1% fee; a draw or no-show returns your
-                stake. Non-custodial — settled on-chain.
+                Win and you take your opponent’s stake, less a 1% fee. A draw or a no-show
+                returns yours. Non-custodial, settled onchain.
               </div>
             </div>
           )}
@@ -329,7 +329,7 @@ export function SeatGame({
             <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
               Stay on this page for a moment while the game is called off
               {stake ? " and your stake comes back" : ""}. Leaving now hands your opponent a
-              forfeit{stake ? " — and the stake with it" : ""}.
+              forfeit{stake ? ", and the stake with it" : ""}.
             </div>
           </div>
         )}
@@ -341,12 +341,12 @@ export function SeatGame({
               <div style={{ fontSize: 13, marginTop: 6 }}>
                 {settleStatus === "settled" ? (
                   <span style={{ color: youWon ? "var(--accent)" : "var(--text)" }}>
-                    Settled on-chain ✓ — {settledText}
+                    Settled onchain ✓ · {settledText}
                   </span>
                 ) : settleStatus === "failed" ? (
                   <span className="muted">
-                    Settlement delayed — your funds are safe and recoverable on-chain after the
-                    settle window.{" "}
+                    Settlement is delayed. Your funds are safe and recoverable onchain once
+                    the settle window opens.{" "}
                     {escrowUrl && (
                       <a href={escrowUrl} target="_blank" rel="noopener noreferrer">
                         View escrow ↗
@@ -355,14 +355,14 @@ export function SeatGame({
                   </span>
                 ) : (
                   <span className="muted">
-                    Settling on-chain — your bankroll updates once the oracle posts the result.
+                    Settling onchain. Your balance updates once the oracle posts the result.
                   </span>
                 )}
               </div>
             )}
             {verified?.signed && (
               <div className="verified">
-                ✓ Verified — signed by oracle {shortAddr(verified.oracle)}
+                ✓ Verified, signed by oracle {shortAddr(verified.oracle)}
               </div>
             )}
           </div>

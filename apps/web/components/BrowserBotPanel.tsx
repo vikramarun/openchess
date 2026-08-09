@@ -45,7 +45,7 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
     try {
       setBook(await saveUserBook(file));
     } catch (e) {
-      setBookErr(e instanceof Error ? e.message : "couldn't read that book");
+      setBookErr(e instanceof Error ? e.message : "Couldn’t read that book.");
     } finally {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -56,8 +56,8 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
     <div className="panel" style={{ marginBottom: 16 }}>
       <b style={{ color: "var(--text-strong)" }}>🤖 Your browser bot</b>
       <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-        Full-strength Stockfish 18 in your browser — no download. Give it a name and an opening
-        book; applies to every game your browser plays.
+        Full-strength Stockfish 18 in your browser, no download. Give it a name and an opening
+        book, and both apply to every game your browser plays.
       </div>
 
       <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
@@ -72,7 +72,7 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
         </label>
 
         <div className="muted" style={{ fontSize: 13 }}>
-          Opening book (Polyglot <code>.bin</code>) — played before the engine, instantly
+          Opening book (Polyglot <code>.bin</code>), played before the engine and instantly
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
             <input
               ref={fileRef}

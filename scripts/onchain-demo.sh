@@ -1,9 +1,9 @@
 #!/bin/bash
-# End-to-end on-chain money loop on a local Anvil chain, exercising the SECURED
+# End-to-end onchain money loop on a local Anvil chain, exercising the SECURED
 # flow: SIWE sign-in -> authenticated Park offer/accept (seats bound to the
 # signed-in wallets) -> escrow opened -> two engines play -> result enqueued to
 # the durable settlement outbox -> worker signs an EIP-712 result and settles
-# on-chain -> bankrolls move.
+# onchain -> bankrolls move.
 set -e
 ROOT=/Users/vikramarun/chess
 RPC=http://127.0.0.1:8545
@@ -49,7 +49,7 @@ bankrolls() { # label
 }
 bankrolls "before game"
 
-echo "== starting server (SIWE + on-chain settlement via durable outbox) =="
+echo "== starting server (SIWE + onchain settlement via durable outbox) =="
 DATABASE_URL="postgres://vikramarun@localhost/chess" SIWE_DOMAIN=chess.local SIWE_CHAIN_ID=8453 \
   RPC_URL=$RPC ESCROW_ADDR=$ESCROW ORACLE_KEY=$K1 RUST_LOG=info "$SERVER" >/tmp/server.log 2>&1 & SERVER_PID=$!
 sleep 2
@@ -58,7 +58,7 @@ sleep 2
 siwe_login() { # key addr
   local NONCE MSG SIG
   NONCE=$(curl -s --retry 15 --retry-connrefused $H/auth/nonce | jget "['nonce']")
-  MSG=$(printf 'chess.local wants you to sign in with your Ethereum account:\n%s\n\nSign in to Chess Wager.\n\nURI: http://chess.local\nVersion: 1\nChain ID: 8453\nNonce: %s\nIssued At: 2026-05-30T00:00:00Z' "$2" "$NONCE")
+  MSG=$(printf 'chess.local wants you to sign in with your Ethereum account:\n%s\n\nSign in to OpenChess.\n\nURI: http://chess.local\nVersion: 1\nChain ID: 8453\nNonce: %s\nIssued At: 2026-05-30T00:00:00Z' "$2" "$NONCE")
   SIG=$(cast wallet sign --private-key "$1" "$MSG")
   python3 - "$MSG" "$SIG" <<'PY'
 import sys,json,urllib.request
@@ -77,7 +77,7 @@ echo "== white posts a 1 USDC Park offer (authenticated) =="
 OID=$(curl -s -X POST $H/park/offers -H "authorization: Bearer $WSESS" -H 'content-type: application/json' \
   -d '{"stake":"1000000","initial_secs":3,"increment_secs":0}' | jget "['offer_id']")
 echo "offer=$OID"
-echo "== black accepts (authenticated) — seats bound to the two signed-in wallets =="
+echo "== black accepts (authenticated): seats bound to the two signed-in wallets =="
 ACC=$(curl -s -X POST $H/park/offers/$OID/accept -H "authorization: Bearer $BSESS" -H 'content-type: application/json' -d '{}')
 GID=$(echo "$ACC" | jget "['game_id']"); BT=$(echo "$ACC" | jget "['token']")
 # Only the authenticated poster can retrieve the white launch token.

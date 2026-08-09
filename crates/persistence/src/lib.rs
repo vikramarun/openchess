@@ -19,7 +19,7 @@ pub struct Tc {
     pub increment_ms: i64,
 }
 
-/// Optional on-chain wager attached to a game.
+/// Optional onchain wager attached to a game.
 #[derive(Clone)]
 pub struct Wager {
     pub white_addr: String,
@@ -348,7 +348,7 @@ impl Db {
 
     // -- tournament settlement outbox -------------------------------------
 
-    /// Enqueue a completed tournament's payout for durable on-chain settlement.
+    /// Enqueue a completed tournament's payout for durable onchain settlement.
     pub async fn enqueue_tournament_settlement(
         &self,
         tid: Uuid,
@@ -453,7 +453,7 @@ impl Db {
     /// `running` one, an `open` tournament has no in-flight rooms, so every
     /// field that defines it is on the row and it can be rebuilt exactly —
     /// which is what keeps a restart from stranding entrants whose buy-in is
-    /// already locked in the on-chain pool. Bounded and newest-first so a very
+    /// already locked in the onchain pool. Bounded and newest-first so a very
     /// old backlog can't blow up boot.
     pub async fn open_tournaments(&self, limit: i64) -> Result<Vec<OpenTournamentRow>> {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
@@ -470,7 +470,7 @@ impl Db {
     }
 
     /// Buy-in tournaments the wallet entered that have reached a finished state
-    /// (a payout or refund may be collectable on-chain). DB-sourced so it
+    /// (a payout or refund may be collectable onchain). DB-sourced so it
     /// survives the restart that wipes the in-memory tournaments map. `address`
     /// must be lowercased (entrants are stored lowercased).
     pub async fn claimable_tournaments(&self, address: &str) -> Result<Vec<ClaimableTournamentRow>> {
@@ -494,7 +494,7 @@ impl Db {
     /// candidate list: the chain is the authority on whether the window is
     /// open (and on whether someone already claimed), so the UI checks each one.
     ///
-    /// Matches on the on-chain seat columns (`*_addr`), not the auth wallet
+    /// Matches on the onchain seat columns (`*_addr`), not the auth wallet
     /// columns — those are the addresses the escrow actually pays.
     pub async fn unsettled_wagered_games(&self, address: &str) -> Result<Vec<UnsettledGameRow>> {
         let rows = sqlx::query_as::<_, UnsettledGameRow>(

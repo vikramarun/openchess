@@ -1,18 +1,18 @@
 # OpenChess
 
-**Machines play. You wager.** An engine-vs-engine chess platform in the spirit
-of lichess, with a twist: **bots play, and users stake USDC on Base** — settled
-non-custodially. Because engines play, the classic cheating problem dissolves —
-the server is simply the authority on legality, clock, and result. Players bring
-their own UCI engine (or use the Stockfish that runs in the browser); money
-settles on-chain, in a contract, never a platform wallet.
+**Machines play. You back yours.** An engine-vs-engine chess platform in the
+spirit of lichess, with a twist: **bots play, and users stake USDC on Base**,
+settled non-custodially. Because engines play, the classic cheating problem
+dissolves, and the server is simply the authority on legality, clock, and
+result. Players bring their own UCI engine, or use the Stockfish that runs in
+the browser. Money settles onchain, in a contract, never a platform wallet.
 
 **Live:** <https://openchess.ai> · **`ChessEscrow` on Base mainnet:**
 [`0x7Cc1…923D`](https://basescan.org/address/0x7cc1dd4f12bbfb40fca6ec2334a27c646fcf923d)
 (verified). New here? Start with **[HANDOFF.md](HANDOFF.md)**.
 
 > **Status:** deployed and running, but **single-node** (one Fly machine) and
-> **not independently audited** — stakes are capped at 25 USDC. Making it
+> **not independently audited**, so stakes are capped at 25 USDC. Making it
 > multi-node (true HA) is the next task; see [HANDOFF.md](HANDOFF.md).
 
 ---
@@ -20,35 +20,35 @@ settles on-chain, in a contract, never a platform wallet.
 ## What it does
 
 - **Casual lobby (free, fully in-browser).** Pick a time control (1+0 / 3+0 /
-  5+0 / 10+0) and play instantly against the house, open a challenge for another
+  5+0 / 10+0) and play the OpenChess bot right away, open a challenge for another
   player's engine, or **watch live games**. Two Stockfish engines compiled to
-  **WASM** play on *your* CPU — zero download, zero server compute. A curated
+  **WASM** play on *your* CPU, with zero download and zero server compute. A curated
   opening book (from [official-stockfish/books](https://github.com/official-stockfish/books))
   makes openings instant and varied.
-- **Wager modes (USDC on Base, non-custodial).**
-  - **Park / Patzer** — post a game at a stake; someone accepts; winner takes the
-    pot minus rake. Deposit + play **in the browser**.
-  - **Gauntlet** — your engine plays back-to-back games at a fixed tier until you
-    stop; each an independent on-chain settlement against a locked bankroll.
-  - **Tournament** — buy in to a prize pool; a round-robin runs **one round at a
-    time** (circle method); the pool is distributed on-chain by final standings
-    (direct, or a Merkle-root claim for large fields).
-  - **Bring your own bot** — in every mode, a seat can be played by the in-browser
+- **Staked modes (USDC on Base, non-custodial).**
+  - **Park / Patzer.** Post a game at a stake; someone accepts; the winner takes
+    the pot minus rake. Deposit and play **in the browser**.
+  - **Gauntlet.** Your engine plays back-to-back games at a fixed tier until you
+    stop, each an independent onchain settlement against a locked balance.
+  - **Tournament.** Pay one entry into a prize pool. A round-robin runs **one
+    round at a time** (circle method) and the pool is distributed onchain by
+    final standings, either directly or as a Merkle-root claim for large fields.
+  - **Bring your own bot.** In every mode a seat can be played by the in-browser
     engine or by a connected `chess-client` agent, driven from the web.
-- **Player profiles** — per-address stats (games, W/L/D, win rate, net USDC,
-  Elo) and game history, chess.com-style, at `/player/<address>`.
-- **Verifiable results** — the oracle signs each result; the web app recovers the
-  signer against the published `/oracle` address and shows a "✓ Verified" badge.
+- **Player profiles.** Per-address stats (games, W/L/D, win rate, net USDC, Elo)
+  and game history, chess.com-style, at `/player/<address>`.
+- **Verifiable results.** The oracle signs each result, and the web app recovers
+  the signer against the published `/oracle` address and shows a "✓ Verified" badge.
 
 ## How it works (one paragraph)
 
 Rust monorepo (Cargo workspace). The **game server** (axum + tokio) runs one
 actor task per live game and is the sole authority on move legality
 ([shakmaty](https://github.com/niklasf/shakmaty)), the clock, and the result.
-Engines connect over WebSocket through a **bring-your-own-engine** protocol — the
+Engines connect over WebSocket through a **bring-your-own-engine** protocol. The
 web app is itself a BYO client driving Stockfish WASM (`apps/web/lib/engine.ts`
 + `lib/play.ts`), and power users can point the native client at any UCI engine.
-On a finished wagered game the server (acting as the result **oracle**) signs an
+On a finished staked game the server (acting as the result **oracle**) signs an
 EIP-712 result and settles it on the non-custodial **`ChessEscrow`** contract via
 a durable transactional outbox. Funds live in the contract; the chain enforces
 `bankroll − lockedExposure` withdrawal limits, address-bound payouts, replay
@@ -62,9 +62,9 @@ crates/protocol      shared serde wire types (server + client)
 crates/game-engine   authoritative board, clock, result (shakmaty)
 crates/byo-client    chess-client: UCI driver, selfplay + networked play, Polyglot book
 crates/server        chess-server: HTTP + WS hub + per-game room actors, 3 modes, SIWE
-crates/ledger        on-chain settlement (alloy), EIP-712 results, SIWE recovery
+crates/ledger        onchain settlement (alloy), EIP-712 results, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox
-contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
+contracts/           ChessEscrow.sol (Foundry): pooled balances + EIP-712 settlement
 apps/web             Next.js UI: lobby, in-browser WASM engine, wallet/SIWE, spectator, profiles
 scripts/             onchain-demo.sh (1v1), tournament-demo.sh + tournament-e2e.py
                      (settled + abandoned tournament money-loop, real Postgres)
@@ -85,12 +85,12 @@ web build on every push.
 | BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish + book tests |
 | Game server (WS hub + rooms + 3 modes + SIWE + lobby + rate limiting) | `crates/server` | ✅ live + unit tests |
 | Non-custodial escrow + oracle (games + tournament pools) | `contracts/ChessEscrow.sol` | ✅ 25 Foundry tests |
-| On-chain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests |
+| Onchain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip + live |
 | Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser + 3 test suites |
 
 **This is not a turnkey production deployment.** Several items are ops/legal
-decisions only the operator can make — an **independent contract audit**, the
+decisions only the operator can make: an **independent contract audit**, the
 **oracle key in a KMS/HSM behind a multisig+timelock**, single-node infra, and a
 **legal/regulatory review** for real-money gaming. See
 **[PRODUCTION.md](PRODUCTION.md)** for the full go-live checklist and the honest
@@ -98,12 +98,12 @@ list of known limitations (single-node only; no anti-collusion controls yet).
 
 ## Run it locally
 
-**Prerequisites:** Rust (stable, ≥ 1.91 — required by `alloy`), Foundry
+**Prerequisites:** Rust (stable, ≥ 1.91, required by `alloy`), Foundry
 (`forge`/`anvil`/`cast`), Node + pnpm, a UCI engine on PATH (`stockfish`), and
 Postgres (optional, for persistence).
 
 ```bash
-# Rust workspace — contract ABIs are vendored (crates/ledger/abi), so this
+# Rust workspace. Contract ABIs are vendored (crates/ledger/abi), so this
 # builds without a prior `forge build`.
 cargo build
 cargo test                 # set DATABASE_URL to also run the persistence test
@@ -121,8 +121,8 @@ in-browser engines against the live server with no setup. The homepage is the
 casual lobby (create / join / watch); `/player/<address>` shows profiles.
 
 The in-browser bot is personalizable with **no download** (lobby → "Your
-browser bot"): a display name and an uploaded **Polyglot `.bin` opening book**
-— parsed and probed in the browser
+browser bot"): a display name and an uploaded **Polyglot `.bin` opening book**,
+parsed and probed in the browser
 via `apps/web/lib/polyglot.ts`, whose Zobrist keys match the native client's
 byte-for-byte (`pnpm -C apps/web test:book` checks against the spec vectors).
 The downloadable `chess-client` remains the power tier (full-strength engines,
@@ -141,33 +141,33 @@ cargo run -p byo-client -- play --game <GAME_ID> --token <WHITE_TOKEN>
 cargo run -p byo-client -- play --game <GAME_ID> --token <BLACK_TOKEN>
 # spectate read-only (no token): ws://127.0.0.1:8080/ws/game/<GAME_ID>
 
-# Full on-chain money loop (Park/Patzer) on a local Anvil chain
+# Full onchain money loop (Park/Patzer) on a local Anvil chain
 cargo build && (cd contracts && forge build) && bash scripts/onchain-demo.sh
 
-# Gauntlet — back-to-back games at a tier
+# Gauntlet: back-to-back games at a tier
 chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
 #   staked: add --stake <usdc-base-units> --auth-token <siwe-session>
 
-# Connect — put YOUR engine (+ optional Polyglot book) online as a bot bound
+# Connect: put YOUR engine (+ optional Polyglot book) online as a bot bound
 # to your wallet, then drive it from the website: start/join lobby games there
 # and the seat is pushed to this process (the playchess/lichess-bot model).
 # The web /connect page generates this command with a single-use pairing code.
 # Prebuilt binaries (no Rust needed): https://github.com/vikramarun/openchess/releases
-# (published by .github/workflows/release.yml — see its header for cutting one)
+# (published by .github/workflows/release.yml; see its header for cutting one)
 chess-client connect --server https://openchess.fly.dev \
   --engine stockfish --book ./book.bin --name "TalBot 9000" \
   --uci-option "Threads=4" --code <pairing-code-from-web>
 #   auth alternatives to --code: --auth-token <session>, or
-#   OPENCHESS_WALLET_KEY=… (headless; the client signs SIWE locally —
+#   OPENCHESS_WALLET_KEY=... (headless; the client signs SIWE locally,
 #   `chess-client login` prints a session token for scripting)
 #   unattended matchmaking instead of web-driven: add --auto
 #     [--stake <usdc-base-units> --initial-secs N --increment-secs N --games N]
 
-# Tournament — live E2E: settled pool distributed by standings (65/25/10) AND
-# an abandoned tournament recovered via on-chain claimRefund (real Postgres).
+# Tournament, live E2E: settled pool distributed by standings (65/25/10) AND
+# an abandoned tournament recovered via onchain claimRefund (real Postgres).
 bash scripts/tournament-demo.sh   # wraps scripts/tournament-e2e.py
 
-# House bot — keep the park populated so visitors always have an opponent:
+# House bot: keep the park populated so visitors always have an opponent.
 # one casual autopilot per lobby time control under one (UNFUNDED) wallet.
 OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh   # SKILL=8 by default
 # ...or run it 24/7 as its own Fly app (stockfish + chess-client in one image):
@@ -178,21 +178,21 @@ OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh   # SKILL=8 by default
 #  to yet. See the header of fly.housebot.toml.)
 ```
 
-Wagered games go through the authenticated Park/Gauntlet/Tournament flows (each
-seat bound to the SIWE-signed-in wallet); the server needs `RPC_URL` /
-`ESCROW_ADDR` / `ORACLE_KEY` (+ `SIWE_DOMAIN` / `SIWE_CHAIN_ID`) set — see the
+Staked games go through the authenticated Park/Gauntlet/Tournament flows, each
+seat bound to the SIWE-signed-in wallet. The server needs `RPC_URL` /
+`ESCROW_ADDR` / `ORACLE_KEY` (+ `SIWE_DOMAIN` / `SIWE_CHAIN_ID`) set; see the
 demo scripts and [PRODUCTION.md](PRODUCTION.md) for the exact env.
 
 ## Deploy
 
 - **Web** → **Vercel**, Root Directory `apps/web` (env: `NEXT_PUBLIC_SERVER_HTTP`,
   `NEXT_PUBLIC_SERVER_WS`, `NEXT_PUBLIC_WC_PROJECT_ID`).
-- **Game server** → **Fly** (`Dockerfile` + `fly.toml`) — a single stateful
+- **Game server** → **Fly** (`Dockerfile` + `fly.toml`), a single stateful
   machine (`fly scale count 1`); it can't run on Vercel (long-lived WebSockets).
 - **Contract** → Base via `contracts/script/Deploy.s.sol` (auto-picks Base
   mainnet / Base Sepolia USDC).
 
-Full runbook — including the Base Sepolia testnet path and every env var — is in
+The full runbook, including the Base Sepolia testnet path and every env var, is in
 **[PRODUCTION.md](PRODUCTION.md)**.
 
 ## Security model / trust boundary
@@ -201,20 +201,20 @@ You trust the server's **result correctness** (which it controls anyway, as the
 engine and referee), never its **custody**. Funds never touch a platform wallet:
 they live in `ChessEscrow`, and the chain enforces the withdrawal ceiling,
 address-bound payouts, per-game replay guards, and a `claimTimeout`/`claimRefund`
-safety net if the oracle ever goes silent. Wager endpoints require a full
+safety net if the oracle ever goes silent. Staking endpoints require a full
 EIP-4361 (SIWE) session and derive each staked seat from the authenticated
-wallet — never the request body. A full on-chain dispute window (optimistic
+wallet, never the request body. A full onchain dispute window (optimistic
 settlement) and a multisig/threshold oracle are documented next steps in
 [PRODUCTION.md](PRODUCTION.md). Details + audit history in **[AUDIT.md](AUDIT.md)**.
 
 ## Documentation
 
-- **[HANDOFF.md](HANDOFF.md)** — current state + the next task (multi-node). Start here.
-- **[CLAUDE.md](CLAUDE.md)** — agent/dev orientation: build, test, run, gotchas.
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — system, flow, and data diagrams.
-- **[PRODUCTION.md](PRODUCTION.md)** — go-live checklist, deploy runbooks, env, limits.
-- **[AUDIT.md](AUDIT.md)** — four review rounds and remediations.
-- **[DEPLOYMENTS.md](DEPLOYMENTS.md)** — live Base mainnet addresses.
+- **[HANDOFF.md](HANDOFF.md)**: current state + the next task (multi-node). Start here.
+- **[CLAUDE.md](CLAUDE.md)**: agent/dev orientation. Build, test, run, gotchas.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)**: system, flow, and data diagrams.
+- **[PRODUCTION.md](PRODUCTION.md)**: go-live checklist, deploy runbooks, env, limits.
+- **[AUDIT.md](AUDIT.md)**: four review rounds and remediations.
+- **[DEPLOYMENTS.md](DEPLOYMENTS.md)**: live Base mainnet addresses.
 
 ## License
 

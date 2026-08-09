@@ -589,7 +589,7 @@ a.play-now {
   white-space: nowrap;
 }
 
-/* read-only time-control chips (wager mode pages) */
+/* read-only time-control chips (staked mode pages) */
 .tc-chips-wrap {
   display: flex;
   align-items: center;
@@ -851,7 +851,7 @@ pre {
   background: var(--accent);
   color: #fff;
 }
-/* At-a-glance stake/payout disclosure at the point of wager. */
+/* At-a-glance stake/payout disclosure at the point of staking. */
 .stake-callout {
   padding: 9px 11px;
   margin-top: 6px;

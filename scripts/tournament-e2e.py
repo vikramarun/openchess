@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Live E2E money-path smoke test: SETTLED + ABANDONED on-chain tournament.
+"""Live E2E money-path smoke test: SETTLED + ABANDONED onchain tournament.
 
 Exercises the full staked-tournament loop against a *real* stack — local Anvil
 chain, real Postgres, real wallets (Anvil deterministic keys), and the real
-chess-server (SIWE auth, durable settlement outbox, on-chain settlement via the
+chess-server (SIWE auth, durable settlement outbox, onchain settlement via the
 ledger crate). This is the money-path smoke test HANDOFF.md flagged as
 outstanding; run it after any change to the tournament / settlement / escrow path.
 
@@ -11,15 +11,15 @@ Prereqs: anvil, forge, cast (Foundry), psql, a reachable Postgres at $DATABASE_U
 (default postgres://$USER@localhost/chess with migrations applied), and a debug
 build (`cargo build`).
 
-  Test A (settled):  3 players buy in (locked on-chain via enterTournament) ->
+  Test A (settled):  3 players buy in (locked onchain via enterTournament) ->
   organizer starts -> round-by-round round-robin played by chess-client engines ->
-  server aggregates standings -> pool distributed on-chain by settleTournament.
+  server aggregates standings -> pool distributed onchain by settleTournament.
   Asserts bankroll conservation (0% rake => sum preserved) and status=settled.
 
   Test B (abandoned): 3 players buy in -> organizer starts (pool open, status
   running, persisted) -> server KILLED mid-tournament -> restarted -> recovery
   marks it abandoned -> anvil time jumps past the settle window -> each entrant
-  recovers their buy-in on-chain via claimRefund. Asserts full refund + conservation.
+  recovers their buy-in onchain via claimRefund. Asserts full refund + conservation.
 
 Usage:  python3 scripts/tournament-e2e.py
 """
@@ -186,7 +186,7 @@ try:
     tidA = run_tournament("E2E Settled Open")
     after_join = [bankroll(ESCROW, a) for a, _ in PLAYERS]
     print(f"bankrolls after join (1 USDC locked each): {after_join}")
-    assert all(after_join[i] == before[i] - 1_000_000 for i in range(3)), "buy-in not locked on-chain!"
+    assert all(after_join[i] == before[i] - 1_000_000 for i in range(3)), "buy-in not locked onchain!"
     st, r = http("POST", f"/tournaments/{tidA}/start", token=sessions[0])
     assert st == 200, f"start {st}: {r}"
     print(f"started; {len(r)} game(s) in first round")
@@ -194,7 +194,7 @@ try:
     st, t = http("GET", f"/tournaments/{tidA}")
     assert t["status"] == "settled", f"expected settled, got {t['status']}"
     # settle_tournament ENQUEUES to the durable tournament_outbox; the worker
-    # drains it on-chain asynchronously. Poll bankrolls until the pool lands.
+    # drains it onchain asynchronously. Poll bankrolls until the pool lands.
     after = after_join
     for _ in range(40):
         after = [bankroll(ESCROW, a) for a, _ in PLAYERS]
@@ -206,7 +206,7 @@ try:
     print(f"bankrolls after settle: {after}  (sum={sum(after)})")
     assert sum(after) == sum(before), f"NOT CONSERVED: before {sum(before)} != after {sum(after)}"
     assert after != after_join, "pool never distributed (bankrolls unchanged from locked state)"
-    print("TEST A PASS: pool distributed on-chain, funds conserved ✓")
+    print("TEST A PASS: pool distributed onchain, funds conserved ✓")
 
     # ================================================= TEST B: abandoned
     print("\n########## TEST B: ABANDONED TOURNAMENT (restart -> claimRefund) ##########")
@@ -218,7 +218,7 @@ try:
     assert all(lockedB[i] == beforeB[i] - 1_000_000 for i in range(3)), "buy-in not locked!"
     st, r = http("POST", f"/tournaments/{tidB}/start", token=sessions[0])
     assert st == 200, f"start {st}: {r}"
-    print("started (status=running, pool open on-chain). Now KILL server mid-tournament...")
+    print("started (status=running, pool open onchain). Now KILL server mid-tournament...")
     play_until_done(tidB, stop_after_first_round=True)
     time.sleep(1)
     stop_server()
@@ -241,7 +241,7 @@ try:
     afterB = [bankroll(ESCROW, a) for a, _ in PLAYERS]
     print(f"bankrolls after claimRefund: {afterB}")
     assert afterB == beforeB, f"refund incomplete: before {beforeB} != after {afterB}"
-    print("TEST B PASS: abandoned -> every entrant fully refunded on-chain ✓")
+    print("TEST B PASS: abandoned -> every entrant fully refunded onchain ✓")
 
     print("\n=========================================")
     print("ALL LIVE E2E MONEY-PATH TESTS PASSED ✓")

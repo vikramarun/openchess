@@ -1,4 +1,4 @@
-# OpenChess — Security & Correctness Audit
+# OpenChess Security & Correctness Audit
 
 Scope: full repo (Solidity escrow, Rust server/engine/ledger/persistence, Next.js
 web). Method: four independent review passes (contract security, Rust
@@ -10,16 +10,16 @@ Medium/Low = hardening.
 
 ## Overall verdict
 
-Good bones — an IO-free authoritative `game-engine`, a replay-guarded escrow with
+Good bones: an IO-free authoritative `game-engine`, a replay-guarded escrow with
 sound value-conservation, and a transactional outbox. But it is **a trusted-
 operator system in non-custodial clothing**, and the off-chain identity layer is
-not connected to the on-chain money layer. **Not production-ready for real money.**
+not connected to the onchain money layer. **Not production-ready for real money.**
 
 ---
 
 ## CRITICAL
 
-### C1 — The staked wallet is never bound to the authenticated player; wager endpoints are unauthenticated
+### C1: The staked wallet is never bound to the authenticated player; staking endpoints are unauthenticated
 The single most important finding (independently flagged by three of four passes).
 - `/games`, `/park/offers`, `/park/offers/{id}/accept`, `/queue` take `white_addr`/
   `black_addr`/`stake` from the **request body** with no auth, and feed them straight
@@ -35,99 +35,99 @@ The single most important finding (independently flagged by three of four passes
   connection with the same token silently steals the seat (`room.rs:173-177`).
 
 **Impact:** Unauthorized staking of third-party funds; seat hijack; payout to the
-wrong party. **Fix:** require a SIWE session on all wager endpoints; derive seat
+wrong party. **Fix:** require a SIWE session on all staking endpoints; derive seat
 addresses from `wallet_for_token`, never the body; require counterparty consent
 before `open_escrow`; make launch tokens single-use, bound to the authenticated
 wallet, and delivered out of the query string; reject a second attach to an
 occupied seat.
 
-### C2 — Settlement reliability: funds can be stranded or DB/chain can diverge
+### C2: Settlement reliability: funds can be stranded or DB/chain can diverge
 - The outbox worker marks a row `failed` **terminally** on *any* error including
   transient RPC blips, with no retry/backoff (`main.rs:108-145`). A `processing` row
   orphaned by a crash is never re-claimed (claim selects only `pending`).
 - An "already settled" revert (after a crash between submit and mark) is
   misclassified as `failed` though funds actually moved.
-- `open_escrow`/`create_game` failures are **logged and swallowed** — the game still
+- `open_escrow`/`create_game` failures are **logged and swallowed**, so the game still
   plays and later tries to settle against unlocked stake (`main.rs:240,252`).
 - Result-finish then outbox-enqueue are **two non-atomic** DB calls (`room.rs:385,402`).
 - Misconfigured chain creds **silently fall back to the log sink**
-  (`ledger/src/lib.rs:55`): a "healthy" server accepts wagers and never settles them.
+  (`ledger/src/lib.rs:55`): a "healthy" server accepts stakes and never settles them.
 
 **Impact:** Locked funds never released (until `claimTimeout`); reconciliation reads
 wrong status. **Fix:** single transaction for finish+enqueue; classify transient vs
 terminal errors and retry with backoff; reaper for stale `processing`; treat
 already-settled as success; **fail closed** if escrow-open or chain config fails for
-a wagered game.
+a staked game.
 
 ---
 
 ## HIGH
 
 ### Contract (`contracts/src/ChessEscrow.sol`)
-- **H1 — `openGame` allows `white == black`** (`:151`): no equality check, so
+- **H1: `openGame` allows `white == black`** (`:151`): no equality check, so
   `locked[X] += stake` twice → `locked > bankroll` → `available()` underflows and
   reverts, freezing the user; on self-win the player loses `rake`. Add
   `require(white != black)` (and mirror in Rust `open_escrow`).
-- **H2 — `feeRecipient` as a game participant corrupts conservation** (`:182-189`):
+- **H2: `feeRecipient` as a game participant corrupts conservation** (`:182-189`):
   aliasing the fee slot as winner/loser can over-credit the pool → insolvency.
   Forbid `feeRecipient` from playing.
-- **H3 — No `SafeERC20`; USDC blacklist risk** (`:128,137`): raw bool interface; if
+- **H3: No `SafeERC20`; USDC blacklist risk** (`:128,137`): raw bool interface; if
   the contract address is blacklisted the whole pool freezes. Use `SafeERC20`;
   credit deposits by measured balance delta; document the token must be standard USDC.
-- **H4 — Centralized keys, no recovery** (`:106,209`): `owner` can never be
+- **H4: Centralized keys, no recovery** (`:106,209`): `owner` can never be
   transferred (no `transferOwnership`), no `pause`, single `oracle` key controls all
   outcomes. Add `Ownable2Step` + `Pausable`; make the oracle a multisig/threshold key.
-- **H5 — Signed result has no `deadline`; domain separator pins `chainId` at
+- **H5: Signed result has no `deadline`; domain separator pins `chainId` at
   construction** (`:53,111-121`): mempool-captured signatures are valid forever; fork
   replay possible. Add a `deadline` to `GameResult`; recompute the domain separator
   when `block.chainid` changes.
 
 ### Server / auth
-- **H6 — SIWE verification is too weak** (`auth.rs:63-91`): only checks a `Nonce:`
+- **H6: SIWE verification is too weak** (`auth.rs:63-91`): only checks a `Nonce:`
   line was issued and that the signature recovers *some* address. It ignores domain,
   URI, chainId, expiry, and never checks the recovered address equals the message's
   address line → phishing/cross-app replay; no expiry. Parse and verify the full
   EIP-4361 message.
-- **H7 — Room task panics on `self.game.unwrap()`** (`room.rs:217,377`): a panic
+- **H7: Room task panics on `self.game.unwrap()`** (`room.rs:217,377`): a panic
   silently bricks a game (no result, no settlement, locked funds). Use graceful
   `let Some(...) else`.
-- **H8 — Unbounded in-memory state + no rate limiting**: `tokens`, `rooms`,
+- **H8: Unbounded in-memory state + no rate limiting**: `tokens`, `rooms`,
   `park`, `tickets`, `tournaments` (`main.rs`/`matchmaking.rs`) and `nonces`,
   `sessions` (`auth.rs`) are never evicted; finished rooms are never removed. Trivial
   memory-exhaustion DoS via unauthenticated `/auth/nonce`, `/games`, `/queue`. Add
   TTL/eviction + rate limiting.
-- **H9 — CORS `permissive()` on a money API** (`main.rs:96`): any origin can drive
+- **H9: CORS `permissive()` on a money API** (`main.rs:96`): any origin can drive
   all (unauthenticated) endpoints. Restrict to known origins.
 
 ---
 
 ## MEDIUM
 
-- **M1 — Results are oracle-asserted, not verifiable.** `server_sig` on `GameOver`
+- **M1: Results are oracle-asserted, not verifiable.** `server_sig` on `GameOver`
   is always `None` and `result_hash` uses a non-cryptographic `DefaultHasher`
   (`room.rs:424,449`). A malicious operator can sign the loser as winner within an
-  open game with no on-chain/off-chain proof to the contrary. Use a cryptographic
-  commitment over the signed move log; consider an on-chain dispute window.
-- **M2 — Financial-integrity cheating is unaddressed.** Two wallets one operator
+  open game with no onchain/off-chain proof to the contrary. Use a cryptographic
+  commitment over the signed move log; consider an onchain dispute window.
+- **M2: Financial-integrity cheating is unaddressed.** Two wallets one operator
   controls can wash-trade/launder by dumping a staked game (rake-only cost); no
   Sybil/rating/collusion controls. Reject same-controller seats; add ratings/limits.
-- **M3 — No reconnection.** `Resume`/`Heartbeat` are no-ops (`ws.rs:110`); a network
+- **M3: No reconnection.** `Resume`/`Heartbeat` are no-ops (`ws.rs:110`); a network
   blip flags you and loses the stake. Implement resume or a disconnect grace.
-- **M4 — Input validation / overflow.** `initial_secs * 1_000` can overflow `u64`
+- **M4: Input validation / overflow.** `initial_secs * 1_000` can overflow `u64`
   (`main.rs:179`, `matchmaking.rs:47`); no max stake / time-control bounds;
   `U256 → u128` stake narrowing can panic (`main.rs:220`). Validate and bound inputs.
-- **M5 — Transport & token handling.** Defaults are `ws://`/`http://` (no TLS); the
+- **M5: Transport & token handling.** Defaults are `ws://`/`http://` (no TLS); the
   player token rides in the URL query; the session token sits in `localStorage`
   (XSS-exfiltratable). Enforce `wss`/`https`; move tokens off the query; prefer an
   httpOnly cookie or short-lived in-memory token.
-- **M6 — Fee can change mid-game** (`ChessEscrow.sol:185`): rake read at settle time;
+- **M6: Fee can change mid-game** (`ChessEscrow.sol:185`): rake read at settle time;
   snapshot `feeBps` at `openGame`.
 
 ---
 
 ## LOW / NOTES
 
-- Deterministic colors (poster / earlier-joiner always White) — minor wager fairness.
+- Deterministic colors (poster / earlier-joiner always White): a minor fairness issue.
 - `settleGame` vs `claimTimeout` race once timeout elapses lets a loser force a refund.
 - `zero-stake` games use `stake != 0` as the existence sentinel (`openGame` `:153`).
 - WalletConnect `projectId` ships a `"demo-project-id"` placeholder.
@@ -146,14 +146,14 @@ a wagered game.
   stubbed** (`tourney_start` passes `wager: None`; no standings/payout; the escrow has
   no pooled-prize method). The README's "Not yet wired" section is honest, but the
   summary contradicts it.
-- **"non-custodial":** true for *custody*, misleading for *outcome authority* — the
+- **"non-custodial":** true for *custody*, misleading for *outcome authority*, since the
   operator dictates results within an open game.
 
 ## Engineering hygiene
 
 No CI; no LICENSE file (despite `license.workspace`); no graceful shutdown; no
 metrics; `ledger` has a compile-time dependency on the git-ignored `contracts/out/`
-(clean checkout won't `cargo build` before `forge build` — vendor the ABI or use a
+(clean checkout won't `cargo build` before `forge build`; vendor the ABI or use a
 `build.rs`); outbox failures terminal; zero tests in the `server` crate (where C1
 lives).
 
@@ -161,17 +161,17 @@ lives).
 
 ## Prioritized remediation roadmap
 
-1. **C1** — bind seats to authenticated wallets; gate wager endpoints on SIWE;
+1. **C1**: bind seats to authenticated wallets; gate staking endpoints on SIWE;
    single-use wallet-bound tokens off the query string. *(blocks everything)*
-2. **C2 / H7** — transactional + retrying outbox; fail-closed on escrow/config; no
+2. **C2 / H7**: transactional + retrying outbox; fail-closed on escrow/config; no
    panics in the room task.
-3. **Contract H1–H5** — `white != black`, exclude fee addr, `SafeERC20`,
+3. **Contract H1–H5**: `white != black`, exclude fee addr, `SafeERC20`,
    `Ownable2Step`+`Pausable`+multisig oracle, `deadline` in `GameResult`.
-4. **H6 / H8 / H9** — full EIP-4361 verification; TTL/eviction + rate limiting;
+4. **H6 / H8 / H9**: full EIP-4361 verification; TTL/eviction + rate limiting;
    lock down CORS.
-5. **M1** — verifiable results (sign the move-log commitment; dispute window).
-6. **M2–M6** — anti-collusion, reconnection, input bounds, TLS/token handling.
-7. **Hygiene** — CI (Postgres service + `forge build` before `cargo`), LICENSE,
+5. **M1**: verifiable results (sign the move-log commitment; dispute window).
+6. **M2–M6**: anti-collusion, reconnection, input bounds, TLS/token handling.
+7. **Hygiene**: CI (Postgres service + `forge build` before `cargo`), LICENSE,
    graceful shutdown, metrics, `server`/`byo-client` test coverage; correct README.
 
 Production-ready today: `game-engine`, `ChessEscrow` conservation/refund logic,
@@ -187,7 +187,7 @@ deployment/ops or explicit product follow-ups.
 
 | Finding | Status | Notes |
 |---|---|---|
-| C1 seat↔wallet binding | Fixed | Wager endpoints require SIWE; seats = authed wallet; `/games` casual-only; identical seats rejected; seat-occupancy guard blocks concurrent hijack. |
+| C1 seat↔wallet binding | Fixed | Staking endpoints require SIWE; seats = authed wallet; `/games` casual-only; identical seats rejected; seat-occupancy guard blocks concurrent hijack. |
 | C2 settlement reliability | Fixed | Transactional finish+enqueue; retry w/ attempt cap; stale-row reaper; idempotent already-settled; fail-closed on escrow/config. |
 | H1 white==black | Fixed | Contract + Rust guards. |
 | H2 feeRecipient as player | Fixed | Rejected in `openGame`. |
@@ -198,11 +198,11 @@ deployment/ops or explicit product follow-ups.
 | H7 room panics | Fixed | `unwrap()`s removed; graceful guards. |
 | H8 unbounded state / rate limit | Fixed (mem) / deferred (rate limit) | Room/token/offer/ticket/nonce/session eviction + TTL sweep. Edge rate-limiting left to deployment. |
 | H9 CORS | Fixed | Restricted to `WEB_ORIGIN` (default `localhost:3000`). |
-| M1 result verifiability | Partly | `result_hash` now SHA-256 over the move log. `server_sig` to clients + on-chain dispute window TODO. |
+| M1 result verifiability | Partly | `result_hash` now SHA-256 over the move log. `server_sig` to clients + onchain dispute window TODO. |
 | M2 collusion/wash-trading | Deferred | Same-wallet seats rejected; rating/Sybil controls are product follow-ups. |
 | M3 reconnection | Fixed | `Detach` on drop + resend-state on re-attach (clock still runs during disconnect, by design). |
 | M4 input bounds | Fixed | Time-control + stake bounds; overflow-safe. |
-| M5 transport/token | Partly | Launch tokens remain **bearer capabilities** (not wallet-bound), but the seat's *funds* are fixed to the authenticated wallet at escrow open — a leaked token cannot redirect winnings, only throw the game. Concurrent hijack is blocked by the seat-occupancy guard, and the staked-offer's white token is only returned to the authenticated poster. Wallet-bound/single-use tokens, token-off-query, and wss/TLS remain deployment/product follow-ups. |
+| M5 transport/token | Partly | Launch tokens remain **bearer capabilities** (not wallet-bound), but the seat's *funds* are fixed to the authenticated wallet at escrow open, so a leaked token cannot redirect the payout, only throw the game. Concurrent hijack is blocked by the seat-occupancy guard, and the staked-offer's white token is only returned to the authenticated poster. Wallet-bound/single-use tokens, token-off-query, and wss/TLS remain deployment/product follow-ups. |
 | M6 fee mid-game | Fixed | `feeBps` snapshotted at `openGame`. |
 | Hygiene (LICENSE/CI/shutdown/tests) | Fixed | MIT LICENSE, GitHub Actions CI (Postgres + forge-before-cargo), graceful shutdown, server unit tests, README corrected. |
 
@@ -225,7 +225,7 @@ critical/drain bug; the genuine findings were fixed:
 | SIWE hardcoded Chain ID 8453 (breaks Base Sepolia / real domains); errors swallowed | High (FE) | Fixed | Chain id from the connected chain; sign-in errors surfaced in the UI. |
 | WalletConnect projectId placeholder fails silently | Med (FE) | Fixed | Warns loudly in-browser when unset (injected wallets still work). |
 | Spectator move-apply could throw and kill the WS loop | Low (FE) | Fixed | Legality-guarded apply + try/catch; plus WS reconnect with backoff. |
-| Session token in localStorage; no money UI yet | Med (FE) | Noted | Acceptable today (token gates nothing on-chain); move to httpOnly cookie before any funds-gating UI ships. |
+| Session token in localStorage; no money UI yet | Med (FE) | Noted | Acceptable today (token gates nothing onchain); move to httpOnly cookie before any funds-gating UI ships. |
 
 Confirmed correct by the audit: pooled-at-entry solvency, settle-vs-refund
 mutual exclusion, cross-tournament pool isolation, Merkle leaf double-hash
@@ -235,7 +235,7 @@ fail-closed on the money endpoints. Test count after round 2: **42** (20 Rust +
 
 ---
 
-## Round 3 — final audit + production-readiness
+## Round 3: final audit + production-readiness
 
 A third full audit (contract pre-deploy, backend ops-readiness, frontend + WASM
 engine) found **no remaining fund-loss bug**. Code-fixable items were fixed; the
@@ -252,7 +252,7 @@ rest are operator/infra actions tracked in `PRODUCTION.md`.
 - Frontend: WASM engine load-failure handling (`worker.onerror` rejects ready);
   resilient play client (resign instead of silent stall on engine failure /
   `move_rejected`); SRI on CDN stylesheets; client-only wagmi config (kills the
-  `indexedDB` prerender warning); honest "beta" labeling of wager modes.
+  `indexedDB` prerender warning); honest "beta" labeling of the staked modes.
 
 **Flagged to the operator (see `PRODUCTION.md`):** third-party contract audit;
 deploy+verify with chosen params; HSM/KMS oracle key + multisig/timelock owner;
@@ -273,8 +273,8 @@ live-verified:
 - **Client-verifiable results.** The oracle EIP-191-signs each game's
   `result_hash`; `GameOver` carries `server_sig` and the server publishes the
   signer at `GET /oracle`. The web app recovers the signer (viem) and shows a
-  "✓ Verified — signed by oracle 0x…" badge. Ledger test
-  `signs_and_recovers_result_commitment` proves the round-trip. (A full on-chain
+  "✓ Verified, signed by oracle 0x…" badge. Ledger test
+  `signs_and_recovers_result_commitment` proves the round-trip. (A full onchain
   *dispute window* / optimistic fraud-proof remains future work.)
 - **Tournament restart durability.** Tournaments + pairings are persisted
   (`tournaments`, `tournament_games`); on boot `recover_tournaments` re-derives
@@ -296,13 +296,13 @@ always equals the sum of tracked bankrolls; `locked ≤ bankroll`), which held
 across 128k random calls; plus a **conservation fuzz** test and a
 **signature-malleability** (upper-half-`s`) test. 25 Foundry tests total.
 
-**Security review — one High finding, now fixed; rest verified sound.**
+**Security review: one High finding, now fixed; the rest verified sound.**
 
 - **[Fixed] Tournament seat tokens leaked to unauthenticated callers (High).**
   `GET /tournaments/{id}` and `POST /tournaments/{id}/start` returned every
   game's `white_token`/`black_token`. A launch token is the sole authorization
   for a WebSocket seat, so anyone could connect to any entrant's game and throw
-  it — steering standings and thus the on-chain pool payout to other entrants.
+  it, steering standings and thus the onchain pool payout to other entrants.
   (The same class of bug was already guarded for 1v1 in `park_get`.) **Fix:**
   tokens are `#[serde(skip)]` in the public view; each entrant fetches only its
   own seat token via the authenticated `GET /tournaments/{id}/my-games` (wallet
@@ -319,7 +319,7 @@ across 128k random calls; plus a **conservation fuzz** test and a
 
 Remaining (tracked, not security-blocking): Swiss/knockout tournament pairing
 (only round-robin is implemented, though the UI advertises both). The
-Merkle-claim and refund browser UIs have since shipped —
+Merkle-claim and refund browser UIs have since shipped;
 `apps/web/components/TournamentClaim.tsx` calls both `claimTournament` and
 `claimRefund`, surfaced next to the bankroll by `ClaimWinnings.tsx`.
 
@@ -328,17 +328,17 @@ Merkle-claim and refund browser UIs have since shipped —
 
 ## Round 5: production incident review (first real deploy)
 
-Not an audit — findings from putting the thing in front of users. Every one was
+Not an audit, but findings from putting the thing in front of users. Every one was
 already documented somewhere, already had a mitigation, and happened anyway,
 because nothing enforced them. That pattern is the actual finding.
 
 | Finding | Sev | Status | Fix |
 |---|---|---|---|
-| Server ran as a two-machine HA pair | High (availability/auth) | Fixed | All live state is per-process, so the proxy alternating between machines meant a SIWE nonce issued by A failed to verify on B — intermittent sign-in 401s indistinguishable from a client bug — and park offers appeared/vanished per refresh. `deploy-server.sh` now asserts the machine count; `singlenode.rs` independently watches `<app>.internal` and pages. |
-| Server ran with no `DATABASE_URL` while `wager_enabled` | High (durability) | Fixed | No persistence and no settlement-outbox workers (they only spawn when a DB exists), so wagers settled "best-effort inline" with no retry — one transient RPC failure would strand a stake until `claimTimeout`. `/ready` now fails on money-live-without-DB, and `REQUIRE_ONCHAIN=1` refuses the boot. |
+| Server ran as a two-machine HA pair | High (availability/auth) | Fixed | All live state is per-process, so the proxy alternating between machines meant a SIWE nonce issued by A failed to verify on B. That produced intermittent sign-in 401s indistinguishable from a client bug, and park offers appeared/vanished per refresh. `deploy-server.sh` now asserts the machine count; `singlenode.rs` independently watches `<app>.internal` and pages. |
+| Server ran with no `DATABASE_URL` while `wager_enabled` | High (durability) | Fixed | No persistence and no settlement-outbox workers (they only spawn when a DB exists), so stakes settled "best-effort inline" with no retry, and one transient RPC failure would strand a stake until `claimTimeout`. `/ready` now fails on money-live-without-DB, and `REQUIRE_ONCHAIN=1` refuses the boot. |
 | `/ready` reported healthy with no database | Med | Fixed | It pinged the DB only `if let Some(db)`, so a DB-less node was indistinguishable from a healthy one. This is *why* the finding above went unnoticed. |
-| A stale bearer silently became anonymous | Med | Fixed | Auth is optional on casual offers, so an expired session posted an offer with no `poster_addr`. That broke the client's self-match guard (which keys on that field) and the server's same-wallet rejection (which needs both addresses) — the house bot repeatedly played itself. `authed_wallet_strict` now 401s a present-but-invalid credential; a genuinely anonymous caller is still allowed. |
-| Expired session dead-ended the web UI | Med (UX) | Fixed | The 401 above surfaced as an unrecoverable error until a manual sign-out — landing on every returning user the day after a deploy, since sessions are in-memory with a 24h TTL. `authedFetch` drops the rejected token so the UI re-renders signed-out. |
+| A stale bearer silently became anonymous | Med | Fixed | Auth is optional on casual offers, so an expired session posted an offer with no `poster_addr`. That broke the client's self-match guard (which keys on that field) and the server's same-wallet rejection (which needs both addresses), so the house bot repeatedly played itself. `authed_wallet_strict` now 401s a present-but-invalid credential; a genuinely anonymous caller is still allowed. |
+| Expired session dead-ended the web UI | Med (UX) | Fixed | The 401 above surfaced as an unrecoverable error until a manual sign-out, landing on every returning user the day after a deploy, since sessions are in-memory with a 24h TTL. `authedFetch` drops the rejected token so the UI re-renders signed-out. |
 | Published `v0.1.0` shipped a client that matched its own challenge | Med | Fixed | `compatible()` decided "not mine" from `poster_addr`, which is null on casual offers, so the check failed open. Now keyed on the offer id we posted. Re-tagged and republished. |
 
 Nothing here touched fund safety: the money paths failed closed throughout, and

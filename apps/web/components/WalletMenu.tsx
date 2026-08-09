@@ -17,9 +17,9 @@ export function WalletMenu() {
   return <WalletMenuInner />;
 }
 
-/** Top-right bankroll widget: a balance pill you refill. Clicking it opens the
+/** Top-right balance widget: a balance pill you refill. Clicking it opens the
  *  deposit / withdraw popover (the existing BankrollPanel). Only shown on a
- *  wagering server once a wallet is connected — the funds live in escrow. */
+ *  staked server once a wallet is connected — the funds live in escrow. */
 function WalletMenuInner() {
   const { isConnected } = useAccount();
   const { config, wagerOn } = useOnchainConfig();
@@ -53,7 +53,7 @@ function WalletMenuInner() {
         className="wallet-pill"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title="Bankroll — deposit or withdraw USDC"
+        title="Balance: deposit or withdraw USDC"
       >
         <span className="wp-coin">◈</span>
         <span className="wp-amt">{available != null ? fmtUsdc(available) : "—"}</span>

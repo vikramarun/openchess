@@ -8,10 +8,10 @@ import { useEnsureChain } from "@/lib/useEnsureChain";
 
 const ZERO32 = `0x${"0".repeat(64)}`;
 
-/** Collect a tournament's on-chain proceeds for the connected wallet: a Merkle
- *  payout claim for a root-settled field, or a buy-in refund for one that never
- *  settled past the timeout. Both credit the wallet's escrow bankroll (withdraw
- *  via the Bankroll panel). Renders nothing unless the wallet actually entered
+/** Collect a tournament's onchain proceeds for the connected wallet: a Merkle
+ *  payout claim for a root-settled field, or an entry refund for one that never
+ *  settled past the timeout. Both credit the wallet's escrow balance (withdraw
+ *  via the Balance panel). Renders nothing unless the wallet actually entered
  *  this tournament and has something to do — safe to drop on any finished card. */
 export function TournamentClaim({
   tid,
@@ -25,7 +25,7 @@ export function TournamentClaim({
   status: string;
   escrow: `0x${string}`;
   chainId: number;
-  /** Optional tournament name shown above the action (for the bankroll list). */
+  /** Optional tournament name shown above the action (for the balance list). */
   label?: string;
   /** Reports whether this tournament actually renders a claimable action, so a
    *  parent list can hide its header when nothing is claimable. */
@@ -124,7 +124,7 @@ export function TournamentClaim({
               : null;
 
   // Already-claimed is informational only, so it doesn't count toward showing
-  // the parent's "Tournament winnings" header.
+  // the parent's "Payouts & refunds" header.
   const hasAction = kind != null && kind !== "claimed";
   useEffect(() => {
     onResolved?.(hasAction);
@@ -142,7 +142,7 @@ export function TournamentClaim({
       refetchTourn();
       refetchClaimed();
     } catch (e: any) {
-      setError(e?.shortMessage ?? e?.message ?? "transaction failed");
+      setError(e?.shortMessage ?? e?.message ?? "Transaction failed.");
     } finally {
       setBusy(false);
     }
@@ -189,7 +189,7 @@ export function TournamentClaim({
       </button>
     );
   } else if (kind === "refund") {
-    // Never settled past the timeout → reclaim the buy-in.
+    // Never settled past the timeout → reclaim the entry.
     node = (
       <button className="ghost" onClick={doRefund} disabled={busy}>
         {busy ? "Refunding…" : `Claim refund · ${fmtUsdc(buyIn)} USDC`}

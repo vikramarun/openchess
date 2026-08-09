@@ -3,7 +3,7 @@
 #   fly launch --no-deploy --copy-config --ha=false --name openchess   # first time
 #   fly postgres create --name openchess-db                            # managed Postgres
 #   fly postgres attach openchess-db                                   # sets DATABASE_URL
-#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...      # on-chain (wagering)
+#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...      # onchain (staked play)
 #   fly deploy --ha=false                                              # ALWAYS --ha=false
 #   fly scale count 1                                                  # exactly ONE instance
 #   fly machines list                                                  # verify: one machine
