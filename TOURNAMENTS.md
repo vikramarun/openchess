@@ -281,7 +281,7 @@ token.balanceOf(escrow) == sum(bankroll) + sum(tournament pools)
 
 ---
 
-## Part 3 — admission control — **SERVER BUILT, NO UI YET**
+## Part 3 — admission control — **BUILT**
 
 `Admission::{Open, Invite, Approval}` in
 [matchmaking.rs](crates/server/src/matchmaking.rs), migration
@@ -297,8 +297,16 @@ unlock. And approval is keyed on the **wallet even for a casual tournament**,
 whose entrant id is a self-chosen display name: approving a name would approve a
 string anyone else could type.
 
-Remaining: the organizer UI (mint/see codes, approve/reject requests) and the
-joiner's side (enter a code, ask to be let in, see where you stand).
+The UI: a "Who can join" picker on the create form, an `invite only` / `approval`
+badge on the lobby card (with Join removed there, since joining now needs input
+the card has no room for), a Join panel on the detail view covering all four
+joiner states, and `TournamentAdmission` for the organizer — mint and copy
+codes, or approve and decline requests.
+
+One thing found while wiring it: the join originally answered **202** for a
+pending applicant, and `fetch` counts 202 as `ok` — so the client sailed past it
+and told them they had joined. Every not-admitted case is now a 403, and the
+client words it from `my_admission` rather than from the status.
 
 The creator picks one. All three are per-tournament settings, chosen at create.
 

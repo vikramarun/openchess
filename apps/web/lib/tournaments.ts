@@ -56,8 +56,27 @@ export type Tournament = {
   /** The prize pool in USDC base units — entries plus sponsorship. `null` when
    *  there is no pool. A free event is `buy_in: "0"` with a pool here. */
   pool: string | null;
+  /** Who may join. The MODE is public (a joiner has to know to bring a code);
+   *  the codes themselves are organizer-only and never appear here. */
+  admission: Admission;
+  /** Where the CALLING wallet stands with an approval-gated tournament. Only
+   *  the detail route fills this in — the lobby list is shared by every client
+   *  and has no caller, so it is always undefined there. */
+  my_admission?: ApprovalState;
   age_secs: number;
 };
+
+/** Who may join a tournament. Mirrors the server's `Admission`. */
+export type Admission = "open" | "invite" | "approval";
+
+/** Where a wallet stands with an approval-gated tournament. */
+export type ApprovalState = "pending" | "approved" | "rejected";
+
+/** Is this wallet the organizer? Compared against the WALLET, never the casual
+ *  display-name identity — every gate-management route is wallet-authenticated,
+ *  so offering the panel on a name match would show buttons that 403. */
+export const isOrganizer = (t: Pick<Tournament, "organizer">, address?: string): boolean =>
+  !!t.organizer && !!address && t.organizer.toLowerCase() === address.toLowerCase();
 
 /** What kind of tournament this is.
  *
@@ -146,6 +165,10 @@ function normalize(id: string, view: Partial<Omit<Tournament, "id">>): Tournamen
     // has no intention of sending. Absent means "don't show one".
     prizes: Array.isArray(view.prizes) ? view.prizes : [],
     pool: view.pool ?? null,
+    // A server that predates admission control had no gates at all, so `open`
+    // is what such a tournament actually is — not a guess.
+    admission: view.admission === "invite" || view.admission === "approval" ? view.admission : "open",
+    my_admission: view.my_admission,
     age_secs: view.age_secs ?? 0,
   };
 }

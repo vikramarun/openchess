@@ -6,6 +6,7 @@ import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
 import { SponsorPool } from "@/components/SponsorPool";
+import { TournamentAdmission } from "@/components/TournamentAdmission";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
@@ -19,14 +20,17 @@ import {
   PAYOUT_PRESETS,
   presetLabel,
 } from "@/lib/payouts";
+import { requestSeat } from "@/lib/admission";
 import {
   casualIdentity,
   fetchTournament,
   fetchTournaments,
   rememberCasualIdentity,
   hasPrizePool,
+  isOrganizer,
   kindOf,
   sameEntrant,
+  type Admission,
   type Standing,
   type Tournament,
   type TournamentGame,
@@ -134,6 +138,11 @@ function TournamentClient() {
   // rules the server enforces) before the request goes out.
   const [payoutChoice, setPayoutChoice] = useState<string>(PAYOUT_PRESETS[0].label);
   const [payoutCustom, setPayoutCustom] = useState("");
+  const [admission, setAdmission] = useState<Admission>("open");
+  // Joiner side of a gated tournament: the code being entered, and whether an
+  // approval request is in flight.
+  const [inviteCode, setInviteCode] = useState("");
+  const [requesting, setRequesting] = useState(false);
   const [casualName, setCasualName] = useState("");
 
   // Casual entrant identity, mirrored from localStorage so a reload doesn't turn
@@ -350,6 +359,7 @@ function TournamentClient() {
           initial_secs: tc.initial,
           increment_secs: tc.inc,
           payout: payoutDraft,
+          admission,
         }),
       });
       if (!r.ok)
@@ -369,7 +379,7 @@ function TournamentClient() {
     }
   };
 
-  const join = async (t: Tournament, asBot = false) => {
+  const join = async (t: Tournament, asBot = false, invite?: string) => {
     setErr(null);
     if ((t.buy_in || asBot) && !token)
       return setErr(
@@ -389,6 +399,7 @@ function TournamentClient() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           player,
+          ...(invite ? { invite } : {}),
           ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : { engine: browserSeat().engine }),
         }),
       });
@@ -404,7 +415,20 @@ function TournamentClient() {
                   ? BOT_OFFLINE_MSG
                   : r.status === 409
                     ? "That display name is already taken in this tournament."
-                    : `Couldn’t join (${r.status}).`,
+                    : // The admission gate. The server answers 403 for every
+                      // not-admitted case and never a 2xx — `fetch` counts 202
+                      // as ok, so a "you're still pending" success code would be
+                      // read here as a completed join. Which case it is comes
+                      // from `my_admission`, not the status.
+                      r.status === 403
+                      ? t.admission === "invite"
+                        ? "That invite code isn’t valid — it may already have been used."
+                        : t.my_admission === "pending"
+                          ? "Your request is still waiting on the organizer."
+                          : t.my_admission === "rejected"
+                            ? "The organizer declined this request."
+                            : "Ask the organizer to let you in first."
+                      : `Couldn’t join (${r.status}).`,
         );
         return;
       }
@@ -494,6 +518,114 @@ function TournamentClient() {
             </span>
           )}
         </div>
+
+        {openT.status === "open" && !entrant && (
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <b style={{ color: "var(--text-strong)" }}>Join</b>
+            {openT.admission === "approval" ? (
+              <div style={{ marginTop: 8 }}>
+                {openT.my_admission === "approved" ? (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span className="muted" style={{ fontSize: 13 }}>
+                      You&apos;re approved.
+                    </span>
+                    <button className="primary" onClick={() => join(openT)}>
+                      Join
+                    </button>
+                    {bot.online && (
+                      <button className="ghost" onClick={() => join(openT, true)}>
+                        🤖 Join with bot
+                      </button>
+                    )}
+                  </div>
+                ) : openT.my_admission === "pending" ? (
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    Waiting for the organizer to let you in. Nothing has been charged —
+                    you&apos;ll join after they approve.
+                  </span>
+                ) : openT.my_admission === "rejected" ? (
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    The organizer declined this request.
+                  </span>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button
+                      className="primary"
+                      disabled={requesting || !token}
+                      onClick={async () => {
+                        setErr(null);
+                        setRequesting(true);
+                        try {
+                          await requestSeat(openT.id);
+                          // my_admission comes from the detail poll; pull it now
+                          // rather than leaving the button looking unclicked.
+                          const fresh = await fetchTournament(openT.id);
+                          setTourneys((prev) => prev.map((x) => (x.id === fresh.id ? fresh : x)));
+                        } catch {
+                          setErr("Couldn’t send that request.");
+                        } finally {
+                          setRequesting(false);
+                        }
+                      }}
+                    >
+                      {requesting ? "Asking…" : "Ask to join"}
+                    </button>
+                    <span className="muted" style={{ fontSize: 13 }}>
+                      {token
+                        ? "The organizer decides. Asking costs nothing."
+                        : "Sign in (top right) to ask — approval is tied to your wallet."}
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : openT.admission === "invite" ? (
+              <div style={{ marginTop: 8 }}>
+                <div className="offer-form" style={{ margin: 0 }}>
+                  <label className="of-field" style={{ flex: 1 }}>
+                    <span className="muted">Invite code</span>
+                    <input
+                      value={inviteCode}
+                      onChange={(e) => setInviteCode(e.target.value.trim())}
+                      placeholder="paste the code the organizer sent you"
+                    />
+                  </label>
+                  <button
+                    className="primary"
+                    disabled={!inviteCode}
+                    onClick={() => join(openT, false, inviteCode)}
+                  >
+                    Join
+                  </button>
+                  {bot.online && (
+                    <button
+                      className="ghost"
+                      disabled={!inviteCode}
+                      onClick={() => join(openT, true, inviteCode)}
+                    >
+                      🤖 Join with bot
+                    </button>
+                  )}
+                </div>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Each code lets one entrant in.
+                </span>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button className="primary" onClick={() => join(openT)}>
+                  Join
+                </button>
+                {bot.online && (
+                  <button className="ghost" onClick={() => join(openT, true)}>
+                    🤖 Join with bot
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {isOrganizer(openT, address) && <TournamentAdmission t={openT} />}
 
         {/* Anyone may add to the pool, entrant or not, while the field is still
             playing for it. Not once the tournament is `complete`: settlement is
@@ -719,6 +851,18 @@ function TournamentClient() {
               <option value={CUSTOM_PAYOUT}>Custom…</option>
             </select>
           </label>
+          <label className="of-field">
+            <span className="muted">Who can join</span>
+            <select
+              value={admission}
+              onChange={(e) => setAdmission(e.target.value as Admission)}
+              style={{ minWidth: 170 }}
+            >
+              <option value="open">Anyone</option>
+              <option value="invite">Invite code only</option>
+              <option value="approval">I approve each entrant</option>
+            </select>
+          </label>
           {payoutChoice === CUSTOM_PAYOUT && (
             <label className="of-field" style={{ flex: 1 }}>
               <span className="muted">Shares, best first (%)</span>
@@ -730,6 +874,12 @@ function TournamentClient() {
             </label>
           )}
         </div>
+        {admission !== "open" && !token && (
+          <div className="muted" style={{ fontSize: 12, marginTop: 4, color: "#e0a06c" }}>
+            Sign in (top right) first — minting codes and approving entrants are the
+            organizer&apos;s, so a gated tournament needs one.
+          </div>
+        )}
         <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
           {payoutErr ? (
             <span style={{ color: "#e06c6c" }}>{payoutErr}</span>
@@ -772,6 +922,21 @@ function TournamentClient() {
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
                       <Terms t={t} />{" "}
+                      {t.admission !== "open" && (
+                        <>
+                          ·{" "}
+                          <span
+                            className="tag"
+                            title={
+                              t.admission === "invite"
+                                ? "You need an invite code from the organizer"
+                                : "The organizer approves each entrant"
+                            }
+                          >
+                            {t.admission === "invite" ? "invite only" : "approval"}
+                          </span>{" "}
+                        </>
+                      )}
                       · {t.players.length} entrant{t.players.length === 1 ? "" : "s"}
                       {t.total_rounds > 0 &&
                         ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}
@@ -783,6 +948,7 @@ function TournamentClient() {
                   <div className="tc-actions">
                     {t.status === "open" &&
                       !joined &&
+                      t.admission === "open" &&
                       (t.buy_in && available != null && available < BigInt(t.buy_in) ? (
                         <span className="muted" title="Deposit more USDC to join">
                           need {fmtUsdc(t.buy_in)}

@@ -1929,13 +1929,14 @@ async fn tourney_join(
                     .to_lowercase();
                 let ts = state.0.lobby.tournaments.lock();
                 let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-                match t.approvals.get(&wallet) {
-                    Some(ApprovalState::Approved) => {}
-                    // 403 for a decision that has been made, 404-ish semantics
-                    // for one that hasn't — the client shows different copy for
-                    // "waiting on the organizer" than for "you were turned down".
-                    Some(ApprovalState::Pending) => return Err(StatusCode::ACCEPTED),
-                    _ => return Err(StatusCode::FORBIDDEN),
+                // One status for every not-approved case — pending, declined,
+                // never asked. Deliberately NOT a 2xx for "pending": `fetch`
+                // treats 202 as success, so a client checking `r.ok` would sail
+                // past it and tell the applicant they had joined. Which case it
+                // is comes from `my_admission` on the detail view, where the
+                // client can word it properly.
+                if t.approvals.get(&wallet) != Some(&ApprovalState::Approved) {
+                    return Err(StatusCode::FORBIDDEN);
                 }
             }
             Admission::Invite => {
@@ -5126,8 +5127,9 @@ mod tests {
                 )
                 .await
             ),
-            StatusCode::ACCEPTED,
-            "pending is distinguishable from refused"
+            StatusCode::FORBIDDEN,
+            "pending is refused like any other not-approved state — and NOT with a \
+             2xx, which `fetch` would report to the applicant as a successful join"
         );
 
         // Only the organizer decides.
