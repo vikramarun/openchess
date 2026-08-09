@@ -123,14 +123,23 @@ export function TournamentClaim({
   const refundReady =
     refundable && !settled && settleTimeout != null && now > openedAt + settleTimeout && !hasClaimed;
 
+  // A root-settled winner is authorized by their Merkle PROOF, not by an onchain
+  // entry: a free-entry (sponsor-funded) event never calls `enterTournament` for
+  // its players (nothing to lock), so `hasEntered` is false for them — gating the
+  // claim on it would strand every free-event prize behind a hand-written
+  // contract call. `claimTournament` itself checks only the proof. So a wallet
+  // with a proof may act even without an entry; the entry gate still guards the
+  // refund/pending branches, which genuinely need a locked buy-in to return.
+  const canClaim = rootSet && !!proof;
+
   // Single source of truth for what this tournament shows — both the rendered
   // node and the parent's header gate derive from it (no duplicated conditions).
   const kind: "claimed" | "claim" | "refund" | "pending" | null =
-    !enabled || !exists || !hasEntered
+    !enabled || !exists || (!hasEntered && !canClaim)
       ? null
       : hasClaimed
         ? "claimed"
-        : rootSet && proof
+        : canClaim
           ? "claim"
           : refundReady
             ? "refund"
@@ -173,7 +182,11 @@ export function TournamentClaim({
     try {
       await ensureChain(expected);
       const hash = await fn();
-      await publicClient!.waitForTransactionReceipt({ hash });
+      // waitForTransactionReceipt RESOLVES for a reverted tx (it only rejects on
+      // timeout/RPC error), so check the status — otherwise a reverted claim or
+      // refund would silently refetch and look like it worked.
+      const receipt = await publicClient!.waitForTransactionReceipt({ hash });
+      if (receipt.status === "reverted") throw new Error("The transaction reverted onchain.");
       refetchTourn();
       refetchClaimed();
       refetchSponsored();
@@ -189,6 +202,8 @@ export function TournamentClaim({
     address &&
     run(() =>
       writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "claimTournament",
@@ -200,6 +215,8 @@ export function TournamentClaim({
     address &&
     run(() =>
       writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "claimRefund",
@@ -211,6 +228,8 @@ export function TournamentClaim({
     address &&
     run(() =>
       writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "refundSponsorship",

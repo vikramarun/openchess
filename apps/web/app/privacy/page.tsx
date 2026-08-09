@@ -8,7 +8,7 @@ import { BRAND_NAME, GITHUB_URL, LEGAL_UPDATED } from "@/lib/brand";
 export const metadata: Metadata = {
   title: "Privacy Policy",
   description:
-    "What OpenChess knows about you: a wallet address, the games you played, and nothing else. No accounts, no tracking cookies, no analytics.",
+    "What OpenChess knows about you: a wallet address and the games you played. No account to create on our servers, no tracking cookies, no analytics.",
   alternates: { canonical: "/privacy" },
 };
 
@@ -19,9 +19,12 @@ export default function PrivacyPage() {
       <p className="legal-meta muted">Last updated {LEGAL_UPDATED}</p>
 
       <p className="legal-lede">
-        There is no account here. You are a wallet address and a list of games. We ask for no
-        email, no name and no password, we set no tracking cookies, and we run no analytics or
-        advertising scripts of any kind.
+        There is no account to create on our servers: to us you are a wallet address and a list of
+        games. We store no email, no name and no password, we set no tracking cookies, and we run
+        no analytics or advertising scripts of any kind. One exception is worth stating up front —
+        if you sign in with email or Google rather than a browser wallet, our login provider
+        creates a wallet for you and receives that email or Google identity. See{" "}
+        <b>Signing in</b> below.
       </p>
 
       <h2>What we hold</h2>
@@ -51,10 +54,12 @@ export default function PrivacyPage() {
 
       <h2>What we don’t</h2>
       <p>
-        No email addresses, no passwords, no phone numbers, no payment details — a stake never
-        touches a card or a bank, only your own wallet. No advertising or analytics SDKs, no
-        third-party trackers, no profile built across other websites, and nothing sold or shared
-        for marketing.
+        No passwords, no phone numbers, no payment details — a stake never touches a card or a
+        bank, only your own wallet. No advertising or analytics SDKs, no third-party trackers, no
+        profile built across other websites, and nothing sold or shared for marketing. The one
+        personal identifier that can enter the picture is an email or Google account, and only if
+        you choose that way to sign in — it is handled by our login provider, not stored in our
+        game database. See <b>Signing in</b>.
       </p>
 
       <h2>Technical data</h2>
@@ -72,6 +77,20 @@ export default function PrivacyPage() {
         and your sign-in session all live in this browser’s local storage, and any opening book
         you upload lives in its IndexedDB. Clearing site data resets all of it. Signing out
         deletes the session.
+      </p>
+
+      <h2>Signing in</h2>
+      <p>
+        We use <b>Dynamic</b> (dynamic.xyz) to handle sign-in. Connecting a browser wallet you
+        already have just asks that wallet to sign a message — we receive only your address and
+        the signature, no email. Choosing <b>email or Google</b> instead has Dynamic verify that
+        identity and create an embedded wallet for you: in that case Dynamic receives your email
+        address or Google account and holds a share of that wallet’s keys, under{" "}
+        <a href="https://www.dynamic.xyz/privacy-policy" target="_blank" rel="noopener noreferrer">
+          its own privacy policy
+        </a>
+        . Either way, what reaches our own systems is still just a wallet address and a
+        signature.
       </p>
 
       <h2>Wallets and the blockchain</h2>

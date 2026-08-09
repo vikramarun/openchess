@@ -254,18 +254,24 @@ export function rememberCasualIdentity(tid: string, player: string): void {
 
 /** What to call an entrant.
  *
- *  An entrant id is either a wallet (buy-in) or a chosen nickname (casual), and
- *  `labels` maps the ones whose seat has a claimed username. Falls back to a
- *  shortened address for a wallet and to the nickname itself otherwise — never
- *  to a raw 42-character id, which is what the standings printed before the
- *  server started resolving handles.
+ *  An entrant id is either a wallet (buy-in) or a chosen nickname (casual). The
+ *  server resolves a label for every entrant (`labels`): a claimed username, a
+ *  short address, or a guest's `~`-decorated nickname. This is the authority —
+ *  prefer it always.
+ *
+ *  The fallback only fires when the server sent no label (an old server, or a DB
+ *  hiccup). Even then a raw nickname must never be shown undecorated: a guest
+ *  could have typed a real user's handle, and rendering it bare would read as
+ *  that user. So decorate it with `~` here too, matching the server (`~` is
+ *  outside the username charset, so it can never collide with a real handle).
  *
  *  Shared so the crosstable, the pairings and the organizer's request list all
  *  say the same thing about the same person. */
 export function entrantLabel(t: Pick<Tournament, "labels">, id: string): string {
   const named = t.labels[id] ?? t.labels[id.toLowerCase()];
   if (named) return named;
-  return isAddress(id.toLowerCase()) ? shortAddress(id) : id;
+  if (isAddress(id.toLowerCase())) return shortAddress(id);
+  return id.startsWith("~") ? id : `~${id}`;
 }
 
 /** Entrant ids are compared case-insensitively everywhere on the server. */

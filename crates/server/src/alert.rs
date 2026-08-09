@@ -11,6 +11,42 @@
 //! after an aborted dispatch, and the settlement outbox giving up — mean funds
 //! are stuck, and until now nobody would notice. See HANDOFF.md.
 
+/// Strip anything that looks like a URL from alert text.
+///
+/// Settlement failure alerts interpolate raw provider error chains (`{e:#}` /
+/// `{msg}`), and an alloy/reqwest error's `Display` includes the request URL —
+/// which for a keyed RPC endpoint (Alchemy/Infura style) carries the API key in
+/// its path. The alert destination is operator-configured but third-party
+/// (Slack/Discord/Telegram) and may be logged or indexed there, so scrub URLs
+/// before the message leaves the process. Not the oracle key (that never reaches
+/// an error string), but no secret should ride an alert out unnecessarily.
+fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        // Earliest scheme wins ("http://" is not a substring of "https://", so
+        // the two never overlap). `find` yields a char-boundary byte index.
+        let next = ["https://", "http://"]
+            .iter()
+            .filter_map(|s| rest.find(s))
+            .min();
+        match next {
+            Some(idx) => {
+                out.push_str(&rest[..idx]);
+                out.push_str("[redacted-url]");
+                let after = &rest[idx..];
+                let end = after.find(char::is_whitespace).unwrap_or(after.len());
+                rest = &after[end..];
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Send an alert if a webhook is configured. Safe to call from any async
 /// context on the tokio runtime; returns immediately.
 pub fn fire(text: impl Into<String>) {
@@ -20,7 +56,7 @@ pub fn fire(text: impl Into<String>) {
     if url.trim().is_empty() {
         return;
     }
-    let text = text.into();
+    let text = redact(&text.into());
     tokio::spawn(async move {
         let body = serde_json::json!({ "text": text, "content": text });
         let res = reqwest::Client::new()
@@ -46,4 +82,30 @@ pub fn fire(text: impl Into<String>) {
             Ok(_) => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn redact_strips_keyed_rpc_urls_but_keeps_the_message() {
+        let msg = "settlement failed: error sending request for url \
+                   (https://base-mainnet.g.alchemy.com/v2/SECRETKEY123): timeout";
+        let out = redact(msg);
+        assert!(!out.contains("SECRETKEY123"), "API key survived: {out}");
+        assert!(!out.contains("alchemy.com"), "host survived: {out}");
+        assert!(out.contains("settlement failed"));
+        assert!(out.contains("timeout"), "text after the url was dropped: {out}");
+        assert!(out.contains("[redacted-url]"));
+    }
+
+    #[test]
+    fn redact_handles_multiple_urls_and_no_url() {
+        let out = redact("a http://x.io/1 b https://y.io/2 c");
+        assert_eq!(out, "a [redacted-url] b [redacted-url] c");
+        assert_eq!(redact("no urls here"), "no urls here");
+        // A URL at the very end (no trailing whitespace) is still scrubbed whole.
+        assert_eq!(redact("see https://z.io/p?k=1"), "see [redacted-url]");
+    }
 }

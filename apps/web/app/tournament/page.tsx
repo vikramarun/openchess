@@ -347,6 +347,23 @@ function TournamentClient() {
       } catch {
         return setErr("Enter a valid USDC entry fee.");
       }
+      // parseUsdc ROUNDS to the 6-decimal base unit, so a sub-micro fee like
+      // "0.0000001" silently becomes "0" — turning a paid event the creator
+      // intended into a free, sponsor-funded one. Only an explicit "0" means
+      // free entry; anything else that lands on zero is a mistake.
+      if (buyInBase === "0" && buyIn.trim() !== "0") {
+        return setErr(
+          "That entry fee rounds to nothing (the minimum is 0.000001 USDC). Enter a larger amount, or exactly 0 for a free, sponsor-funded event.",
+        );
+      }
+      // A free-entry event (entry "0", real sponsor pool) must be gated: costless
+      // entry + Open admission lets throwaway entrants drain the pool. Mirror the
+      // server's guard here so the creator gets a clear message, not a bare 400.
+      if (buyInBase === "0" && admission === "open") {
+        return setErr(
+          "A free-entry event needs an invite or approval gate — otherwise anyone could join for free and split the sponsored pool. Set admission to invite-only or approval.",
+        );
+      }
     }
     try {
       const r = await authedFetch(`${SERVER_HTTP}/tournaments`, {

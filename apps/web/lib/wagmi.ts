@@ -23,10 +23,17 @@ import { base, baseSepolia } from "wagmi/chains";
 // wall. Filter/enable wallets by connector KEY, never by name — the name is
 // display text that Dynamic can localise or rename.
 export const wagmiConfig = createConfig({
-  // Mainnet only unless a build opts in: a production visitor whose wallet sits
-  // on Base Sepolia should meet the wrong-network guard, not a first-class chain
-  // offer. The manual web check in scripts/test-sepolia-tournament.sh documents
-  // setting the flag.
+  // Mainnet only unless a build opts in. Note the consequence: wagmi only tracks
+  // a connector's chain if it is in THIS list, so with `[base]` alone
+  // `useChainId()` always reports 8453 even for a wallet parked elsewhere, and a
+  // `chainId !== expected` guard can never fire (the AuthButton "wrong network"
+  // branch and `useEnsureChain`'s switch are both dead in prod). The real
+  // protection therefore lives at each write: every `writeContractAsync` passes
+  // `chainId: base.id`, so viem checks the wallet's LIVE chain at send time and
+  // throws a clean ChainMismatchError instead of silently transmitting on the
+  // wrong chain (which then hangs a Base-pinned receipt wait forever). Keep that
+  // param on any new write. The manual web check in
+  // scripts/test-sepolia-tournament.sh documents setting the testnet flag.
   chains: process.env.NEXT_PUBLIC_ENABLE_TESTNET === "1" ? [base, baseSepolia] : [base],
   ssr: true,
   multiInjectedProviderDiscovery: false,

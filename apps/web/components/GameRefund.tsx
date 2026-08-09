@@ -89,12 +89,17 @@ export function GameRefund({
     try {
       await ensureChain(expected);
       const hash = await writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "claimTimeout",
         args: [idHex],
       });
-      await publicClient!.waitForTransactionReceipt({ hash });
+      // waitForTransactionReceipt RESOLVES for a reverted tx, so check the
+      // status — a reverted claim otherwise refetches and looks like success.
+      const receipt = await publicClient!.waitForTransactionReceipt({ hash });
+      if (receipt.status === "reverted") throw new Error("The refund reverted onchain.");
       refetch();
     } catch (e: any) {
       setError(e?.shortMessage ?? e?.message ?? "Transaction failed.");

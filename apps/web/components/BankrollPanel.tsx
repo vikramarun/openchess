@@ -96,21 +96,29 @@ export function BankrollPanel({
       if (((allowance as bigint) ?? 0n) < amt) {
         setStage("approving USDC…");
         const h = await writeContractAsync({
+          chainId: expected,
+          account: address,
           address: token as `0x${string}`,
           abi: ERC20_ABI,
           functionName: "approve",
           args: [escrow, amt],
         });
-        await publicClient!.waitForTransactionReceipt({ hash: h });
+        const ra = await publicClient!.waitForTransactionReceipt({ hash: h });
+        // A receipt RESOLVES even for a reverted tx — check the status or a
+        // reverted approve would be followed by a doomed deposit.
+        if (ra.status === "reverted") throw new Error("The approval reverted onchain.");
       }
       setStage("depositing…");
       const h2 = await writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "deposit",
         args: [amt],
       });
-      await publicClient!.waitForTransactionReceipt({ hash: h2 });
+      const rd = await publicClient!.waitForTransactionReceipt({ hash: h2 });
+      if (rd.status === "reverted") throw new Error("The deposit reverted onchain.");
       setAmount("");
       refetchAll();
     } catch (e: any) {
@@ -137,12 +145,15 @@ export function BankrollPanel({
       await ensureChain(expected);
       setStage("withdrawing…");
       const h = await writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "withdraw",
         args: [amt],
       });
-      await publicClient!.waitForTransactionReceipt({ hash: h });
+      const rw = await publicClient!.waitForTransactionReceipt({ hash: h });
+      if (rw.status === "reverted") throw new Error("The withdrawal reverted onchain.");
       setAmount("");
       refetchAll();
     } catch (e: any) {

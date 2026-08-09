@@ -142,13 +142,21 @@ export function Lobby({
     let alive = true;
     const tick = async () => {
       try {
-        const [o, l] = await Promise.all([
-          fetch(`${SERVER_HTTP}/park/offers`).then((r) => (r.ok ? r.json() : [])),
-          fetch(`${SERVER_HTTP}/games/live`).then((r) => (r.ok ? r.json() : [])),
+        const [ro, rl] = await Promise.all([
+          fetch(`${SERVER_HTTP}/park/offers`),
+          fetch(`${SERVER_HTTP}/games/live`),
         ]);
-        if (alive) {
-          setOffers(o);
-          setLive(l);
+        // A non-OK response (most likely a 429 when many clients share one IP)
+        // carries no data — HOLD the last snapshot rather than replacing it with
+        // an empty array, which would render "no open challenges / nobody live"
+        // and silently degrade the house-bot Play card to its demo. Only a
+        // thrown fetch is real unreachability, handled below.
+        const o = ro.ok ? await ro.json() : null;
+        const l = rl.ok ? await rl.json() : null;
+        if (!alive) return;
+        if (o !== null) setOffers(o);
+        if (l !== null) setLive(l);
+        if (o !== null && l !== null) {
           // A healthy poll retracts the unreachable banner; without this a
           // 3-second blip left a red error latched under the Play card while
           // the lobby quietly repopulated behind it. Only the connectivity
@@ -228,12 +236,17 @@ export function Lobby({
   // when the modal opens is all the label needs, and it costs a request per
   // modal open rather than one every three seconds per visitor.
   useEffect(() => {
-    if (view !== "quickplay" || !pickTc || offers.length > 0) return;
+    if (view !== "quickplay" || !pickTc) return;
     let alive = true;
+    // Re-read on every open / clock change, not just when `offers` is empty: a
+    // house seat can be taken or the bot can go offline between opens, and a
+    // once-only fetch would keep promising "Play the House Bot" from stale ids
+    // for the whole mount, then drop the clicker into the demo instead. Hold the
+    // last list on a non-OK response rather than blanking it.
     fetch(`${SERVER_HTTP}/park/offers`)
-      .then((r) => (r.ok ? r.json() : []))
+      .then((r) => (r.ok ? r.json() : null))
       .then((o) => {
-        if (alive) setOffers(o);
+        if (alive && o !== null) setOffers(o);
       })
       .catch(() => {
         /* the label falls back to the demo wording, which playNow honours */
@@ -241,7 +254,7 @@ export function Lobby({
     return () => {
       alive = false;
     };
-  }, [view, pickTc, offers.length]);
+  }, [view, pickTc]);
 
   // Whether the House Bot has a free seat standing at the picked clock — it
   // decides what the modal's instant-play button honestly promises.
@@ -255,16 +268,16 @@ export function Lobby({
   // down) does it fall back to /play — and the button says so.
   const playNow = async (tc: TimeControl) => {
     setErr(null);
+    // ALWAYS read fresh before committing to a real seat vs the demo — the
+    // cached `offers` can be seconds-to-minutes stale (the modal may have sat
+    // open), and acting on a dead house-seat id gives a join error instead of
+    // either a game or the demo fallback. A failed read falls back to `offers`.
     let pool = offers;
-    if (pool.length === 0) {
-      // The modal can be reached before the first offers poll lands; one
-      // direct read beats sending an early clicker to the demo by accident.
-      try {
-        const r = await fetch(`${SERVER_HTTP}/park/offers`);
-        if (r.ok) pool = await r.json();
-      } catch {
-        /* fall through to the demo */
-      }
+    try {
+      const r = await fetch(`${SERVER_HTTP}/park/offers`);
+      if (r.ok) pool = await r.json();
+    } catch {
+      /* keep the cached list; fall through to the demo if it yields no seat */
     }
     const group = houseOfferGroup(groupOffers(pool), tc.initial, tc.inc, config?.houseWallet);
     if (group) return acceptOffer(group);

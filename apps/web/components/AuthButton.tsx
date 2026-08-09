@@ -6,6 +6,7 @@ import { useAccount, useAccountEffect, useChainId } from "wagmi";
 
 import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { authAddress, authToken, clearAuth } from "@/lib/escrow";
+import { useAuthToken } from "@/lib/useAuthToken";
 import { signInWithEthereum } from "@/lib/siwe";
 import { playerLabel } from "@/lib/playerLabel";
 import { usePlayerCard } from "@/lib/usePlayerCard";
@@ -49,7 +50,16 @@ function AuthButtonInner() {
   // user has no ENS name or avatar to fall back on, so without a username the
   // chip has only the pawn glyph and a hex address to show them.
   const { photo, username } = usePlayerCard(address);
-  const [signedIn, setSignedIn] = useState(false);
+  // Derive sign-in from the reactive session token, NOT a local snapshot. The
+  // token can be cleared out from under this component by authedFetch's 401
+  // self-heal (a server redeploy voids every session) via `clearAuth()`, which
+  // fires AUTH_EVENT — `useAuthToken` re-reads on it. A local `signedIn` state
+  // set only on sign-in/disconnect would stay stuck "signed in" after such a
+  // clear, so the chip would keep showing an account while every authed action
+  // 401s, with no in-app way to re-sign. Reading the token here means the header
+  // drops back to "Finish sign-in" the instant the session goes away.
+  const authTok = useAuthToken();
+  const signedIn = !!authTok && !!address && authAddress() === address.toLowerCase();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -59,22 +69,21 @@ function AuthButtonInner() {
   // Latest connected address, readable from inside async callbacks.
   const addressRef = useRef(address);
 
-  // Recompute sign-in state from storage on account change. Drop a token that
-  // belongs to a different wallet OR a legacy token with no bound address
-  // (pre-address-binding sessions) — both force a clean re-sign for this wallet.
+  // On account change, drop a token that belongs to a different wallet OR a
+  // legacy token with no bound address (pre-address-binding sessions) — both
+  // force a clean re-sign for this wallet. `clearAuth` fires AUTH_EVENT, so the
+  // derived `signedIn` above updates on its own; no local state to reset here.
   useEffect(() => {
     addressRef.current = address;
     const key = address?.toLowerCase() ?? null;
     if (key && authToken() && authAddress() !== key) clearAuth();
-    setSignedIn(!!authToken() && !!key && authAddress() === key);
     signTried.current = null;
     setError(null);
   }, [address]);
 
   useAccountEffect({
     onDisconnect() {
-      clearAuth();
-      setSignedIn(false);
+      clearAuth(); // fires AUTH_EVENT → derived `signedIn` clears
     },
   });
 
@@ -87,12 +96,13 @@ function AuthButtonInner() {
       await ensureChain(expected);
       await signInWithEthereum(address, expected, signMessageAsync);
       // The account may have switched while the signature was pending — never
-      // claim signed-in for a wallet the token wasn't issued to.
+      // keep a session for a wallet the token wasn't issued to. On success,
+      // `signInWithEthereum` already called `setAuth` (which fires AUTH_EVENT),
+      // so the derived `signedIn` flips true without a local setter.
       if (addressRef.current?.toLowerCase() !== signingFor) {
         clearAuth();
         return;
       }
-      setSignedIn(true);
     } catch (e: any) {
       // Dynamic swallows some connector-level failures, so log the raw error as
       // well as showing the short form — otherwise a wallet that silently
