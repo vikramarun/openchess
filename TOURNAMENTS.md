@@ -1,8 +1,10 @@
 # Tournaments — respec
 
-_Status: **Part 1 + the dispatch prerequisite are implemented.** Part 2
-(sponsorship) and Part 3 (admission control) are still proposed — both wait on
-the contract v2 decision._
+_Status: **all three parts and the dispatch prerequisite are built** (PR #58).
+Part 1 and Part 3 run on the live contract. Part 2 does not: sponsorship needs
+**contract v2, which is not deployed** — see the warning at the top of
+[DEPLOYMENTS.md](DEPLOYMENTS.md). Merging before v2 ships puts free-entry and
+sponsorship UI in front of users against a v1 contract, where both fail._
 
 Two asks drive this:
 
