@@ -16,6 +16,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
 (cd apps/web && pnpm test:move)   # what a seat sends: never an illegal move
+(cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 cargo run -p server                # game server on 127.0.0.1:8080

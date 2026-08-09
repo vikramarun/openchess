@@ -74,4 +74,7 @@ jobs:
           # illegal — which the seat used to resign over.
           pnpm test:openings
           pnpm test:move
+          # One bestmove answers one `go`. Broadcasting it let an abandoned
+          # search answer for a live one, with a move for the wrong position.
+          pnpm test:engine
           pnpm build

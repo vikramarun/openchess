@@ -24,32 +24,9 @@ export {};
 import { Chess } from "chessops/chess";
 
 import { replayHistory, toStandardUci, anyLegalUci } from "../lib/uci";
+import { FakeSocket, install } from "./fakeSocket";
 
-type Sent = Record<string, unknown>;
-
-class FakeSocket {
-  static last: FakeSocket | null = null;
-  sent: Sent[] = [];
-  closed = false;
-  onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onmessage: ((ev: { data: string }) => void | Promise<void>) | null = null;
-  constructor(public url: string) {
-    FakeSocket.last = this;
-  }
-  send(raw: string) {
-    this.sent.push(JSON.parse(raw));
-  }
-  close() {
-    this.closed = true;
-  }
-  async deliver(msg: Sent) {
-    await this.onmessage?.({ data: JSON.stringify(msg) });
-    await new Promise((r) => setTimeout(r, 0));
-  }
-}
-(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeSocket;
+install();
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -83,6 +60,7 @@ class StubEngine {
   async resync() {
     this.resyncs++;
   }
+  stopSearch() {}
 }
 
 // 1.e4 e5 2.Nf3 Nc6 3.Bc4 Nf6 4.O-O — off the curated book at 3...Nf6, and the

@@ -79,6 +79,8 @@ export function parseInfoLine(line: string): EngineInfo | null {
 export class BrowserEngine {
   private worker: Worker;
   private listeners: ((line: string) => void)[] = [];
+  /** Waiters for `bestmove`, oldest first — one per outstanding `go`. */
+  private bestmoveWaiters: ((uci: string) => void)[] = [];
   private ready: Promise<void>;
   /** Serializes analyse() searches on the single worker. */
   private analysisQueue: Promise<void> = Promise.resolve();
@@ -95,6 +97,17 @@ export class BrowserEngine {
     this.worker.onmessage = (e: MessageEvent) => {
       const line: string =
         typeof e.data === "string" ? e.data : (e.data && e.data.data) || "";
+      // A `bestmove` answers exactly ONE `go`, in order, so it goes to exactly
+      // one waiter — the oldest. Fanning it out like every other line would let
+      // an abandoned search answer for a live one: a caller that gave up
+      // waiting leaves its search running, and its late `bestmove` would then
+      // resolve the NEXT search too, with a move for the previous position.
+      // Illegal, rejected by the server, and historically resigned over.
+      const best = line.match(/^bestmove\s+(\S+)/);
+      if (best) {
+        this.bestmoveWaiters.shift()?.(best[1]);
+        return;
+      }
       for (const l of [...this.listeners]) l(line);
     };
     // If the worker script fails to load / instantiate, reject `ready` so the
@@ -157,7 +170,10 @@ export class BrowserEngine {
   /** Drop the engine's accumulated search state (`ucinewgame` clears the hash
    *  and the position) and wait for it to settle. The recovery path for a seat
    *  whose engine has gone out of sync with the real game — a dropped command,
-   *  a move it refused to parse — before deciding the engine is unusable. */
+   *  a move it refused to parse — before deciding the engine is unusable.
+   *
+   *  Call it only with the worker idle: `ucinewgame` during a search is
+   *  undefined behaviour in UCI. `stopSearch()` first if one may be running. */
   async resync(): Promise<void> {
     await this.ready;
     this.send("ucinewgame");
@@ -174,24 +190,27 @@ export class BrowserEngine {
     this.send(pos);
     const result = new Promise<string>((resolve, reject) => {
       const to = setTimeout(() => {
-        cleanup();
+        // Drop our slot in the queue, or every later search would be answered
+        // one bestmove late for the rest of the game.
+        this.bestmoveWaiters = this.bestmoveWaiters.filter((w) => w !== fn);
         reject(new Error("bestmove timeout"));
       }, 120000);
-      const fn = (line: string) => {
-        const m = line.match(/^bestmove\s+(\S+)/);
-        if (m) {
-          clearTimeout(to);
-          cleanup();
-          resolve(m[1]);
-        }
+      const fn = (uci: string) => {
+        clearTimeout(to);
+        resolve(uci);
       };
-      const cleanup = () => {
-        this.listeners = this.listeners.filter((l) => l !== fn);
-      };
-      this.listeners.push(fn);
+      this.bestmoveWaiters.push(fn);
     });
     this.send(goCmd);
     return result;
+  }
+
+  /** End the search in flight early. The engine answers with a `bestmove` as
+   *  usual, so the pending `bestMove*` promise still resolves and the worker is
+   *  left clean — which is the point: a caller that has stopped waiting for a
+   *  search must not leave it running. */
+  stopSearch() {
+    this.send("stop");
   }
 
   /** Best move (UCI) for the given move history under a fixed think time. */
@@ -273,17 +292,18 @@ export class BrowserEngine {
           settled = true;
           clearTimeout(cap);
           clearTimeout(hardStop);
-          this.listeners = this.listeners.filter((l) => l !== fn);
+          this.listeners = this.listeners.filter((l) => l !== info);
+          this.bestmoveWaiters = this.bestmoveWaiters.filter((w) => w !== done);
           stopSearch = null;
           resolve();
         };
-        const fn = (line: string) => {
-          if (line.startsWith("bestmove")) {
-            finish();
-            return;
-          }
-          const info = parseInfoLine(line);
-          if (info && !cancelled) onInfo(info);
+        // This search is a `go` like any other, so it claims a slot in the
+        // bestmove queue; the score lines still come through as ordinary
+        // broadcast output.
+        const done = () => finish();
+        const info = (line: string) => {
+          const parsed = parseInfoLine(line);
+          if (parsed && !cancelled) onInfo(parsed);
         };
         // `stop` makes the engine emit `bestmove`, which is what actually
         // releases the worker for the next search.
@@ -291,7 +311,8 @@ export class BrowserEngine {
         const cap = setTimeout(() => this.send("stop"), maxMs);
         // Backstop: a worker that never answers must not wedge the queue.
         const hardStop = setTimeout(finish, maxMs + 15000);
-        this.listeners.push(fn);
+        this.listeners.push(info);
+        this.bestmoveWaiters.push(done);
         this.send(`go depth ${depth}`);
       });
       if (!cancelled) onDone?.();

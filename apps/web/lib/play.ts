@@ -33,15 +33,27 @@ async function retryAfterResync(
   replay: Replay,
   movetimeMs: number,
 ): Promise<string | null> {
+  let cap: ReturnType<typeof setTimeout> | undefined;
   try {
     await engine.resync();
+    const search = engine.bestMove(replay.history, movetimeMs);
+    // Cap the wait, then STOP the search rather than walking away from it: an
+    // abandoned search keeps running, and its late bestmove would be waiting in
+    // the queue when the next ply asks a question of its own.
     const again = await Promise.race([
-      engine.bestMove(replay.history, movetimeMs),
-      new Promise<null>((r) => setTimeout(() => r(null), movetimeMs + 2000)),
+      search,
+      new Promise<null>((r) => {
+        cap = setTimeout(() => {
+          engine.stopSearch();
+          r(null);
+        }, movetimeMs + 2000);
+      }),
     ]);
     return again ? toStandardUci(replay.pos, again) : null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(cap);
   }
 }
 
@@ -133,6 +145,16 @@ export function playSeat(
             // plays the rest of the game a ply behind (see lib/uci.ts).
             const replay = replayHistory(m.moves_uci ?? []);
             const history: string[] = replay?.history ?? m.moves_uci ?? [];
+            if (!replay) {
+              // We could not replay the SERVER's own history, so this seat is
+              // flying blind for the rest of the game: no book, and no way to
+              // check its own move before sending it. Say so — the alternative
+              // is losing on a rejected move with nothing in the log.
+              console.warn(
+                `[openchess] cannot replay the game history at ply ${m.ply}; ` +
+                  `book and move validation are off for this seat`,
+              );
+            }
             // Opening book first: play known lines instantly instead of burning
             // clock on move 1. Falls through to the engine once out of book.
             const booked = replay ? legalBookMove(replay.pos, history) : null;
