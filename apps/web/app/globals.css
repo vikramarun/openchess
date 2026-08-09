@@ -1442,6 +1442,59 @@ table.standings tr.me td {
   color: var(--text-strong);
   font-family: ui-monospace, monospace;
 }
+/* A username is a name, not a hash. The monospace above is there because this
+   line normally holds a hex address; when it holds a handle instead, keeping it
+   would render "alice" like a checksum. */
+.profile-head .who-name {
+  font-family: inherit;
+  letter-spacing: -0.01em;
+}
+
+/* Player search: the typeahead under the lookup input. */
+.ps-list {
+  position: absolute;
+  z-index: 30; /* under .modal-overlay (50) and the sticky header (40) */
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+}
+.ps-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+}
+.ps-list li.on {
+  background: var(--panel-2, rgb(255 255 255 / 6%));
+}
+.ps-av {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: #3a3833;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  overflow: hidden;
+}
+.ps-av img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 /* Both ladders side by side at the right of the profile head. Two tiles where
    there used to be one, so the head has to be allowed to wrap on a phone. */
 .rating-pair {

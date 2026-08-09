@@ -178,6 +178,17 @@ pub struct RateLimits {
     /// purpose — sharing it would mean changing your photo eats the budget you
     /// need to start a game.
     pub avatar: TokenBucket,
+    /// Username claims and renames (`PUT /profile/username`). Wallet-keyed like
+    /// `avatar`, and separate from it for the same reason `avatar` is separate
+    /// from `create`: settling on a photo must not eat the budget you need to
+    /// pick a name.
+    ///
+    /// Tighter in sustained rate and slightly smaller in burst than `avatar`,
+    /// because of what this actually meters. A *successful* rename is rare by
+    /// construction — the 7-day cooldown sees to that — so nearly every request
+    /// here is someone hunting for a free name, and each attempt is a write
+    /// against a unique index.
+    pub username: TokenBucket,
     /// Concurrent `/ws/agent` (bot control) sockets.
     pub agent_conns: ConnGate,
     /// Concurrent `/ws/game` (player + spectator) sockets.
@@ -247,6 +258,10 @@ impl RateLimits {
                 env_parse("RL_AVATAR_BURST", 12),
                 env_parse("RL_AVATAR_PER_SEC", 0.1),
             ),
+            username: TokenBucket::new(
+                env_parse("RL_USERNAME_BURST", 10),
+                env_parse("RL_USERNAME_PER_SEC", 0.05),
+            ),
             agent_conns: ConnGate::new(
                 env_parse("RL_AGENT_CONNS_MAX", 512),
                 env_parse("RL_AGENT_CONNS_PER_IP", 16),
@@ -304,7 +319,9 @@ impl RateLimits {
         self.create.sweep();
         self.ws.sweep();
         self.reads.sweep();
+        self.polls.sweep();
         self.avatar.sweep();
+        self.username.sweep();
     }
 }
 

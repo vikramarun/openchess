@@ -4,11 +4,11 @@ import { DynamicUserProfile, useDynamicContext } from "@dynamic-labs/sdk-react-c
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAccount, useAccountEffect, useChainId } from "wagmi";
 
-import { shortAddress } from "@/lib/address";
 import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { authAddress, authToken, clearAuth } from "@/lib/escrow";
 import { signInWithEthereum } from "@/lib/siwe";
-import { useAvatar } from "@/lib/useAvatar";
+import { playerLabel } from "@/lib/playerLabel";
+import { usePlayerCard } from "@/lib/usePlayerCard";
 import { useDynamicSigner } from "@/lib/useDynamicSigner";
 import { useEnsureChain } from "@/lib/useEnsureChain";
 import { useMounted } from "@/lib/useMounted";
@@ -43,10 +43,12 @@ function AuthButtonInner() {
 
   const { config, wagerOn } = useOnchainConfig();
   const expected = config?.chainId ?? null;
-  // The photo this wallet uploaded, if any. An email/Google user has no ENS name
-  // or avatar to fall back on, so this and the pawn glyph are the only two
-  // states the chip has.
-  const photo = useAvatar(address);
+  // The photo and handle this wallet set here, if any — one request for both,
+  // since they come off the same `/players/{addr}` row. Both are what the user
+  // chose *on this site*, which matters more now than it did: an email/Google
+  // user has no ENS name or avatar to fall back on, so without a username the
+  // chip has only the pawn glyph and a hex address to show them.
+  const { photo, username } = usePlayerCard(address);
   const [signedIn, setSignedIn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -178,7 +180,7 @@ function AuthButtonInner() {
         ) : (
           <span className="chip-av chip-av-fallback">♟</span>
         )}
-        <span>{shortAddress(address)}</span>
+        <span>{playerLabel({ username, address })}</span>
       </button>
     );
   }
