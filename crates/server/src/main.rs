@@ -506,10 +506,25 @@ where
 /// traffic", so it must fail whenever the node is running but cannot honor its
 /// durability guarantee.
 async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode> {
+    // Memo of the last DB ping. /ready is unauthenticated (Fly's checks and the
+    // deploy script must never be throttled away from it), so without this
+    // every stray external hit costs a round-trip from the 10-connection pool.
+    static READY_MEMO: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+    const READY_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
     match &state.0.db {
         // Configured: pull the node from the load balancer if Postgres is gone.
         Some(db) => {
-            if db.ping().await.is_err() {
+            let memoed = (*READY_MEMO.lock()).filter(|(at, _)| at.elapsed() < READY_MEMO_TTL);
+            let ok = match memoed {
+                Some((_, ok)) => ok,
+                None => {
+                    let ok = db.ping().await.is_ok();
+                    *READY_MEMO.lock() = Some((std::time::Instant::now(), ok));
+                    ok
+                }
+            };
+            if !ok {
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
         }
@@ -619,7 +634,7 @@ async fn live_games(
         .cloned()
         .collect();
     // Newest first.
-    list.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+    list.sort_by_key(|g| std::cmp::Reverse(g.created_ms));
     Ok(Json(list))
 }
 
@@ -1038,11 +1053,20 @@ impl AppState {
 
         // Persist the game row. For a wagered game this must succeed (fail-closed).
         if let Some(db) = &self.0.db {
-            let pwager = wager.map(|w| PgWager {
-                white_addr: w.white.to_string(),
-                black_addr: w.black.to_string(),
-                stake: Decimal::from(w.stake.to::<u128>()),
-            });
+            let pwager = match wager {
+                Some(w) => Some(PgWager {
+                    white_addr: w.white.to_string(),
+                    black_addr: w.black.to_string(),
+                    // Already bounded by the MAX_STAKE check above; try_from is
+                    // for the caller that one day skips it — a 400 beats a
+                    // panicking cast in the one function every mode funnels
+                    // through.
+                    stake: Decimal::from(
+                        u128::try_from(w.stake).map_err(|_| StatusCode::BAD_REQUEST)?,
+                    ),
+                }),
+                None => None,
+            };
             if let Err(e) = db
                 .create_game(
                     game_id,

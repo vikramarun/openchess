@@ -1385,6 +1385,13 @@ struct Tournament {
     entrant_bots: HashMap<String, BotEntry>,
     /// Self-declared engine per entrant (player id -> sanitized label).
     entrant_engines: HashMap<String, String>,
+    /// Signed-in wallet per entrant (player id -> lowercased wallet). This is
+    /// what puts a CASUAL tournament's finished games in the entrant's history
+    /// and moves their casual Elo — a buy-in entrant's id already IS a wallet,
+    /// and a bot's rides its BotEntry. Persisted (migration 0016): games
+    /// dispatched after a restart must stay attributed, unlike the display-only
+    /// entrant_engines above.
+    entrant_wallets: HashMap<String, String>,
     /// For a root-settled (large) tournament: the payout leaves, so the server
     /// can serve Merkle proofs to claimers. (addr, amount in base units)
     payout_leaves: Vec<(String, u128)>,
@@ -1584,6 +1591,7 @@ async fn tourney_create(
             forfeits: Vec::new(),
             entrant_bots: HashMap::new(),
             entrant_engines: HashMap::new(),
+            entrant_wallets: HashMap::new(),
             payout_leaves: Vec::new(),
             created_at: Instant::now(),
         },
@@ -1663,10 +1671,11 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
                 t.status.clone(),
                 serde_json::to_value(&t.players).unwrap_or_else(|_| json!([])),
                 bots_json(&t.entrant_bots),
+                serde_json::to_value(&t.entrant_wallets).unwrap_or_else(|_| json!({})),
             )
         })
     };
-    if let Some((name, buy_in, organizer, init, inc, status, players, bots)) = snap {
+    if let Some((name, buy_in, organizer, init, inc, status, players, bots, wallets)) = snap {
         db.upsert_tournament(
             tid,
             &name,
@@ -1677,6 +1686,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
             &status,
             &players,
             &bots,
+            &wallets,
         )
         .await
         .map_err(|e| {
@@ -1841,12 +1851,15 @@ async fn tourney_join(
             .as_deref()
             .and_then(sanitize_label)
             .ok_or(StatusCode::BAD_REQUEST)?;
+        // Strict, for the same invariant as park_create: a signed-in entrant
+        // must never be recorded anonymous — their finished games would belong
+        // to nobody, which is exactly the history/casual-Elo gap this closes.
+        // No header at all stays fine; casual tournaments are open to guests.
+        let wallet = state.authed_wallet_strict(&headers)?;
         // A casual bot entrant is still wallet-bound (the agent is), so it needs
         // auth + an online bot, even though the tournament itself is free.
         let bot_wallet = if bot {
-            let wallet = state
-                .authed_wallet(&headers)
-                .ok_or(StatusCode::UNAUTHORIZED)?;
+            let wallet = wallet.clone().ok_or(StatusCode::UNAUTHORIZED)?;
             if state.0.agents.view(&wallet).is_none() {
                 return Err(StatusCode::FAILED_DEPENDENCY); // 424: bot offline
             }
@@ -1871,6 +1884,9 @@ async fn tourney_join(
                 t.players.push(name.clone());
                 if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
                     t.entrant_engines.insert(name.clone(), e);
+                }
+                if let Some(w) = &wallet {
+                    t.entrant_wallets.insert(name.clone(), w.clone());
                 }
                 if let Some(wallet) = bot_wallet {
                     t.entrant_bots.insert(
@@ -2319,7 +2335,7 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
     // even though no pairing carries a stake of its own (the pool settles
     // separately), and this is the only place that knows it. The amount is
     // irrelevant here, so don't clone the string every round.
-    let (pairings, tc, bots, engines, ladder) = {
+    let (pairings, tc, bots, engines, wallets, ladder) = {
         let ts = state.0.lobby.tournaments.lock();
         let Some(t) = ts.get(&tid) else { return 0 };
         let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
@@ -2332,6 +2348,7 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
             tc,
             t.entrant_bots.clone(),
             t.entrant_engines.clone(),
+            t.entrant_wallets.clone(),
             ladder,
         )
     };
@@ -2345,11 +2362,14 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
         // A bot entrant's engine comes from its agent registration; a browser
         // entrant declares its own at join time.
         engine: engines.get(p).cloned(),
-        // A browser entrant IS its wallet; a bot entrant is a registered name,
-        // so its games belong to the wallet that registered the agent.
+        // A bot entrant's games belong to the wallet that registered the agent;
+        // a casual browser entrant's to the session they joined with (recorded
+        // in entrant_wallets); a buy-in entrant's id already IS its wallet.
         wallet: match bots.get(p) {
             Some(be) => Some(be.wallet.clone()),
-            None => (p.starts_with("0x") && p.len() == 42).then(|| p.to_string()),
+            None => wallets.get(p).cloned().or_else(|| {
+                (p.starts_with("0x") && p.len() == 42).then(|| p.to_string())
+            }),
         },
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
@@ -2607,6 +2627,10 @@ pub async fn recover_tournaments(state: &AppState) {
                     // Cosmetic only (the label never gates anything), and the
                     // fix is to add it to persist_tournament when that matters.
                     entrant_engines: HashMap::new(),
+                    // Restored: attribution is NOT cosmetic — a casual entrant's
+                    // games dispatched after a restart still belong to them.
+                    entrant_wallets: serde_json::from_value(r.entrant_wallets)
+                        .unwrap_or_default(),
                     payout_leaves: Vec::new(),
                     created_at,
                 });
@@ -2988,7 +3012,7 @@ mod tests {
 
         // Bot A queues first — no opponent yet, so it only waits (NOT claimed,
         // NOT dispatched).
-        queue_join(State(state.clone()), bearer(&ta), Json(bot_req()))
+        let _ = queue_join(State(state.clone()), bearer(&ta), Json(bot_req()))
             .await
             .expect("A join");
         assert!(rx_a.try_recv().is_err(), "A must not be dispatched while waiting");
@@ -3312,7 +3336,7 @@ mod tests {
         };
 
         // The session parks a waiting ticket (no opponent yet); no game exists.
-        queue_join(State(state.clone()), HeaderMap::new(), Json(req(Some(sid))))
+        let _ = queue_join(State(state.clone()), HeaderMap::new(), Json(req(Some(sid))))
             .await
             .expect("first join waits");
         assert!(state.0.rooms.lock().is_empty());
@@ -3322,7 +3346,7 @@ mod tests {
 
         // An opponent joins the same tier and pops the stopped session's stale
         // ticket — the pair-time re-check must drop it, not open a new game.
-        queue_join(State(state.clone()), HeaderMap::new(), Json(req(None)))
+        let _ = queue_join(State(state.clone()), HeaderMap::new(), Json(req(None)))
             .await
             .expect("second join waits (stale ticket dropped)");
         assert!(
@@ -3367,7 +3391,7 @@ mod tests {
             seat: None,
             uci_options: None,
         };
-        queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+        let _ = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
             .await
             .expect("p1");
         let r2 = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
@@ -3751,7 +3775,7 @@ mod tests {
         }
 
         // Start → dispatches round 0 only.
-        tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
             .await
             .expect("start");
 
@@ -4008,7 +4032,7 @@ mod tests {
         // Now make Alpha's bot busy so it can't be claimed at dispatch → its
         // single pairing forfeits to Bravo, the round is empty, tournament settles.
         assert!(state.0.agents.claim("0xaa11111111111111111111111111111111111111").is_ok());
-        tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
             .await
             .expect("start");
         let t = state.0.lobby.tournaments.lock();
@@ -4279,6 +4303,74 @@ mod tests {
             StatusCode::CONFLICT,
             "case-insensitive"
         );
+    }
+
+    /// A FREE tournament's games belong to the sessions that entered it. The
+    /// entrant id stays the display name, but the signed-in wallet rides
+    /// `entrant_wallets` into every dispatched game's seats — without it a
+    /// signed-in human in a free tournament got no history row and no casual
+    /// Elo, while a bot entrant in the same tournament did.
+    #[tokio::test]
+    async fn a_free_tournament_attributes_signed_in_entrants() {
+        let (state, _c, _r) = test_state();
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "Free T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        let wa = "0xaa33333333333333333333333333333333333333";
+        let wb = "0xbb44444444444444444444444444444444444444";
+        let ta = state.0.auth.mint_session(wa);
+        let tb = state.0.auth.mint_session(wb);
+        let join = |name: &str, headers: HeaderMap| {
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                headers,
+                Json(JoinReq {
+                    player: Some(name.to_string()),
+                    seat: None,
+                    uci_options: None,
+                    engine: None,
+                }),
+            )
+        };
+        assert_eq!(join_code(&join("Alice", bearer(&ta)).await), StatusCode::OK);
+        assert_eq!(join_code(&join("Bob", bearer(&tb)).await), StatusCode::OK);
+        // A stale bearer must 401, not enter Mallory anonymously — the same
+        // invariant park_create pins ("an authed poster never appears
+        // anonymous"), now on the casual-tournament door.
+        assert_eq!(
+            join_code(&join("Mallory", bearer("dead-token")).await),
+            StatusCode::UNAUTHORIZED
+        );
+        {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).expect("tournament");
+            assert_eq!(t.entrant_wallets.get("Alice"), Some(&wa.to_string()));
+            assert_eq!(t.entrant_wallets.get("Bob"), Some(&wb.to_string()));
+            assert_eq!(t.players.len(), 2, "the stale bearer entered nobody");
+        }
+
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("start");
+        let live = state.0.live_games.lock();
+        let g = live.values().next().expect("round 0 dispatched the pairing");
+        // Who got White is the round-robin's business; what matters is that
+        // BOTH sessions' wallets reached the seats.
+        let mut got = [g.white.as_deref(), g.black.as_deref()];
+        got.sort();
+        assert_eq!(got, [Some(wa), Some(wb)]);
     }
 
     #[tokio::test]

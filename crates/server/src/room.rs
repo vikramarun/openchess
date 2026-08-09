@@ -80,6 +80,7 @@ pub struct RoomHandle {
 }
 
 /// Spawn a room task and return a handle for the HTTP/WS layer.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_room(
     game_id: protocol::GameId,
     tc: TimeControl,

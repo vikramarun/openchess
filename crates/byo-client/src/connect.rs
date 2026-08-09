@@ -665,7 +665,7 @@ async fn post_and_wait(
         }
 
         // Every ~6s, look for a foreign challenge we could take instead.
-        if ticks % 3 != 0 {
+        if !ticks.is_multiple_of(3) {
             continue;
         }
         let offers: Vec<Value> = match client.get(format!("{http}/park/offers")).send().await {

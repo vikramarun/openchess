@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
+import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
@@ -297,12 +298,12 @@ function TournamentClient() {
       ? undefined
       : casualName.trim() || `guest-${Math.floor(Date.now() % 100000)}`;
     try {
-      const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/join`, {
+      // authedFetch, always: a CASUAL join wants the session too — it's what
+      // lets the server put the finished games in this player's history and
+      // move their casual Elo. Signed out stays fine (no header is attached).
+      const r = await authedFetch(`${SERVER_HTTP}/tournaments/${t.id}/join`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...((t.buy_in || asBot) && token ? { authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           player,
           ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : { engine: browserSeat().engine }),
@@ -310,15 +311,17 @@ function TournamentClient() {
       });
       if (!r.ok) {
         setErr(
-          r.status === 503
-            ? MAINTENANCE_MSG
-            : r.status === 502
-              ? "Couldn’t move your entry into the pool. Check your deposited balance."
-              : r.status === 424
-                ? BOT_OFFLINE_MSG
-                : r.status === 409
-                  ? "That display name is already taken in this tournament."
-                  : `Couldn’t join (${r.status}).`,
+          r.status === 401
+            ? SESSION_EXPIRED
+            : r.status === 503
+              ? MAINTENANCE_MSG
+              : r.status === 502
+                ? "Couldn’t move your entry into the pool. Check your deposited balance."
+                : r.status === 424
+                  ? BOT_OFFLINE_MSG
+                  : r.status === 409
+                    ? "That display name is already taken in this tournament."
+                    : `Couldn’t join (${r.status}).`,
         );
         return;
       }

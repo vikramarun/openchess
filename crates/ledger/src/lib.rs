@@ -6,6 +6,10 @@
 //! loser's bankroll to the winner's (minus rake). Funds live in the contract,
 //! never in a platform wallet.
 
+// The `sol!` macro generates contract bindings whose functions mirror the
+// Solidity signatures — arg counts aren't ours to shrink.
+#![allow(clippy::too_many_arguments)]
+
 use alloy::network::EthereumWallet;
 use alloy::primitives::{keccak256, B256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};

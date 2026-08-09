@@ -144,6 +144,9 @@ pub struct OpenTournamentRow {
     pub increment_secs: i64,
     pub players: serde_json::Value,
     pub bots: serde_json::Value,
+    /// Signed-in wallet per casual entrant (name -> wallet), so games
+    /// dispatched after a restart stay attributed (migration 0016).
+    pub entrant_wallets: serde_json::Value,
     /// How long ago the tournament was created, so the caller can restore its
     /// TTL clock instead of restarting it on every deploy. Computed by the
     /// database — the server has no chrono of its own.
@@ -492,6 +495,7 @@ impl Db {
     // -- tournament durable state -----------------------------------------
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_tournament(
         &self,
         id: Uuid,
@@ -503,13 +507,16 @@ impl Db {
         status: &str,
         players: &serde_json::Value,
         bots: &serde_json::Value,
+        entrant_wallets: &serde_json::Value,
     ) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO tournaments
-                 (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
+                  entrant_wallets)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
-                 players=EXCLUDED.players, bots=EXCLUDED.bots"#,
+                 players=EXCLUDED.players, bots=EXCLUDED.bots,
+                 entrant_wallets=EXCLUDED.entrant_wallets"#,
         )
         .bind(id)
         .bind(name)
@@ -520,6 +527,7 @@ impl Db {
         .bind(status)
         .bind(players)
         .bind(bots)
+        .bind(entrant_wallets)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -534,7 +542,7 @@ impl Db {
     pub async fn open_tournaments(&self, limit: i64) -> Result<Vec<OpenTournamentRow>> {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
-                      players, bots,
+                      players, bots, entrant_wallets,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,

@@ -70,7 +70,9 @@ click the actual buttons in the web app against a fresh escrow:
      the printed tid), e.g.:
        RPC_URL=$LEDGER_TEST_RPC ESCROW_ADDR=<escrow_pay> ORACLE_KEY=$LEDGER_TEST_KEY \
        SIWE_CHAIN_ID=84532 cargo run -p server
-  3. In apps/web (pnpm dev), open /tournament with the winner wallet connected —
+  3. In apps/web (NEXT_PUBLIC_ENABLE_TESTNET=1 pnpm dev — the flag puts Base
+     Sepolia in the wallet chain list), open /tournament with the winner wallet
+     connected —
      the "Claim <amount> USDC" button should appear and complete; for an
      abandoned tournament the "Claim refund" button appears past the timeout.
 EOF

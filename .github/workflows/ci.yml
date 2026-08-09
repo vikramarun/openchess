@@ -37,8 +37,19 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      # Lints are blocking: the workspace was brought to zero warnings and one
+      # bulk `cargo fmt` (see .git-blame-ignore-revs), and drift-from-zero is
+      # the cheapest moment to catch a real bug a lint would have named.
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: rustfmt --check
+        run: cargo fmt --check
 
       - name: Cargo test (workspace)
         run: cargo test --workspace
