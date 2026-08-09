@@ -43,7 +43,15 @@ a:hover {
 }
 
 /* ---------- header ---------- */
+/* Sticky, because the game view is far taller than a viewport: the result
+   banner and "Back to lobby" sit ~1000px down, so by the time a finished game
+   is readable the top nav has scrolled away and the only reachable link on
+   screen is the one inside the board sidebar. Below `.modal-overlay`'s z-index
+   (50) on purpose — a modal must still cover the header. */
 .site-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
   display: flex;
   align-items: center;
   gap: 28px;
@@ -1498,11 +1506,35 @@ select:focus-visible,
     gap: 12px 18px;
     padding: 10px 16px;
   }
+  /* One scrollable row, not a wrapped block: the header is sticky, so every
+     line it wraps onto is a line permanently off the top of a phone screen
+     (wrapping cost 167px of an 812px viewport).
+     The padding/negative-margin pair widens the SCROLL BOX without changing the
+     header's height: `overflow-x` forces `overflow-y` to `auto` (a scrolling
+     axis can't pair with `visible`), and the row is exactly one link tall, so
+     without it the 2px focus ring at 2px offset is clipped away.
+     The mask fades whatever reaches the right edge, so a nav that runs past the
+     viewport (Profile is 77px out at 375px wide) reads as cut off rather than
+     absent. It costs nothing when the row fits — it only ever fades empty
+     space to the right of the last link. */
   .nav {
     order: 3;
     flex-basis: 100%;
     gap: 16px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 0;
+    margin: -4px 0;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+  .nav a {
+    white-space: nowrap;
   }
   .header-actions {
     margin-left: auto;

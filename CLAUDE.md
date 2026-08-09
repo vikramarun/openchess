@@ -92,6 +92,16 @@ wallet.
   per-entry-point, not global middleware.
 - **`pnpm build` clobbers the `next dev` cache** (→ `/_next/static` 404s). If the
   dev preview breaks after a build: `rm -rf apps/web/.next` and restart it.
+- **The site header is sticky on purpose, and its `z-index` must stay under 50.**
+  A game view is several viewports tall: the result banner lands ~525px down and
+  "Back to lobby" ~1000px down, so a static header is already ~640px above the
+  screen by the time a finished game is readable — the top nav becomes
+  unclickable and the sidebar button is the only way out. That shipped. The
+  `z-index: 40` is the other half: `.modal-overlay` (StakeConfirm, the
+  time-control picker) is 50 and MUST keep covering the header, so raising the
+  header above it turns the pre-game confirm into a dialog you can click behind.
+  Nothing in the test suite pins either half — it's CSS, and there's no layout
+  harness.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
