@@ -11,6 +11,7 @@
     "test:books": "tsx scripts/books.test.ts",
     "test:time": "tsx scripts/time.test.ts",
     "test:candidates": "tsx scripts/candidates.test.ts",
+    "test:seatengine": "tsx scripts/playerEngine.test.ts",
     "test:openings": "tsx scripts/book.test.ts",
     "test:move": "tsx scripts/playMove.test.ts",
     "test:engine": "tsx scripts/engine.test.ts",

@@ -79,23 +79,28 @@ async function retryAfterResync(
  *  miss every entry from the castle onwards. */
 function legalBookMove(pos: Chess, history: string[]): string | null {
   const cfg = getBrowserBotConfig();
-  const maxPly = cfg.bookMaxPly;
   const ply = history.length;
 
-  const user = probeUserBook(pos, ply, maxPly);
+  // Two books, two depth settings, each governed by the control next to it:
+  // `bookMaxPly` belongs to the uploaded .bin, `repertoire.maxPly` to the
+  // built-in repertoire (and to the broad fallback book, which is the same
+  // kind of thing). Sharing one of them here meant the repertoire picker's
+  // "leave book after ply" changed the preview and nothing else.
+  const user = probeUserBook(pos, ply, cfg.bookMaxPly);
   const userStd = user ? toStandardUci(pos, user) : null;
   if (userStd) return userStd;
 
   // The chosen repertoire. Normalized like everything else: a .bin stores
   // castling as king-takes-rook by spec, so decodeMove already converts it —
   // this is the belt to that braces.
-  const rep = probeRepertoire(pos, ply, maxPly, cfg.repertoire.pick);
+  const repMaxPly = cfg.repertoire.maxPly;
+  const rep = probeRepertoire(pos, ply, repMaxPly, cfg.repertoire.pick);
   const repStd = rep ? toStandardUci(pos, rep) : null;
   if (repStd) return repStd;
 
-  // The broad book honours maxPly too — it used to be exempt, which made the
-  // "leave book after N plies" setting quietly untrue.
-  if (ply >= maxPly) return null;
+  // The broad book honours a depth limit too — it used to be exempt, which
+  // made "leave book after N plies" quietly untrue for it.
+  if (ply >= repMaxPly) return null;
   const builtin = bookMove(history);
   return builtin ? toStandardUci(pos, builtin) : null;
 }

@@ -15,6 +15,16 @@
 
 import { BrowserEngine } from "./engine";
 
+/** How a seat engine is constructed. Injectable so the failure paths below can
+ *  be tested without a Worker — they are the whole reason this module exists,
+ *  and they were wrong. */
+let makeEngine: () => BrowserEngine = () => new BrowserEngine();
+
+/** Test seam. Pass nothing to restore the real constructor. */
+export function setEngineFactory(f?: () => BrowserEngine) {
+  makeEngine = f ?? (() => new BrowserEngine());
+}
+
 let engine: BrowserEngine | null = null;
 let loading: Promise<BrowserEngine> | null = null;
 let refs = 0;
@@ -39,22 +49,35 @@ export function prewarmPlayerEngine(): Promise<BrowserEngine> {
   cancelIdle();
   if (engine) return Promise.resolve(engine);
   if (loading) return loading;
-  loading = (async () => {
-    const e = new BrowserEngine();
+  // The construction itself must be INSIDE the try. `new Worker(...)` throws
+  // synchronously when the script can't be constructed at all (CSP, a bad URL,
+  // out of memory), and with that line outside, `loading` kept a permanently
+  // rejected promise that every later call returned — so one transient failure
+  // meant the player could never post again without reloading the page, while
+  // being told to "try again".
+  const attempt = (async () => {
+    let e: BrowserEngine | null = null;
     try {
+      e = makeEngine();
       await e.whenReady();
+      engine = e;
+      return e;
     } catch (err) {
-      // Don't cache a broken engine: a transient failure (a dropped download)
-      // must not poison every later attempt in this tab.
-      e.dispose();
-      loading = null;
+      e?.dispose();
       throw err;
     }
-    engine = e;
-    loading = null;
-    return e;
   })();
-  return loading;
+  loading = attempt;
+  // Clear the in-flight slot however it settled, so the next call makes a
+  // genuinely new attempt instead of replaying this one's outcome. This has to
+  // run as a callback rather than a `finally` inside the async body: a
+  // synchronous throw from the constructor settles that body BEFORE the
+  // assignment above, and would leave the rejected promise cached.
+  const clear = () => {
+    if (loading === attempt) loading = null;
+  };
+  void attempt.then(clear, clear);
+  return attempt;
 }
 
 /** Take the warm engine for a seat. Balance with `releasePlayerEngine`. */

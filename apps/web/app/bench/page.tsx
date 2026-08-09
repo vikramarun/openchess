@@ -210,7 +210,6 @@ function elo(score: number): number {
 }
 
 export default function Bench() {
-  if (process.env.NODE_ENV === "production") notFound();
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const stop = useRef(false);
@@ -305,6 +304,10 @@ export default function Bench() {
     say("done");
     setRunning(false);
   }, []);
+
+  // After the hooks, never before: an early return would make the hook order
+  // conditional. In production this route simply does not exist.
+  if (process.env.NODE_ENV === "production") notFound();
 
   return (
     <div className="container" style={{ padding: 20 }}>

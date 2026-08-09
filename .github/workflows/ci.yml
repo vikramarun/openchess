@@ -66,6 +66,10 @@ jobs:
           pnpm test:books
           pnpm test:time
           pnpm test:candidates
+          # The seat engine's failure paths gate whether the lobby will stake at
+          # all: a cached rejection there stopped the player posting for the rest
+          # of the session while telling them to try again.
+          pnpm test:seatengine
           pnpm test:eval
           pnpm test:auth
           # Guards the decline path: a seat that closes its socket instead of

@@ -105,8 +105,15 @@ export function SeatGame({
       // Normally already warm: the lobby prewarms before it stakes anything,
       // precisely so a 7 MB download can't fail with money escrowed.
       engine = await acquirePlayerEngine();
+      // Release here rather than relying on the cleanup below: if the effect
+      // was torn down DURING the await, cleanup has already run and saw
+      // `released` still true, so nothing would ever give this reference back
+      // and the engine would stay pinned for the life of the tab.
+      if (cancelled) {
+        releasePlayerEngine();
+        return;
+      }
       released = false;
-      if (cancelled) return;
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
 
