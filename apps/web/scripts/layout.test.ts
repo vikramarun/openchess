@@ -23,10 +23,15 @@ function check(name: string, ok: boolean, detail = "") {
   console.log(`${ok ? "ok " : "FAIL"} ${name}${ok || !detail ? "" : ` — ${detail}`}`);
 }
 
-/** The declaration block of the first top-level rule whose selector matches. */
+/** The declaration block of the first TOP-LEVEL rule whose selector matches.
+ *
+ *  Column-0 only, which is what keeps the `.site-header` inside the ≤720px
+ *  media query (indented) from being read as the base rule. The flip side is
+ *  that this reads the SOURCE, not the cascade: a second top-level
+ *  `.site-header` added later would win in a browser and be invisible here.
+ *  Fine for an invariant whose whole point is one declaration in one place —
+ *  but it is the assumption to revisit if this file ever grows a second one. */
 function ruleBody(selector: string): string | null {
-  // Rules are matched at any nesting depth (the header rule is top-level, the
-  // overlay's is too) by scanning for the selector followed by its block.
   const i = css.indexOf(`\n${selector} {`);
   if (i === -1) return null;
   const start = css.indexOf("{", i);
