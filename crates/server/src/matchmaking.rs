@@ -1395,6 +1395,15 @@ struct Tournament {
     /// How the pool is divided among the final standings. Creator-chosen, fixed
     /// at creation, persisted.
     payout: PayoutSpec,
+    /// Last known onchain pool, in USDC base units. `None` until first read.
+    ///
+    /// Not derivable any more. `buy_in × entrants` was the pool only while
+    /// entries were the sole way to fund one; a sponsor moves USDC in with a
+    /// browser transaction this server never sees, so the figure has to be
+    /// polled (`pool_refresh_task`). Display only — settlement re-reads the
+    /// chain itself (`distribute_pool`), because paying out a stale number is
+    /// the one place being behind actually costs someone money.
+    pool: Option<u128>,
     /// The authenticated wallet that created the tournament (if any). Only the
     /// organizer may start it.
     organizer: Option<String>,
@@ -1606,10 +1615,14 @@ async fn tourney_create(
                 return Err(StatusCode::TOO_MANY_REQUESTS);
             }
         }
+        // Zero IS allowed, and it is what makes a free-entry sponsored event:
+        // the pool exists onchain, entrants pay nothing into it, and sponsors
+        // fund it with `sponsorTournament` from their own bankroll. A casual
+        // tournament (no pool at all) is `buy_in: null`, not `"0"`.
         let buy_in = buy_in_str
             .parse::<U256>()
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        if buy_in == U256::ZERO || buy_in > U256::from(MAX_STAKE) {
+        if buy_in > U256::from(MAX_STAKE) {
             return Err(StatusCode::BAD_REQUEST);
         }
         if !state.0.settlement.is_onchain() {
@@ -1630,6 +1643,7 @@ async fn tourney_create(
             name,
             buy_in: req.buy_in,
             payout,
+            pool: None,
             organizer,
             initial_secs: req.initial_secs,
             increment_secs: req.increment_secs,
@@ -1843,8 +1857,14 @@ async fn tourney_join(
             (Ok(a), Ok(b)) => (a, b),
             _ => return Err(StatusCode::BAD_REQUEST),
         };
-        let _ = buy_in; // amount is enforced onchain from the tournament record
-        if state.0.settlement.enter_tournament(id, addr).await.is_err() {
+        // A free entry moves no money, so don't spend an oracle transaction
+        // recording it. The only onchain consumer of `tournamentEntered` is
+        // `claimRefund`, which has nothing to give back at a zero buy-in (and
+        // now refuses outright) — payouts are by signed list or Merkle root and
+        // need no prior entry. So a free sponsored tournament costs the oracle
+        // exactly two transactions, `openTournament` and settle, whatever the
+        // size of the field.
+        if buy_in > U256::ZERO && state.0.settlement.enter_tournament(id, addr).await.is_err() {
             return Err(StatusCode::BAD_GATEWAY);
         }
         {
@@ -1880,13 +1900,19 @@ async fn tourney_join(
                 }
                 _ => {
                     drop(t);
-                    tracing::error!(tournament = %id, wallet = %wallet, "buy-in landed after start/close/fill; entrant NOT seated");
-                    crate::alert::fire(format!(
-                        "🚨 OpenChess: wallet {wallet} paid a buy-in to tournament {id} that \
-                         started, closed, or filled during the join. They are NOT in the \
-                         schedule; their entry needs a manual return (or claimRefund after \
-                         the settle timeout)."
-                    ));
+                    tracing::error!(tournament = %id, wallet = %wallet, "entry landed after start/close/fill; entrant NOT seated");
+                    // Only an alert when money is actually stuck. A free entry
+                    // that lost this race cost the entrant nothing, and paging
+                    // an operator for it would train them to ignore the alert
+                    // that matters.
+                    if buy_in > U256::ZERO {
+                        crate::alert::fire(format!(
+                            "🚨 OpenChess: wallet {wallet} paid a buy-in to tournament {id} that \
+                             started, closed, or filled during the join. They are NOT in the \
+                             schedule; their entry needs a manual return (or claimRefund after \
+                             the settle timeout)."
+                        ));
+                    }
                     return Err(StatusCode::CONFLICT);
                 }
             }
@@ -1896,11 +1922,13 @@ async fn tourney_join(
         // (memory keeps them seated, and a retry re-persists) rather than
         // shrugging — this is a money path, and money paths fail closed.
         if persist_tournament(&state, id).await.is_err() {
-            crate::alert::fire(format!(
-                "🚨 OpenChess: could not persist tournament {id} after wallet {wallet} \
-                 entered onchain. A restart before a successful persist rehydrates the \
-                 tournament without them while their buy-in stays locked."
-            ));
+            if buy_in > U256::ZERO {
+                crate::alert::fire(format!(
+                    "🚨 OpenChess: could not persist tournament {id} after wallet {wallet} \
+                     entered onchain. A restart before a successful persist rehydrates the \
+                     tournament without them while their buy-in stays locked."
+                ));
+            }
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
         Ok(Json(JoinResp { player: wallet }))
@@ -2031,6 +2059,11 @@ struct TourneyView {
     organizer: Option<String>,
     /// How the pool is divided: basis points per finishing place, best first.
     payout: PayoutSpec,
+    /// The prize pool in USDC base units, entries + sponsorship. `None` when
+    /// there is no pool (a casual tournament). A **free-entry** event is
+    /// `buy_in: "0"` with a non-zero pool here — that pairing is how a client
+    /// tells "free, sponsor-funded" from "casual, no prize".
+    pool: Option<String>,
     /// What each `standings` row would be paid if the event ended now, in USDC
     /// base units and index-aligned with `standings`. Empty when there is no
     /// pool. Produced by the same `payout_split` that settles, so the table a
@@ -2156,21 +2189,29 @@ fn pairings_of(t: &Tournament, scope: Pairings) -> Vec<TourneyPairing> {
     out
 }
 
+/// The pool to show, in USDC base units. `None` for a tournament without one.
+///
+/// Prefers the cached onchain figure (`pool_refresh_task`), which is the only
+/// one that can see sponsorship. Falls back to `buy_in × entrants` until the
+/// first read lands — right for a plain buy-in event, and an understatement
+/// rather than an overstatement for a sponsored one, which is the safer way to
+/// be briefly wrong about a prize.
+fn pool_of(t: &Tournament, entrants: usize) -> Option<u128> {
+    if !has_pool(t.buy_in.as_deref()) {
+        return None;
+    }
+    t.pool
+        .or_else(|| entry_fee(t.buy_in.as_deref()).checked_mul(entrants as u128))
+}
+
 /// What the pool would pay each standings row if the event ended now.
 ///
-/// Derived (`buy_in × entrants`) rather than read from the chain: this runs
-/// under the lobby lock on a route every client polls, and today entries are
-/// the only thing that can fund a pool, so the two agree. Settlement reads the
-/// chain (see `distribute_pool`) — once anything else can add to a pool, this
-/// needs a cached figure from the same source rather than a fresh derivation.
+/// Runs under the lobby lock on a route every client polls, so it reads the
+/// cached pool rather than the chain. Settlement re-reads the chain itself
+/// (`distribute_pool`) — this table is a promise, that one is the payment.
 fn prizes_of(t: &Tournament, standings: &[Standing]) -> Vec<String> {
-    let Some(buy_in) = t
-        .buy_in
-        .as_deref()
-        .and_then(|b| b.parse::<u128>().ok())
-        .and_then(|b| b.checked_mul(standings.len() as u128))
-    else {
-        return Vec::new(); // casual, or an unparseable buy-in
+    let Some(buy_in) = pool_of(t, standings.len()) else {
+        return Vec::new(); // casual: no pool, no prizes
     };
     let ranked: Vec<(String, f64)> = standings
         .iter()
@@ -2190,6 +2231,7 @@ fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
         players: t.players.clone(),
         games: pairings_of(t, scope),
         prizes: prizes_of(t, &standings),
+        pool: pool_of(t, standings.len()).map(|p| p.to_string()),
         standings,
         current_round: t.current_round,
         total_rounds: t.rounds.len(),
@@ -2352,6 +2394,35 @@ async fn tourney_start(
     state.reject_if_draining()?;
     state.reject_if_rate_limited_create(&headers)?;
     let caller = state.authed_wallet(&headers);
+
+    // A free-entry event's prize is entirely the sponsors'. Nobody has paid
+    // anything in, so an unfunded one would run a full round-robin and pay out
+    // nothing — and unlike a buy-in tournament there is no entry to refund
+    // afterwards, so the entrants' time is simply gone. Read the chain and
+    // refuse; the organizer retries once a sponsor has funded it.
+    {
+        let terms = {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+            (t.buy_in.clone(), t.status.clone())
+        };
+        let (buy_in, status) = terms;
+        let free_prize_event =
+            has_pool(buy_in.as_deref()) && entry_fee(buy_in.as_deref()) == 0 && status == "open";
+        if free_prize_event && state.0.settlement.is_onchain() {
+            let funded = state
+                .0
+                .settlement
+                .tournament_pool(id)
+                .await
+                .is_some_and(|p| p > U256::ZERO);
+            if !funded {
+                tracing::warn!(tournament = %id, "refusing to start a free-entry event with an empty prize pool");
+                return Err(StatusCode::CONFLICT);
+            }
+        }
+    }
+
     {
         let mut ts = state.0.lobby.tournaments.lock();
         let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2792,10 +2863,80 @@ fn is_rehydratable(buy_in: Option<&str>, organizer: Option<&str>) -> bool {
 /// `recover_tournaments`, so a tournament that survives a restart keeps
 /// dispatching ranked games rather than quietly coming back casual.
 fn tournament_ladder(buy_in: Option<&str>) -> Ladder {
-    if buy_in.is_some() {
+    // Ranked when the ENTRANT had money at risk, which is the rule everywhere
+    // else — not merely when a pool exists. A sponsor-funded free-entry event
+    // pays real USDC but costs nothing to enter, so two cooperating wallets
+    // could trade wins in one and farm ranked Elo for free. That is exactly why
+    // casual Elo is kept off the leaderboard, and it is why a nominal entry fee
+    // is the lever a creator uses to make their event ranked.
+    if entry_fee(buy_in) > 0 {
         Ladder::Ranked
     } else {
         Ladder::Casual
+    }
+}
+
+/// What each entrant pays, in USDC base units. Zero for a casual tournament
+/// (no pool at all) and for a free-entry one (`Some("0")` — a pool exists, but
+/// it is sponsor-funded). Unparseable is treated as zero: the value has already
+/// been validated at create, and this is read on paths where refusing to answer
+/// would be worse than treating an impossible row as free.
+fn entry_fee(buy_in: Option<&str>) -> u128 {
+    buy_in.and_then(|b| b.parse::<u128>().ok()).unwrap_or(0)
+}
+
+/// Does this tournament have an onchain prize pool at all?
+///
+/// `buy_in.is_some()` — kept as the flag it has always been, so every existing
+/// check (wallet-identity entrants, organizer-gated start, authenticated
+/// `my-games`, settlement) stays correct without modification. A free-entry
+/// sponsored tournament is `Some("0")`: pool yes, fee zero.
+fn has_pool(buy_in: Option<&str>) -> bool {
+    buy_in.is_some()
+}
+
+/// How often the cached onchain pool is refreshed.
+///
+/// Sponsorship is a transaction the sponsor's own browser sends — the server is
+/// not in the loop and gets no event — so a pool can grow with nothing
+/// server-side to hang a refresh on. It has to be polled. Bounded work: at most
+/// `max_lobby_tournaments` view calls per tick, and only for tournaments that
+/// have a pool and haven't finished with it.
+const POOL_REFRESH: Duration = Duration::from_secs(15);
+
+/// Keep each live tournament's cached pool roughly current, for display.
+pub async fn pool_refresh_task(state: AppState) {
+    loop {
+        tokio::time::sleep(POOL_REFRESH).await;
+        refresh_pools(&state).await;
+    }
+}
+
+async fn refresh_pools(state: &AppState) {
+    if !state.0.settlement.is_onchain() {
+        return;
+    }
+    // Snapshot the ids, then read — never hold the lobby lock across an await.
+    let ids: Vec<Uuid> = {
+        let ts = state.0.lobby.tournaments.lock();
+        ts.iter()
+            .filter(|(_, t)| {
+                has_pool(t.buy_in.as_deref())
+                    && !matches!(t.status.as_str(), "settled" | "abandoned")
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for id in ids {
+        let Some(pool) = state.0.settlement.tournament_pool(id).await else {
+            continue; // transient RPC failure: keep the previous figure
+        };
+        let Ok(pool) = u128::try_from(pool) else {
+            continue;
+        };
+        if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
+            t.pool = Some(pool);
+        }
     }
 }
 
@@ -2871,6 +3012,9 @@ pub async fn recover_tournaments(state: &AppState) {
                     name: r.name,
                     buy_in: r.buy_in,
                     payout,
+                    // Re-read from the chain by `pool_refresh_task`; a
+                    // rehydrated tournament shows no pool figure until it is.
+                    pool: None,
                     organizer: r.organizer,
                     initial_secs: r.initial_secs.max(0) as u64,
                     increment_secs: r.increment_secs.max(0) as u64,
@@ -4284,6 +4428,97 @@ mod tests {
             serde_json::from_value::<PayoutSpec>(json!({ "bps": [6500, 2500, 1000] })).unwrap(),
             PayoutSpec::default()
         );
+    }
+
+    #[test]
+    fn the_three_tournament_kinds_are_distinguishable() {
+        // `buy_in` carries two facts at once, and every existing check reads it
+        // as "is there a pool". A free-entry sponsored event is Some("0"):
+        // pool yes, fee zero — which is what keeps organizer-gated start,
+        // wallet-identity entrants and authenticated my-games correct for it
+        // without touching any of them.
+        //
+        //                      has_pool  entry_fee  ladder
+        //  casual  (None)         no         0      casual
+        //  free    (Some "0")     YES        0      casual  ← entrant risked nothing
+        //  buy-in  (Some "n")     YES        n      ranked
+        assert!(!has_pool(None));
+        assert!(has_pool(Some("0")));
+        assert!(has_pool(Some("1000000")));
+
+        assert_eq!(entry_fee(None), 0);
+        assert_eq!(entry_fee(Some("0")), 0);
+        assert_eq!(entry_fee(Some("1000000")), 1_000_000);
+
+        assert_eq!(tournament_ladder(None), Ladder::Casual);
+        assert_eq!(tournament_ladder(Some("1000000")), Ladder::Ranked);
+        assert_eq!(
+            tournament_ladder(Some("0")),
+            Ladder::Casual,
+            "free entry must not be ranked: two cooperating wallets could trade wins in a \
+             sponsored event and farm ranked Elo at zero cost. A nominal fee is the lever."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sponsored_pool_is_what_the_prize_table_reads() {
+        // `buy_in × entrants` stopped being the pool the moment a third party
+        // could fund one — and a sponsor's transaction comes from their own
+        // browser, so the server only learns of it by polling the chain.
+        const USDC: u128 = 1_000_000;
+        let (state, _c, _r) = test_state();
+        let tid = started_tournament(&state, 4).await;
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            let t = ts.get_mut(&tid).unwrap();
+            t.buy_in = Some("0".into()); // free entry
+            t.payout = PayoutSpec {
+                bps: vec![6_000, 4_000],
+            };
+            for (i, s) in [3.0, 2.0, 1.0, 0.0].iter().enumerate() {
+                t.scores.insert(format!("p{i}"), *s);
+            }
+            // Derived would be 0 × 4 = nothing; the chain says a sponsor put up 500.
+            assert_eq!(
+                pool_of(t, 4),
+                Some(0),
+                "before the first read, a free event looks unfunded"
+            );
+            t.pool = Some(500 * USDC);
+            assert_eq!(pool_of(t, 4), Some(500 * USDC), "the cached figure wins");
+        }
+
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
+        assert_eq!(view.pool.as_deref(), Some((500 * USDC).to_string().as_str()));
+        assert_eq!(
+            view.prizes,
+            vec![
+                (300 * USDC).to_string(),
+                (200 * USDC).to_string(),
+                "0".to_string(),
+                "0".to_string()
+            ],
+            "60/40 of the SPONSORED pool, not of the (zero) entry fees"
+        );
+
+        // An overlay event: entries AND sponsorship. The cached figure covers
+        // both, where the derived one would only ever see the entries.
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            let t = ts.get_mut(&tid).unwrap();
+            t.buy_in = Some((10 * USDC).to_string());
+            t.pool = Some(540 * USDC); // 500 sponsored + 4 × 10 entries
+            assert_eq!(pool_of(t, 4), Some(540 * USDC));
+            t.pool = None;
+            assert_eq!(
+                pool_of(t, 4),
+                Some(40 * USDC),
+                "the fallback understates a sponsored pool rather than overstating it"
+            );
+        }
     }
 
     #[tokio::test]

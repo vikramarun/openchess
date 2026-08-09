@@ -23,6 +23,7 @@ import {
   fetchTournament,
   fetchTournaments,
   rememberCasualIdentity,
+  kindOf,
   sameEntrant,
   type Standing,
   type Tournament,
@@ -66,6 +67,48 @@ const CUSTOM_PAYOUT = "custom";
 
 /** A tournament's prize structure, by preset name when it matches one. */
 const payoutLabel = (t: Tournament) => presetLabel(t.payout.bps) ?? formatPayout(t.payout.bps);
+
+/** A non-zero pool as USDC, or null. Never throws on a malformed figure — this
+ *  runs inside a render. */
+function poolLabel(pool: string | null): string | null {
+  if (!pool) return null;
+  try {
+    return BigInt(pool) > 0n ? `${fmtUsdc(pool)} USDC pool` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The money terms: what entry costs, what's in the pot, how it splits.
+ *
+ *  One helper for the lobby card and the detail header so they can't drift, and
+ *  because getting this wrong is easy: `buy_in` is `"0"` for a free
+ *  sponsor-funded event, which is a TRUTHY string — branching on it directly
+ *  renders "0 USDC entry" and tags an unranked event Ranked. Go through
+ *  `kindOf`. */
+function Terms({ t }: { t: Tournament }) {
+  const kind = kindOf(t);
+  if (kind === "casual") return <>casual</>;
+  const pool = poolLabel(t.pool);
+  return (
+    <>
+      {kind === "buyin" ? (
+        <>
+          {fmtUsdc(t.buy_in)} USDC entry{" "}
+          <span className="tag tag-rated" title="Ranked: moves your ranked Elo">
+            Ranked
+          </span>
+        </>
+      ) : (
+        // Free entry is sponsor-funded: real prize money, nothing risked — so it
+        // moves casual Elo, not ranked, and carries no Ranked tag.
+        <>free entry</>
+      )}
+      {pool ? <> · {pool}</> : null} · prizes{" "}
+      <span title={formatPayout(t.payout.bps)}>{payoutLabel(t)}</span>
+    </>
+  );
+}
 
 const shortName = (p: string) =>
   p.startsWith("0x") && p.length === 42 ? `${p.slice(0, 6)}…${p.slice(-4)}` : p;
@@ -431,20 +474,10 @@ function TournamentClient() {
             <div className="muted" style={{ fontSize: 13 }}>
               {/* A buy-in is the only money in a tournament, and it's what makes
                   its games ranked — nothing else on this page would say so. */}
-              {openT.buy_in ? (
-                <>
-                  {fmtUsdc(openT.buy_in)} USDC entry{" "}
-                  <span className="tag tag-rated" title="Ranked: moves your ranked Elo">
-                    Ranked
-                  </span>{" "}
-                  {/* The structure is fixed at creation and can't be changed
-                      afterwards, so it belongs next to the entry fee: it is half
-                      of what an entrant is agreeing to. */}
-                  · prizes {payoutLabel(openT)}
-                </>
-              ) : (
-                "casual"
-              )}{" "}
+              {/* The structure is fixed at creation and can't be changed
+                  afterwards, so it belongs next to the entry fee: it is half of
+                  what an entrant is agreeing to. */}
+              <Terms t={openT} />{" "}
               · {openT.players.length} entrant{openT.players.length === 1 ? "" : "s"}
               {openT.total_rounds > 0 &&
                 ` · round ${Math.min(openT.current_round + 1, openT.total_rounds)} of ${openT.total_rounds}`}
@@ -706,15 +739,7 @@ function TournamentClient() {
                       {t.name} <span className={`status-pill ${t.status}`}>{t.status}</span>
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
-                      {t.buy_in ? (
-                        <>
-                          {fmtUsdc(t.buy_in)} USDC entry{" "}
-                          <span className="tag tag-rated">Ranked</span> · prizes{" "}
-                          <span title={formatPayout(t.payout.bps)}>{payoutLabel(t)}</span>
-                        </>
-                      ) : (
-                        "casual"
-                      )}{" "}
+                      <Terms t={t} />{" "}
                       · {t.players.length} entrant{t.players.length === 1 ? "" : "s"}
                       {t.total_rounds > 0 &&
                         ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}

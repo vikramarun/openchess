@@ -105,8 +105,13 @@ export function TournamentClaim({
   }, [tid, address, rootSet, hasClaimed]);
 
   const now = Math.floor(Date.now() / 1000);
+  // A free-entry (sponsor-funded) tournament has no entry to give back, and the
+  // contract refuses `claimRefund` on one outright — so offering the button
+  // would be a promise that reverts. The sponsor reclaims their own pool with
+  // `refundSponsorship`; an entrant here is owed nothing.
+  const refundable = buyIn > 0n;
   const refundReady =
-    !settled && settleTimeout != null && now > openedAt + settleTimeout && !hasClaimed;
+    refundable && !settled && settleTimeout != null && now > openedAt + settleTimeout && !hasClaimed;
 
   // Single source of truth for what this tournament shows — both the rendered
   // node and the parent's header gate derive from it (no duplicated conditions).
@@ -119,7 +124,7 @@ export function TournamentClaim({
           ? "claim"
           : refundReady
             ? "refund"
-            : status === "abandoned" && !settled && settleTimeout != null
+            : refundable && status === "abandoned" && !settled && settleTimeout != null
               ? "pending"
               : null;
 

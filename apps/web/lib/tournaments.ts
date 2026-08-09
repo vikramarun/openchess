@@ -53,8 +53,39 @@ export type Tournament = {
    *  a server that predates the field). Computed server-side by the same
    *  function that settles, so this is the table that actually pays. */
   prizes: string[];
+  /** The prize pool in USDC base units — entries plus sponsorship. `null` when
+   *  there is no pool. A free event is `buy_in: "0"` with a pool here. */
+  pool: string | null;
   age_secs: number;
 };
+
+/** What kind of tournament this is.
+ *
+ *  `buy_in` carries two facts at once: whether there is an onchain prize pool
+ *  (non-null) and what entry costs (its value, which may be `"0"` for a
+ *  sponsor-funded free event). Never branch on `buy_in` directly — `"0"` is a
+ *  TRUTHY string, so `t.buy_in ? … : "casual"` renders a free event as a
+ *  0 USDC entry, and tags it Ranked when it is not. */
+export type TournamentKind = "casual" | "free" | "buyin";
+
+export function kindOf(t: Pick<Tournament, "buy_in">): TournamentKind {
+  // Empty/whitespace is checked before BigInt because `BigInt("")` is `0n`
+  // rather than a throw — so a blank field would otherwise classify as a
+  // *funded free event* and advertise a prize pool that doesn't exist.
+  if (t.buy_in == null || t.buy_in.trim() === "") return "casual";
+  try {
+    return BigInt(t.buy_in) > 0n ? "buyin" : "free";
+  } catch {
+    return "casual"; // unparseable: treat as no pool rather than throw in a render
+  }
+}
+
+/** Only a paid entry moves ranked Elo — the server's `tournament_ladder` rule.
+ *  A free event pays real USDC but risks nothing, so it counts as casual. */
+export const isRanked = (t: Pick<Tournament, "buy_in">): boolean => kindOf(t) === "buyin";
+
+/** Is there prize money at all (whoever funded it)? */
+export const hasPrizePool = (t: Pick<Tournament, "buy_in">): boolean => kindOf(t) !== "casual";
 
 export type ClaimableTournament = {
   tournament_id: string;
@@ -114,6 +145,7 @@ function normalize(id: string, view: Partial<Omit<Tournament, "id">>): Tournamen
     // Never synthesized: an invented prize column would be a number the contract
     // has no intention of sending. Absent means "don't show one".
     prizes: Array.isArray(view.prizes) ? view.prizes : [],
+    pool: view.pool ?? null,
     age_secs: view.age_secs ?? 0,
   };
 }
