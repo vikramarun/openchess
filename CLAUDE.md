@@ -153,7 +153,19 @@ wallet.
   and float to whatever is newest otherwise, which resolved a mixed 4.84.0/4.96.0
   tree. They look removable and are not. `pnpm.overrides` does **not** fix this
   (these resolve as auto-installed peers), and pnpm settings live in
-  `pnpm-workspace.yaml`, not the package.json `pnpm` field.
+  `pnpm-workspace.yaml`, not the package.json `pnpm` field. The SDK also drags
+  in two packages with **build scripts** (`sharp`, `bigint-buffer`), both
+  declined in `allowBuilds` — a dependency that is neither allowed nor refused
+  fails the install outright on pnpm 11 and only warns on pnpm 10, so add every
+  new one there. That version split is why `packageManager` is pinned:
+  CI's `corepack enable` had no version and drifted onto 11 while local stayed
+  on 10, which made the failure invisible locally and fatal in CI, on an install
+  that never reached a test. The pin stays on the **10.x** line on purpose —
+  pnpm 11 imports `node:sqlite` and so needs Node 24, which neither CI (no
+  `setup-node`) nor Vercel pins, so requiring it would trade one unpinned
+  toolchain for another with the deploy in the blast radius. The strictness that
+  costs us is asserted directly in `ci.yml` instead, by grepping the install log
+  — which is only reliable *because* the version is pinned.
   (2) **A missing `NEXT_PUBLIC_DYNAMIC_ENV_ID` used to white-screen the site.**
   `DynamicContextProvider` *throws* on an empty environmentId, and the root error
   boundary turns that into a blank page — so one unset env var took down

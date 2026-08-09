@@ -2,7 +2,7 @@
   "name": "openchess-web",
   "version": "0.1.0",
   "private": true,
-  "//packageManager": "Pinned so local, CI and Vercel resolve the same pnpm. CI runs `corepack enable` with no version, and nothing here used to pin one, so it silently tracked whatever corepack defaulted to — which drifted to pnpm 11 while local stayed on 10, and pnpm 11 turns an un-allowlisted dependency build script into a hard install error while 10 only warns. Result: green locally, red in CI, on an install that never reached a test. Staying on the 10.x line deliberately: pnpm 11 needs Node 24 (it imports node:sqlite), and neither this repo's CI nor Vercel pins a Node version, so requiring it would trade one unpinned-toolchain failure for another. The strictness that difference cost us is asserted explicitly in ci.yml instead.",
+  "//packageManager": "Pins local + CI + Vercel to one pnpm; staying on 10.x is deliberate. See CLAUDE.md.",
   "packageManager": "pnpm@10.34.5",
   "description": "OpenChess: engine-vs-engine chess for non-custodial USDC stakes on Base.",
   "scripts": {
