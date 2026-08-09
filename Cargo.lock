@@ -1359,6 +1359,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "book-gen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "shakmaty",
+]
+
+[[package]]
 name = "borsh"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1417,6 +1425,7 @@ dependencies = [
  "game-engine",
  "ledger",
  "protocol",
+ "rand 0.9.4",
  "reqwest 0.12.28",
  "rustls",
  "serde",

@@ -406,4 +406,70 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   check("the shipped book answers 1…c5", bookChildren(real, posAfter(["e2e4", "c7c5"])).length > 0, true);
 }
 
+// --- the castling-notation trap, across every shipped book -----------------
+// A king-takes-rook move reaching an engine silently truncates its position and
+// every move it returns afterwards is illegal, which the seat resigns over
+// (#35 fixed exactly that in public/book.json). Polyglot's ON-DISK form for
+// castling genuinely IS king-takes-rook, so the guarantee we need is that
+// decodeMove converts it on the way out — for every entry, in every book.
+{
+  const all = concatBooks(
+    BOOKS.map((meta) => {
+      const b = readFileSync(`public/books/${meta.id}.bin`);
+      return parseBook(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+    }),
+  );
+
+  // Walk the merged repertoire from the start position. Merged, because a book
+  // holds only its own side's moves and a single-book walk dies at ply one.
+  let decoded = 0;
+  let castles = 0;
+  const problems: string[] = [];
+  const visited = new Set<string>();
+  const stack: string[][] = [[]];
+  while (stack.length && decoded < 60000) {
+    const hist = stack.pop()!;
+    const pos = Chess.default();
+    let replayable = true;
+    for (const u of hist) {
+      const m = parseUci(u);
+      if (!m || !pos.isLegal(m)) {
+        replayable = false;
+        break;
+      }
+      pos.play(m);
+    }
+    if (!replayable) continue;
+    const key = String(polyglotKey(pos));
+    if (visited.has(key)) continue;
+    visited.add(key);
+
+    for (const e of entriesFor(all, polyglotKey(pos))) {
+      const uci = decodeMove(pos, e.move);
+      decoded++;
+      if (!uci) {
+        problems.push(`undecodable after ${hist.join(" ")}`);
+        continue;
+      }
+      const mv = parseUci(uci);
+      if (!mv || !pos.isLegal(mv) || !("from" in mv)) {
+        problems.push(`illegal ${uci} after ${hist.join(" ")}`);
+        continue;
+      }
+      const piece = pos.board.get(mv.from);
+      const target = pos.board.get(mv.to);
+      if (piece?.role === "king" && target?.role === "rook" && target.color === piece.color) {
+        problems.push(`king-takes-rook ${uci} after ${hist.join(" ")}`);
+      }
+      if (piece?.role === "king" && Math.abs((mv.to & 7) - (mv.from & 7)) === 2) castles++;
+      if (hist.length < 10) stack.push([...hist, uci]);
+    }
+  }
+
+  check("every shipped book entry is legal and standard UCI", problems.slice(0, 3), []);
+  check("the walk actually covered the books", decoded > 10000, true);
+  // Without castles in range the check above would pass vacuously.
+  check("…including real castling moves", castles > 100, true);
+}
+
 process.exit(failed === 0 ? 0 : 1);

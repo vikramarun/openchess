@@ -52,7 +52,7 @@ pub struct Clock {
 pub struct Wager {
     pub amount: Decimal,
     pub currency: String,
-    /// Opaque reference to the on-chain / ledger escrow record once locked.
+    /// Opaque reference to the onchain / ledger escrow record once locked.
     pub escrow_ref: Option<String>,
 }
 
@@ -109,6 +109,18 @@ pub enum ServerMessage {
     Welcome {
         session_id: Uuid,
         server_time_ms: u64,
+        /// Milliseconds left for BOTH seats to send `Ready` before the server
+        /// gives up on this game and voids it. `None` once the game has begun
+        /// (or on a server that predates the field).
+        ///
+        /// Exists so a client that gates `Ready` behind a human — the stakes
+        /// confirmation — can show a deadline that is actually true. The window
+        /// starts when the room is created, not when this socket connects, and
+        /// the gap between those is however long the client took to boot its
+        /// engine. A client counting down from its own constant will happily
+        /// promise time that the server has already taken back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_deadline_ms: Option<u64>,
     },
     /// A pairing was made; the player should spawn their engine and send `Ready`.
     MatchFound {

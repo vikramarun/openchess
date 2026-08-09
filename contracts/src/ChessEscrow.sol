@@ -20,7 +20,7 @@ interface IERC20 {
 ///  - A game is settled by submitting a **time-bounded EIP-712 signed result**
 ///    from the platform oracle. Anyone may relay the signature. The oracle can
 ///    only move a locked stake between the two committed players (minus the rake
-///    snapshotted at open) — it can never mint balance or pay outsiders.
+///    snapshotted at open), so it can never mint balance or pay outsiders.
 ///  - `claimTimeout` refunds both stakes if a game is never settled.
 contract ChessEscrow {
     // --- storage ----------------------------------------------------------
@@ -412,7 +412,7 @@ contract ChessEscrow {
     }
 
     /// If a tournament is never settled within the timeout, each entrant can
-    /// permissionlessly reclaim their buy-in. O(1) per entrant — no oracle and
+    /// permissionlessly reclaim their entry. O(1) per entrant, with no oracle and
     /// no entrant-list needed (non-custodial safety net at any field size).
     function claimRefund(bytes32 tid, address account) external {
         Tournament storage t = tournaments[tid];

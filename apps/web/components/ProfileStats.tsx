@@ -52,7 +52,7 @@ export function ProfileStats({ address }: { address: string }) {
     // Validate the wallet before interpolating it into the API path — a route
     // param is user-controlled, so reject anything that isn't a hex address.
     if (!ADDR_RE.test(me)) {
-      setErr("invalid wallet address");
+      setErr("That isn’t a valid wallet address.");
       return;
     }
     (async () => {
@@ -67,7 +67,7 @@ export function ProfileStats({ address }: { address: string }) {
           setGames(Array.isArray(gr) ? gr : []);
         }
       } catch {
-        if (live) setErr("could not load profile — is the server running?");
+        if (live) setErr("Couldn’t load the profile. Is the server running?");
       }
     })();
     return () => {
@@ -122,7 +122,7 @@ export function ProfileStats({ address }: { address: string }) {
         </div>
         <div className="stat">
           <div className={`v ${netClass}`}>{p ? fmtUsdcSigned(p.net) : "…"}</div>
-          <div className="l">Net winnings (USDC)</div>
+          <div className="l">Net USDC</div>
         </div>
       </div>
 

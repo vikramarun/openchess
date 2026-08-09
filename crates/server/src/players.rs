@@ -66,7 +66,7 @@ struct GameDetailView {
 /// move list, so the web app can decide live-vs-replay, replay a finished game,
 /// and show a wagered game's settlement status. Public — all of it is already
 /// public (moves are broadcast to live spectators; wallets appear in
-/// `/games/live` and on-chain).
+/// `/games/live` and onchain).
 async fn game_detail(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

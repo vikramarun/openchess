@@ -137,12 +137,12 @@ async fn verify(
 ) -> Result<Json<VerifyResp>, StatusCode> {
     let fields = SiweFields::parse(&req.message).ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Fail closed on misconfig: a real (on-chain) deployment must set SIWE_DOMAIN
+    // Fail closed on misconfig: a real (onchain) deployment must set SIWE_DOMAIN
     // explicitly. Otherwise `expected_domain()` falls back to `localhost:3000`,
     // and a signature a user was tricked into producing for `localhost:3000`
     // would authenticate against the production node.
     if state.0.settlement.is_onchain() && std::env::var("SIWE_DOMAIN").is_err() {
-        tracing::error!("SIWE_DOMAIN unset on an on-chain deployment — refusing sign-in");
+        tracing::error!("SIWE_DOMAIN unset on an onchain deployment — refusing sign-in");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 

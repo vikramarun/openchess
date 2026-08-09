@@ -22,9 +22,14 @@ struct Entry {
 }
 
 /// How to choose among multiple book moves for a position.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum BookPolicy {
-    /// Highest-weight move (deterministic).
+    /// Weight-proportional random pick — what Polyglot books are weighted FOR,
+    /// and the only sane default for a bot that plays continuously. `Best`
+    /// would march the house bot down one identical line every single game.
+    #[default]
+    Weighted,
+    /// Highest-weight move (deterministic). For reproducible runs.
     Best,
 }
 
@@ -36,7 +41,7 @@ pub struct OpeningBook {
 
 impl OpeningBook {
     /// Load and validate a Polyglot `.bin` file.
-    pub fn open(path: &Path, max_ply: u32) -> Result<OpeningBook> {
+    pub fn open(path: &Path, max_ply: u32, policy: BookPolicy) -> Result<OpeningBook> {
         let bytes = std::fs::read(path).with_context(|| format!("reading book {path:?}"))?;
         if bytes.len() % 16 != 0 {
             anyhow::bail!("book size {} is not a multiple of 16 bytes", bytes.len());
@@ -54,8 +59,21 @@ impl OpeningBook {
         Ok(OpeningBook {
             entries,
             max_ply,
-            policy: BookPolicy::Best,
+            policy,
         })
+    }
+
+    /// How many positions this book knows (distinct keys), for a startup log.
+    pub fn positions(&self) -> usize {
+        let mut n = 0;
+        let mut last: Option<u64> = None;
+        for e in &self.entries {
+            if last != Some(e.key) {
+                n += 1;
+                last = Some(e.key);
+            }
+        }
+        n
     }
 
     /// Pick a book move for the position, or `None` if out of book / past the
@@ -66,22 +84,10 @@ impl OpeningBook {
         }
         let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0;
 
-        // Collect all entries for this key (binary search to the range).
+        // All entries for this key sit contiguously (the file is key-sorted).
         let lo = self.entries.partition_point(|e| e.key < key);
-        let mut best: Option<Entry> = None;
-        for e in &self.entries[lo..] {
-            if e.key != key {
-                break;
-            }
-            match self.policy {
-                BookPolicy::Best => {
-                    if best.map(|b| e.weight > b.weight).unwrap_or(true) {
-                        best = Some(*e);
-                    }
-                }
-            }
-        }
-        let entry = best?;
+        let n = self.entries[lo..].iter().take_while(|e| e.key == key).count();
+        let entry = self.choose(&self.entries[lo..lo + n])?;
 
         // Match the encoded Polyglot move against a legal move and emit UCI.
         for m in pos.legal_moves() {
@@ -91,6 +97,38 @@ impl OpeningBook {
         }
         None
     }
+
+    /// Pick one of a position's book entries under the configured policy.
+    fn choose(&self, candidates: &[Entry]) -> Option<Entry> {
+        match self.policy {
+            BookPolicy::Best => candidates.iter().copied().max_by_key(|e| e.weight),
+            BookPolicy::Weighted => {
+                // Sum as u64: a popular position in a big book can carry more
+                // total weight than a u16 holds.
+                let total: u64 = candidates.iter().map(|e| e.weight as u64).sum();
+                // An all-zero-weight position is legal in the format; treat the
+                // entries as equally likely rather than returning nothing.
+                if total == 0 {
+                    let i = fastrand_below(candidates.len() as u64)? as usize;
+                    return candidates.get(i).copied();
+                }
+                let mut roll = fastrand_below(total)?;
+                for e in candidates {
+                    let w = e.weight as u64;
+                    if roll < w {
+                        return Some(*e);
+                    }
+                    roll -= w;
+                }
+                candidates.last().copied()
+            }
+        }
+    }
+}
+
+/// Uniform random in `0..n`, or `None` when `n == 0` (empty candidate list).
+fn fastrand_below(n: u64) -> Option<u64> {
+    (n > 0).then(|| rand::Rng::random_range(&mut rand::rng(), 0..n))
 }
 
 /// Encode a legal move into the Polyglot 16-bit move representation so it can be
@@ -173,5 +211,147 @@ mod tests {
         assert_eq!(book.pick(&pos, 0).as_deref(), Some("e2e4"));
         // past the ply limit -> no book move
         assert_eq!(book.pick(&pos, 16), None);
+    }
+
+    fn entry(mv: &str, weight: u16, pos: &Chess) -> Entry {
+        let m = pos
+            .legal_moves()
+            .into_iter()
+            .find(|m| UciMove::from_move(m, CastlingMode::Standard).to_string() == mv)
+            .unwrap();
+        Entry {
+            key: pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0,
+            mv: encode_move(&m),
+            weight,
+        }
+    }
+
+    #[test]
+    fn weighted_varies_the_opening_where_best_repeats_it() {
+        // The reason `Weighted` had to exist: a house bot playing continuously
+        // under `Best` marches down one identical line forever.
+        let pos = Chess::default();
+        let entries = vec![entry("e2e4", 3, &pos), entry("d2d4", 2, &pos)];
+        let best = OpeningBook {
+            entries: entries.clone(),
+            max_ply: 16,
+            policy: BookPolicy::Best,
+        };
+        for _ in 0..20 {
+            assert_eq!(best.pick(&pos, 0).as_deref(), Some("e2e4"));
+        }
+
+        let weighted = OpeningBook {
+            entries,
+            max_ply: 16,
+            policy: BookPolicy::Weighted,
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            seen.insert(weighted.pick(&pos, 0).unwrap());
+        }
+        // P(missing one) < (3/5)^200 — not a flaky assertion.
+        assert_eq!(
+            seen,
+            ["d2d4".to_string(), "e2e4".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn weighted_never_picks_a_zero_weight_move_when_others_have_weight() {
+        // Walking the roll must skip zero-weight entries, not fence-post onto
+        // them — a book can legitimately carry "known but don't play" moves.
+        let pos = Chess::default();
+        let book = OpeningBook {
+            entries: vec![entry("e2e4", 5, &pos), entry("a2a4", 0, &pos)],
+            max_ply: 16,
+            policy: BookPolicy::Weighted,
+        };
+        for _ in 0..200 {
+            assert_eq!(book.pick(&pos, 0).as_deref(), Some("e2e4"));
+        }
+    }
+}
+
+/// The book shipped in the image. These run the REAL reader against the file
+/// `book-gen` wrote, which is what stops the generator's Polyglot encoding and
+/// the reader's from drifting apart: a mismatch there produces a book that
+/// parses fine and never hits, and nothing else would catch it.
+#[cfg(test)]
+mod shipped_book {
+    use super::*;
+    use shakmaty::san::San;
+
+    fn book() -> OpeningBook {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/house-book.bin");
+        OpeningBook::open(&path, 16, BookPolicy::Weighted).expect("shipped book must load")
+    }
+
+    /// Play SAN moves and return the position they reach.
+    fn after(moves: &str) -> Chess {
+        let mut pos = Chess::default();
+        for tok in moves.split_whitespace() {
+            let m = San::from_ascii(tok.as_bytes()).unwrap().to_move(&pos).unwrap();
+            pos = pos.play(&m).unwrap();
+        }
+        pos
+    }
+
+    #[test]
+    fn shipped_book_answers_the_start_position() {
+        let b = book();
+        assert!(b.positions() > 400, "book looks truncated: {}", b.positions());
+        let mv = b.pick(&Chess::default(), 0).expect("no book move for startpos");
+        assert!(
+            ["e2e4", "d2d4", "c2c4", "g1f3"].contains(&mv.as_str()),
+            "unexpected first move {mv}"
+        );
+    }
+
+    #[test]
+    fn shipped_book_answers_as_black_too() {
+        // Both colours come from the same lines, so a reply must be in there.
+        let b = book();
+        assert!(b.pick(&after("e4"), 1).is_some(), "no reply to 1.e4");
+        assert!(b.pick(&after("d4"), 1).is_some(), "no reply to 1.d4");
+    }
+
+    #[test]
+    fn shipped_book_follows_a_line_into_the_middlegame() {
+        // Six plies deep in the Najdorf — proves entries exist past the first
+        // couple of moves, which is where the clock was actually going.
+        let b = book();
+        assert!(
+            b.pick(&after("e4 c5 Nf3 d6 d4 cxd4"), 6).is_some(),
+            "book runs dry at ply 6"
+        );
+    }
+
+    #[test]
+    fn shipped_book_handles_transpositions() {
+        // Polyglot keys POSITIONS, not move orders, so a line reached a
+        // different way still hits. Najdorf with ...a6 played before ...Nf6
+        // is the same position as the repertoire's move order, and the book
+        // has to answer it — otherwise the bot drops out of book the first
+        // time an opponent shuffles two moves.
+        let b = book();
+        let shuffled = after("e4 c5 Nf3 d6 d4 cxd4 Nxd4 a6 Nc3 Nf6");
+        let repertoire_order = after("e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6");
+        assert_eq!(
+            shuffled.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0,
+            repertoire_order.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0,
+            "these move orders should reach one position"
+        );
+        assert!(b.pick(&shuffled, 10).is_some(), "no entry after a transposition");
+    }
+
+    #[test]
+    fn shipped_book_stops_at_the_ply_limit() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/house-book.bin");
+        let b = OpeningBook::open(&path, 4, BookPolicy::Weighted).unwrap();
+        assert!(b.pick(&Chess::default(), 0).is_some());
+        assert!(b.pick(&after("e4 c5 Nf3 d6"), 4).is_none());
     }
 }

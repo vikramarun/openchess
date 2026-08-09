@@ -20,6 +20,10 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# Weighted book-move selection. Without it a Polyglot book plays its single
+# highest-weight line every game, which for a 24/7 house bot is worse than
+# having no book at all.
+rand = "0.9"
 # rustls (not native-tls) so prebuilt binaries carry their own TLS and never
 # depend on the user's system OpenSSL. Without a TLS feature, wss:// fails at
 # runtime with "TLS support not compiled in" — production is wss.

@@ -12,7 +12,9 @@ import { browserSeat, ensureRepertoireLoaded } from "@/lib/browserBot";
 import { prewarmPlayerEngine } from "@/lib/playerEngine";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
+import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
+import { acceptFromGroup, groupOffers, joinErrorMessage, type OfferGroup } from "@/lib/offers";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -48,13 +50,24 @@ type LiveGame = {
   initial_secs: number;
   increment_secs: number;
 };
-type Active = { gameId: string; token: string; color: "white" | "black"; stake?: string | null };
+type Active = {
+  gameId: string;
+  token: string;
+  color: "white" | "black";
+  stake?: string | null;
+  /** Who we drew, resolved server-side, for the pre-game confirmation. */
+  opponent?: { name: string; declared_engine?: string | null } | null;
+  initialSecs?: number;
+  incrementSecs?: number;
+};
 type Pending = {
   offerId: string;
   cancelKey: string | null;
   label: string;
   stakeBase: string | null;
   bot: boolean;
+  initialSecs: number;
+  incrementSecs: number;
 };
 
 /** One seat's display: name if declared, else shortened wallet, else fallback. */
@@ -97,7 +110,7 @@ export function Lobby() {
           setLive(l);
         }
       } catch {
-        if (alive) setErr("server unreachable");
+        if (alive) setErr("Server unreachable.");
       }
     };
     tick();
@@ -128,7 +141,7 @@ export function Lobby() {
             // Browser seat but no token: our session is no longer authorized
             // (expired sign-in). Never silently spectate a seat we own.
             setPending(null);
-            setErr("Your sign-in expired while waiting — sign in again; this game can't start.");
+            setErr("Your sign-in expired while you were waiting. Sign in again to start a new game.");
             return;
           }
           setActive({
@@ -136,6 +149,9 @@ export function Lobby() {
             token: j.token,
             color: (j.color as "white" | "black") ?? "white",
             stake: pending.stakeBase,
+            opponent: j.opponent ?? null,
+            initialSecs: pending.initialSecs,
+            incrementSecs: pending.incrementSecs,
           });
           setPending(null);
         }
@@ -204,10 +220,10 @@ export function Lobby() {
           r.status === 401
             ? SESSION_EXPIRED
             : r.status === 503
-              ? "The server is in maintenance — no new games can be started right now."
+              ? MAINTENANCE_MSG
               : r.status === 424
-                ? "Your bot is offline — check the chess-client window."
-                : `Couldn't post the game (${r.status}).`,
+                ? BOT_OFFLINE_MSG
+                : `Couldn’t post the game (${r.status}).`,
         );
       const j = await r.json();
       setPending({
@@ -216,6 +232,8 @@ export function Lobby() {
         label: `${tc.label} · ${wantStake ? `${stakeStr} USDC` : "free"}`,
         stakeBase: stakeBase ?? null,
         bot: botPlays,
+        initialSecs: tc.initial,
+        incrementSecs: tc.inc,
       });
       setPickTc(null);
     } catch {
@@ -225,7 +243,8 @@ export function Lobby() {
     }
   };
 
-  const acceptOffer = async (o: Offer) => {
+  const acceptOffer = async (group: OfferGroup<Offer>) => {
+    const o = group.offer;
     setErr(null);
     const wagered = !!o.stake;
     if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
@@ -240,25 +259,22 @@ export function Lobby() {
       }
     }
     try {
-      const r = await authedFetch(`${SERVER_HTTP}/park/offers/${o.offer_id}/accept`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
-        ),
-      });
-      if (!r.ok)
-        return setErr(
-          r.status === 503
-            ? "The server is in maintenance — no new games can be started right now."
-            : r.status === 502
-              ? "Couldn't lock stakes on-chain — check both players have deposited enough."
-              : r.status === 424
-                ? "Your bot is offline — check the chess-client window."
-                : r.status === 410
-                  ? "That challenger's bot went offline — the offer is gone."
-                  : `Couldn't join (${r.status}).`,
-        );
+      // A row can stand for several identical seats (the house bot posts one
+      // per concurrent autopilot), so losing the race for the first is not a
+      // failure while another is free. The walk and the status wording both
+      // live in lib/offers.ts, where they are tested. That is where the bug was
+      // that told a user with a mid-game bot that someone stole the seat.
+      const r = await acceptFromGroup(group.ids, (id) =>
+        authedFetch(`${SERVER_HTTP}/park/offers/${id}/accept`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            botPlays ? { seat: "bot", uci_options: loadBotOptions() } : browserSeat(),
+          ),
+        }),
+      );
+      if (!r) return; // empty group: unreachable, but never fall through as OK
+      if (!r.ok) return setErr(joinErrorMessage(r.status, { botPlays }));
       const j = await r.json();
       if (j.seat === "bot" || !j.token) {
         // The bot plays this seat; watch the game live.
@@ -270,6 +286,9 @@ export function Lobby() {
         token: j.token,
         color: (j.color as "white" | "black") ?? "black",
         stake: o.stake,
+        opponent: j.opponent ?? { name: seatLabel(o.poster_name, o.poster_addr, "casual") },
+        initialSecs: o.initial_secs,
+        incrementSecs: o.increment_secs,
       });
     } catch {
       setErr("Server unreachable.");
@@ -283,6 +302,10 @@ export function Lobby() {
         token={active.token}
         color={active.color}
         stake={active.stake}
+        confirmStakes
+        opponentPreview={active.opponent ?? null}
+        initialSecs={active.initialSecs}
+        incrementSecs={active.incrementSecs}
         onDone={() => setActive(null)}
       />
     );
@@ -291,6 +314,8 @@ export function Lobby() {
   return (
     <>
       {/* Play: pick a time control */}
+      {/* `.quick-play` is a legacy class name — it styles THIS lobby card, not
+          the /play page that used to share the name (now "Test Engine"). */}
       <div className="quick-play" style={{ marginBottom: 16 }}>
         {pending ? (
           <div>
@@ -300,7 +325,7 @@ export function Lobby() {
             <div className="qp-desc muted">
               Your <b>{pending.label}</b> game is posted.{" "}
               {pending.bot
-                ? "When someone joins, your bot plays it and you'll be taken to the live board."
+                ? "When someone joins, your bot plays it and you’ll be taken to the live board."
                 : "Your engine starts automatically when someone joins."}
             </div>
             <button
@@ -335,7 +360,7 @@ export function Lobby() {
               )}
             </div>
             <div className="qp-desc muted">
-              Pick a time control — play instantly against the house, or open a challenge for
+              Pick a time control. Play the OpenChess bot right now, or open a challenge for
               another player{wagerOn ? " (free or for a USDC stake)" : ""}.
               {!bot.online && (
                 <>
@@ -394,7 +419,7 @@ export function Lobby() {
         <b style={{ color: "var(--text-strong)" }}>Open challenges</b>
         {offers.length === 0 ? (
           <div className="muted" style={{ marginTop: 8 }}>
-            No one’s waiting right now — post a game above and the next player joins you.
+            No one’s waiting right now. Post a game above and the next player joins you.
           </div>
         ) : (
           <table className="history-table" style={{ marginTop: 10 }}>
@@ -407,7 +432,8 @@ export function Lobby() {
               </tr>
             </thead>
             <tbody>
-              {offers.map((o) => {
+              {groupOffers(offers).map((group) => {
+                const o = group.offer;
                 const mine = !!address && o.poster_addr?.toLowerCase() === address.toLowerCase();
                 return (
                   <tr key={o.offer_id}>
@@ -419,19 +445,29 @@ export function Lobby() {
                           🤖 {o.poster_engine}
                         </span>
                       )}
+                      {group.ids.length > 1 && (
+                        <span
+                          className="muted"
+                          style={{ fontSize: 12 }}
+                          title="This challenger has more than one seat free at this time control"
+                        >
+                          {" "}
+                          · {group.ids.length} seats free
+                        </span>
+                      )}
                     </td>
                     <td>
                       {o.stake ? (
                         <>
                           {fmtUsdc(o.stake)} USDC{" "}
-                          <span className="tag tag-rated" title="Rated — affects Elo">
+                          <span className="tag tag-rated" title="Rated: affects Elo">
                             Rated
                           </span>
                         </>
                       ) : (
                         <>
                           Free{" "}
-                          <span className="tag" title="Casual — does not affect Elo">
+                          <span className="tag" title="Casual: does not affect Elo">
                             Casual
                           </span>
                         </>
@@ -451,7 +487,7 @@ export function Lobby() {
                           need {fmtUsdc(o.stake)}
                         </span>
                       ) : (
-                        <button className="ghost" onClick={() => acceptOffer(o)}>
+                        <button className="ghost" onClick={() => acceptOffer(group)}>
                           Join &amp; play
                         </button>
                       )}
@@ -546,7 +582,7 @@ export function Lobby() {
               {pickTc.label} · {TC_NAME[pickTc.label] ?? "Custom"}
             </div>
             <button className="primary modal-play" onClick={() => playNow(pickTc)}>
-              ⚡ Play now — free, vs the house
+              ⚡ Play the OpenChess bot, free
             </button>
             <div className="modal-div">or open a challenge for another player</div>
             {wagerOn && (
@@ -561,10 +597,10 @@ export function Lobby() {
             )}
             {wagerOn && modalStakeBig != null && modalStakeBig > 0n && (
               <div className="stake-callout">
-                Win <b>+{fmtUsdc(profitForStake(modalStakeBig))} USDC</b> — you take your opponent’s
-                stake, less a 1% fee. A draw or opponent no-show returns your stake.
+                Win <b>+{fmtUsdc(profitForStake(modalStakeBig))} USDC</b>. That’s your
+                opponent’s stake, less a 1% fee. A draw or a no-show returns yours.
                 <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                  Rated · non-custodial, settled on-chain by the escrow contract.
+                  Rated. Non-custodial, settled onchain by the escrow contract.
                 </div>
               </div>
             )}
@@ -581,8 +617,8 @@ export function Lobby() {
             </button>
             {modalUnderfunded && modalStakeBig != null && (
               <div style={{ color: "#e0a96c", fontSize: 13 }}>
-                Available {fmtUsdc(available)} USDC &lt; stake {fmtUsdc(modalStakeBig)} — deposit
-                more first.
+                Available {fmtUsdc(available)} USDC is under the {fmtUsdc(modalStakeBig)} stake.
+                Deposit more first.
               </div>
             )}
             {err && <div style={{ color: "#e06c6c", fontSize: 13 }}>{err}</div>}

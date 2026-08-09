@@ -25,11 +25,11 @@ export function Header() {
         <Link href="/">Play</Link>
         <Link href="/gauntlet">Gauntlet</Link>
         <Link href="/tournament">Tournament</Link>
-        <Link href="/play">Quick&nbsp;Play</Link>
+        <Link href="/play">Test&nbsp;Engine</Link>
         <Link href="/profile">Profile</Link>
       </nav>
       <div className="header-actions">
-        <span className="engine-pill" title="Stockfish runs in your browser — free">
+        <span className="engine-pill" title="Stockfish runs in your browser, free">
           <span className={`dot ${status}`} /> {label}
         </span>
         <WalletMenu />

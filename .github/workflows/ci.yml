@@ -43,6 +43,17 @@ jobs:
       - name: Cargo test (workspace)
         run: cargo test --workspace
 
+      # assets/house-book.bin is the one file review can't read. Regenerating
+      # it and diffing proves the committed blob is exactly what the checked-in
+      # repertoire produces — otherwise "generated, not downloaded" is a claim
+      # reviewers have to take on faith. The generator is deterministic, so an
+      # unchanged repertoire gives an empty diff.
+      - name: Opening book matches its source repertoire
+        run: |
+          cargo run -p book-gen -- assets/house-book.bin
+          git diff --exit-code --stat assets/house-book.bin \
+            || { echo "::error::assets/house-book.bin is stale — re-run 'cargo run -p book-gen -- assets/house-book.bin' and commit the result"; exit 1; }
+
       - name: Web build + tests
         run: |
           corepack enable
@@ -57,4 +68,25 @@ jobs:
           pnpm test:candidates
           pnpm test:eval
           pnpm test:auth
+          # Guards the decline path: a seat that closes its socket instead of
+          # waiting out the void turns a refund into a forfeit of the stake.
+          pnpm test:seat
+          # Added with the ply state machine (#32) but never listed here, so it
+          # had never run. Same trap as the note above; keep this list in step
+          # with package.json.
+          pnpm test:nav
+          # Guards the lobby's offer grouping and the join walk over a group's
+          # seats. A merge key that is too loose collapses two posters into one
+          # row and seats a joiner at the wrong board; the walk is where a
+          # lost race is told apart from a real failure.
+          pnpm test:offers
+          # Guards the two halves of the castling-notation trap: a king-takes-rook
+          # move in the shipped book, or one reaching an engine, silently
+          # truncates the engine's position, and every move it returns after
+          # that is illegal, which the seat used to resign over.
+          pnpm test:openings
+          pnpm test:move
+          # One bestmove answers one `go`. Broadcasting it let an abandoned
+          # search answer for a live one, with a move for the wrong position.
+          pnpm test:engine
           pnpm build

@@ -149,7 +149,7 @@ let generation = 0;
 export async function saveUserBook(file: File): Promise<BookInfo> {
   const bytes = await file.arrayBuffer();
   const entries = parseBook(bytes); // throws on malformed input
-  if (entries.length === 0) throw new Error("book contains no entries");
+  if (entries.length === 0) throw new Error("That book contains no entries.");
   await idb("readwrite", (s) => s.put({ name: file.name, bytes }, BOOK_KEY));
   generation++;
   cachedEntries = entries;

@@ -8,12 +8,10 @@
 // npm package (v18.0.x) — see public/ENGINE.md. Single-threaded avoids the
 // SharedArrayBuffer/COOP+COEP headers a multi-threaded build would require.
 
-import { CandidateCollector, type Harvest } from "./candidates";
-
 /** Worker script; the glue locates the sibling .wasm next to it.
  *
  *  The directory carries a content hash so the 7 MB binary can be served
- *  `immutable` (see next.config.mjs). Next serves public/ with
+ *  `immutable` (next.config.mjs). Next serves public/ with
  *  `max-age=0, must-revalidate` by default, which meant a round trip for the
  *  engine on every cold page. Re-hash the directory when the binary changes —
  *  that is the whole point of the name. */
@@ -21,6 +19,9 @@ const ENGINE_URL = "/engines/sf18-lite-single-a8fbc05e/stockfish-18-lite-single.
 /** Transposition-table size (MB). Modest fixed default — bigger helps slightly
  *  at longer time controls; two engines run at once on the self-play page. */
 const HASH_MB = 64;
+/** Clock reserved per move for the round trip to the server (ms). Matches the
+ *  native client's default (crates/byo-client `DEFAULT_MOVE_OVERHEAD_MS`). */
+const MOVE_OVERHEAD_MS = 250;
 
 /** One `info` line from a search, as the engine reports it: the score is from
  *  the SIDE TO MOVE's perspective (UCI convention) — flip it for a white-relative
@@ -128,10 +129,9 @@ export function parseInfoLine(line: string): EngineInfo | null {
 
 export class BrowserEngine {
   private worker: Worker;
-  /** Mirrors the engine's MultiPV so the handshake value isn't re-sent. */
-  private multiPv = 1;
-  private showWdl = false;
   private listeners: ((line: string) => void)[] = [];
+  /** Waiters for `bestmove`, oldest first — one per outstanding `go`. */
+  private bestmoveWaiters: ((uci: string) => void)[] = [];
   private ready: Promise<void>;
   /** Serializes analyse() searches on the single worker. */
   private analysisQueue: Promise<void> = Promise.resolve();
@@ -148,6 +148,17 @@ export class BrowserEngine {
     this.worker.onmessage = (e: MessageEvent) => {
       const line: string =
         typeof e.data === "string" ? e.data : (e.data && e.data.data) || "";
+      // A `bestmove` answers exactly ONE `go`, in order, so it goes to exactly
+      // one waiter — the oldest. Fanning it out like every other line would let
+      // an abandoned search answer for a live one: a caller that gave up
+      // waiting leaves its search running, and its late `bestmove` would then
+      // resolve the NEXT search too, with a move for the previous position.
+      // Illegal, rejected by the server, and historically resigned over.
+      const best = line.match(/^bestmove\s+(\S+)/);
+      if (best) {
+        this.bestmoveWaiters.shift()?.(best[1]);
+        return;
+      }
       for (const l of [...this.listeners]) l(line);
     };
     // If the worker script fails to load / instantiate, reject `ready` so the
@@ -192,8 +203,12 @@ export class BrowserEngine {
     // wait only affects the truly-slow case, where waiting beats failing.
     await this.waitFor((l) => l.includes("uciok"), 120_000);
     this.send("setoption name MultiPV value 1");
-    this.multiPv = 1;
     this.send(`setoption name Hash value ${HASH_MB}`);
+    // The server charges wall-clock from `your_turn` to the move landing, so a
+    // seat pays for the websocket round trip and for whatever the browser was
+    // doing between postMessage calls. Stockfish reserves 10ms by default —
+    // fine against a local opponent, a steady leak against a remote referee.
+    this.send(`setoption name Move Overhead value ${MOVE_OVERHEAD_MS}`);
     this.send("isready");
     await this.waitFor((l) => l.includes("readyok"));
   }
@@ -203,34 +218,22 @@ export class BrowserEngine {
     return this.ready;
   }
 
-  /** Set the position and `go …`, resolving with the engine's bestmove.
+  /** Drop the engine's accumulated search state (`ucinewgame` clears the hash
+   *  and the position) and wait for it to settle. The recovery path for a seat
+   *  whose engine has gone out of sync with the real game — a dropped command,
+   *  a move it refused to parse — before deciding the engine is unusable.
    *
-   *  `hardStopMs` sends `stop` after a wall-clock deadline, for commands that
-   *  don't self-terminate. `go nodes N` is the case that needs it: it is
-   *  hardware-independent by design, which also means a slow device would
-   *  happily search past its flag. With the wall it gets a shallower search
-   *  instead — degradation, not a lost game. */
-  private go(movesUci: string[], goCmd: string, hardStopMs?: number, onLine?: (l: string) => void): Promise<string> {
-    // A move request preempts the eval bar and then queues behind it, rather
-    // than racing it. Both matter once `go` can send `setoption` (MultiPV):
-    // UCI commands must not interleave, and the move that decides a game
-    // should not wait out an analysis that only decorates one.
-    this.cancelAnalysis?.();
-    const run = () => this.runGo(movesUci, goCmd, hardStopMs, onLine);
-    const p = this.analysisQueue.then(run, run);
-    this.analysisQueue = p.then(
-      () => {},
-      () => {},
-    );
-    return p;
+   *  Call it only with the worker idle: `ucinewgame` during a search is
+   *  undefined behaviour in UCI. `stopSearch()` first if one may be running. */
+  async resync(): Promise<void> {
+    await this.ready;
+    this.send("ucinewgame");
+    this.send("isready");
+    await this.waitFor((l) => l.includes("readyok"));
   }
 
-  private async runGo(
-    movesUci: string[],
-    goCmd: string,
-    hardStopMs?: number,
-    onLine?: (l: string) => void,
-  ): Promise<string> {
+  /** Set the position and `go …`, resolving with the engine's bestmove. */
+  private async go(movesUci: string[], goCmd: string): Promise<string> {
     await this.ready;
     const pos = movesUci.length
       ? `position startpos moves ${movesUci.join(" ")}`
@@ -238,69 +241,48 @@ export class BrowserEngine {
     this.send(pos);
     const result = new Promise<string>((resolve, reject) => {
       const to = setTimeout(() => {
-        cleanup();
+        // Drop our slot in the queue, or every later search would be answered
+        // one bestmove late for the rest of the game.
+        this.bestmoveWaiters = this.bestmoveWaiters.filter((w) => w !== fn);
         reject(new Error("bestmove timeout"));
       }, 120000);
-      const wall =
-        hardStopMs !== undefined && hardStopMs > 0
-          ? setTimeout(() => this.send("stop"), hardStopMs)
-          : null;
-      const fn = (line: string) => {
-        const m = line.match(/^bestmove\s+(\S+)/);
-        if (m) {
-          clearTimeout(to);
-          cleanup();
-          resolve(m[1]);
-          return;
-        }
-        onLine?.(line);
+      const fn = (uci: string) => {
+        clearTimeout(to);
+        resolve(uci);
       };
-      const cleanup = () => {
-        if (wall) clearTimeout(wall);
-        this.listeners = this.listeners.filter((l) => l !== fn);
-      };
-      this.listeners.push(fn);
+      this.bestmoveWaiters.push(fn);
     });
     this.send(goCmd);
     return result;
   }
 
-  /** Best move (UCI) for a caller-built `go` command — the seam the time
-   *  policy drives (lib/timePolicy.ts builds the command, this runs it). */
+  /** End the search in flight early. The engine answers with a `bestmove` as
+   *  usual, so the pending `bestMove*` promise still resolves and the worker is
+   *  left clean — which is the point: a caller that has stopped waiting for a
+   *  search must not leave it running. */
+  stopSearch() {
+    this.send("stop");
+  }
+
+  /** Best move (UCI) for a caller-built `go` command — the seam the time policy
+   *  drives (lib/timePolicy.ts builds the command, this runs it).
+   *
+   *  `hardStopMs` stops a search that does not self-terminate. `go nodes N` is
+   *  the case that needs it: hardware-independent by design, which also means a
+   *  slow device would happily search past its flag. */
   async bestMoveWithPlan(
     movesUci: string[],
     plan: { cmd: string; hardStopMs?: number },
   ): Promise<string> {
-    return this.go(movesUci, plan.cmd, plan.hardStopMs);
-  }
-
-  /** Set MultiPV, skipping the `setoption` when it is already correct — the
-   *  common case, and one fewer command between `position` and `go`. */
-  private setMultiPv(n: number) {
-    const want = Math.max(1, Math.min(5, Math.floor(n)));
-    if (want === this.multiPv) return;
-    this.multiPv = want;
-    this.send(`setoption name MultiPV value ${want}`);
-  }
-
-  /** Search, returning the engine's best move AND the top-N candidates it
-   *  considered. `multiPv` 1 collects nothing beyond the played move, which is
-   *  the full-strength default. */
-  async search(
-    movesUci: string[],
-    plan: { cmd: string; hardStopMs?: number },
-    multiPv: number,
-    opts: { showWdl?: boolean } = {},
-  ): Promise<{ bestmove: string } & Harvest> {
-    await this.ready;
-    if (opts.showWdl !== undefined && opts.showWdl !== this.showWdl) {
-      this.showWdl = opts.showWdl;
-      this.send(`setoption name UCI_ShowWDL value ${opts.showWdl}`);
+    if (plan.hardStopMs === undefined || plan.hardStopMs <= 0) {
+      return this.go(movesUci, plan.cmd);
     }
-    this.setMultiPv(multiPv);
-    const collector = new CandidateCollector();
-    const bestmove = await this.go(movesUci, plan.cmd, plan.hardStopMs, (l) => collector.feed(l));
-    return { bestmove, ...collector.harvest(bestmove) };
+    const wall = setTimeout(() => this.stopSearch(), plan.hardStopMs);
+    try {
+      return await this.go(movesUci, plan.cmd);
+    } finally {
+      clearTimeout(wall);
+    }
   }
 
   /** Best move (UCI) for the given move history under a fixed think time. */
@@ -382,17 +364,18 @@ export class BrowserEngine {
           settled = true;
           clearTimeout(cap);
           clearTimeout(hardStop);
-          this.listeners = this.listeners.filter((l) => l !== fn);
+          this.listeners = this.listeners.filter((l) => l !== info);
+          this.bestmoveWaiters = this.bestmoveWaiters.filter((w) => w !== done);
           stopSearch = null;
           resolve();
         };
-        const fn = (line: string) => {
-          if (line.startsWith("bestmove")) {
-            finish();
-            return;
-          }
-          const info = parseInfoLine(line);
-          if (info && !cancelled) onInfo(info);
+        // This search is a `go` like any other, so it claims a slot in the
+        // bestmove queue; the score lines still come through as ordinary
+        // broadcast output.
+        const done = () => finish();
+        const info = (line: string) => {
+          const parsed = parseInfoLine(line);
+          if (parsed && !cancelled) onInfo(parsed);
         };
         // `stop` makes the engine emit `bestmove`, which is what actually
         // releases the worker for the next search.
@@ -400,7 +383,8 @@ export class BrowserEngine {
         const cap = setTimeout(() => this.send("stop"), maxMs);
         // Backstop: a worker that never answers must not wedge the queue.
         const hardStop = setTimeout(finish, maxMs + 15000);
-        this.listeners.push(fn);
+        this.listeners.push(info);
+        this.bestmoveWaiters.push(done);
         this.send(`go depth ${depth}`);
       });
       if (!cancelled) onDone?.();

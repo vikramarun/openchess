@@ -124,10 +124,21 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socke
                         };
                         match env.msg {
                             ClientMessage::Hello { .. } => {
+                                // Ask the room how long is left to ready up, so
+                                // a client that gates Ready behind a human can
+                                // count down against the real deadline instead
+                                // of its own copy of the number.
+                                let (tx, rx) = oneshot::channel();
+                                let start_deadline_ms =
+                                    match cmd_tx.send(RoomCmd::Snapshot { resp: tx }).await {
+                                        Ok(()) => rx.await.ok().and_then(|s| s.start_deadline_ms),
+                                        Err(_) => None,
+                                    };
                                 let _ = out_tx
                                     .send(ServerMessage::Welcome {
                                         session_id: Uuid::new_v4(),
                                         server_time_ms: 0,
+                                        start_deadline_ms,
                                     })
                                     .await;
                             }

@@ -2,7 +2,6 @@
 // same WebSocket protocol the native client uses, and drives a BrowserEngine.
 
 import { Chess } from "chessops/chess";
-import { parseUci } from "chessops/util";
 
 import {
   ensureBookLoaded,
@@ -15,53 +14,90 @@ import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
 import { budgetMs, goCommand } from "./timePolicy";
+import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
-  /** Called at most once, when the seat's engine fails mid-game. Returning a
-   *  working engine lets the seat play on instead of resigning — which matters
-   *  because a resignation forfeits a real stake. */
+  /** Asked once, before this seat declares itself ready. Resolving false holds
+   *  the seat back: the server starts a game only when BOTH seats ready, so
+   *  this is the hook a "confirm the stakes" prompt hangs off. Omit to ready
+   *  immediately (the previous behaviour).
+   *
+   *  `deadlineMs` is how long the SERVER will still wait, straight from
+   *  `welcome` — not a client-side constant. The window starts when the room
+   *  is created, so by the time the engine has booted and this socket is up,
+   *  some of it is already gone. Null on a server too old to say. */
+  confirmStart?: (deadlineMs: number | null) => Promise<boolean>;
+  /** Called at most once, when the seat's engine fails outright mid-game (a
+   *  dead worker, not a bad move — that is handled by retryAfterResync).
+   *  Returning a working engine lets the seat play on instead of resigning,
+   *  which matters because a resignation forfeits a real stake. */
   onEngineFallback?: () => Promise<BrowserEngine>;
 };
 
-/** True if `uci` is legal in `pos`. */
-function isLegalUci(pos: Chess, uci: string): boolean {
-  const m = parseUci(uci);
-  return !!m && pos.isLegal(m);
+/** Reset the engine and ask once more, for a seat whose engine just answered
+ *  with a move that does not exist in this position. Bounded by a fixed think
+ *  time AND a hard wall-clock cap: recovery must not eat the clock it is trying
+ *  to save, and an engine that has stopped answering must not hold the seat for
+ *  the 120s the normal search watchdog allows. Null if it fails again. */
+async function retryAfterResync(
+  engine: BrowserEngine,
+  replay: Replay,
+  movetimeMs: number,
+): Promise<string | null> {
+  let cap: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await engine.resync();
+    const search = engine.bestMove(replay.history, movetimeMs);
+    // Cap the wait, then STOP the search rather than walking away from it: an
+    // abandoned search keeps running, and its late bestmove would be waiting in
+    // the queue when the next ply asks a question of its own.
+    const again = await Promise.race([
+      search,
+      new Promise<null>((r) => {
+        cap = setTimeout(() => {
+          engine.stopSearch();
+          r(null);
+        }, movetimeMs + 2000);
+      }),
+    ]);
+    return again ? toStandardUci(replay.pos, again) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(cap);
+  }
 }
 
-/** A book move for this history, in priority order:
+/** A book move for `pos` — the user's uploaded Polyglot book first, then the
+ *  built-in mainline set — returning the first LEGAL of the two, so a
+ *  bad/illegal user-book entry falls through to the built-in book (and then to
+ *  the engine) rather than suppressing it. Answers in standard UCI.
  *
- *  1. the user's uploaded Polyglot book — the most explicit statement of intent;
- *  2. their selected repertoire (the built-in `.bin` books);
- *  3. the broad built-in mainline set.
- *
- *  Each falls through to the next only if it produced no LEGAL move, so a bad
- *  entry anywhere can never suppress the books below it — or the engine. The
- *  broad book last is deliberate: once an opponent leaves your repertoire you
- *  want to stay in *some* book rather than drop into a cold search that burns
- *  clock on move four. */
-function legalBookMove(movesUci: string[]): string | null {
-  const pos = Chess.default();
-  for (const u of movesUci) {
-    if (!isLegalUci(pos, u)) return null;
-    pos.play(parseUci(u)!);
-  }
+ *  `history` must already be standard UCI: the built-in book is keyed by
+ *  move-sequence PREFIX, so a history in the king-takes-rook notation would
+ *  miss every entry from the castle onwards. */
+function legalBookMove(pos: Chess, history: string[]): string | null {
   const cfg = getBrowserBotConfig();
   const maxPly = cfg.bookMaxPly;
-  const ply = movesUci.length;
+  const ply = history.length;
 
   const user = probeUserBook(pos, ply, maxPly);
-  if (user && isLegalUci(pos, user)) return user;
+  const userStd = user ? toStandardUci(pos, user) : null;
+  if (userStd) return userStd;
 
+  // The chosen repertoire. Normalized like everything else: a .bin stores
+  // castling as king-takes-rook by spec, so decodeMove already converts it —
+  // this is the belt to that braces.
   const rep = probeRepertoire(pos, ply, maxPly, cfg.repertoire.pick);
-  if (rep && isLegalUci(pos, rep)) return rep;
+  const repStd = rep ? toStandardUci(pos, rep) : null;
+  if (repStd) return repStd;
 
   // The broad book honours maxPly too — it used to be exempt, which made the
   // "leave book after N plies" setting quietly untrue.
   if (ply >= maxPly) return null;
-  const builtin = bookMove(movesUci);
-  return builtin && isLegalUci(pos, builtin) ? builtin : null;
+  const builtin = bookMove(history);
+  return builtin ? toStandardUci(pos, builtin) : null;
 }
 
 /** Play one seat of a game in the browser, driving `engine`. Resolves when the
@@ -74,7 +110,7 @@ export function playSeat(
   handlers: PlayHandlers = {},
   cancelled: () => boolean = () => false,
 ): { promise: Promise<void>; close: () => void } {
-  // Reassignable: a mid-game engine failure swaps in a replacement (below).
+  // Reassignable: a dead engine is swapped for a replacement mid-game (below).
   let engine = engineIn;
   let onFallback = handlers.onEngineFallback ?? null;
   // Warm both book caches; they resolve long before the first your_turn.
@@ -83,10 +119,10 @@ export function playSeat(
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
-  // The server stamps `deadline_server_ms` in ITS clock, so we need the offset
-  // to use it. `welcome` carries `server_time_ms` for exactly this. Estimated
-  // once and ignoring one-way latency, which is fine because the deadline is
-  // only ever used as an upper bound with OVERHEAD_MS subtracted.
+  // `deadline_server_ms` is stamped in the SERVER's clock, so it needs an
+  // offset to be usable. `welcome` carries `server_time_ms` for exactly that.
+  // Estimated once and ignoring one-way latency, which is fine because the
+  // deadline is only ever an upper bound with OVERHEAD_MS subtracted.
   let serverOffsetMs = 0;
   const send = (msg: Record<string, unknown>) => {
     seq += 1;
@@ -117,19 +153,54 @@ export function playSeat(
         return;
       }
       switch (m.type) {
-        case "welcome":
+        case "welcome": {
           if (typeof m.server_time_ms === "number") serverOffsetMs = m.server_time_ms - Date.now();
+          const deadlineMs =
+            typeof m.start_deadline_ms === "number" ? m.start_deadline_ms : null;
+          if (handlers.confirmStart && !(await handlers.confirmStart(deadlineMs))) {
+            // Declined. Deliberately stay attached instead of closing: the
+            // server voids a game neither side started as a draw (refunding a
+            // wagered stake), but hands the opponent a forfeit WIN if our seat
+            // is gone. Sitting here costs a minute and keeps the money.
+            return;
+          }
+          if (cancelled()) {
+            ws.close();
+            return;
+          }
           send({ type: "ready", game_id: gameId });
           break;
+        }
         case "your_turn": {
           try {
-            const history: string[] = m.moves_uci ?? [];
+            // Replay the server's history ourselves. Two things come out of it:
+            // the position (for the book), and the history rewritten to standard
+            // UCI. The server accepts castling in EITHER notation from any
+            // client, so a peer's "e1h1" can reach us — and a UCI engine in
+            // standard mode silently truncates its position at that move and
+            // plays the rest of the game a ply behind (see lib/uci.ts).
+            const replay = replayHistory(m.moves_uci ?? []);
+            const history: string[] = replay?.history ?? m.moves_uci ?? [];
+            if (!replay) {
+              // We could not replay the SERVER's own history, so this seat is
+              // flying blind for the rest of the game: no book, and no way to
+              // check its own move before sending it. Say so — the alternative
+              // is losing on a rejected move with nothing in the log.
+              console.warn(
+                `[openchess] cannot replay the game history at ply ${m.ply}; ` +
+                  `book and move validation are off for this seat`,
+              );
+            }
             // Opening book first: play known lines instantly instead of burning
             // clock on move 1. Falls through to the engine once out of book.
-            const booked = legalBookMove(history);
-            // Otherwise the configured time policy decides how to spend the
-            // clock. Default is `engine`, which reproduces the previous
-            // `go wtime/btime` command byte for byte.
+            const booked = replay ? legalBookMove(replay.pos, history) : null;
+            // Play to the authoritative clock when the server provides one, so
+            // the time control is real (the engine self-allocates and can
+            // flag). Fall back to a fixed think time if no clock is present.
+            // How the clock gets spent is configurable; the default `engine`
+            // mode reproduces the previous `go wtime/btime` command byte for
+            // byte. Every computed budget is clamped to a quarter of the clock,
+            // a tenth once under five seconds, and the server's own deadline.
             const c = m.clock;
             const ourMs = history.length % 2 === 0 ? c?.white_ms : c?.black_ms;
             const deadlineInMs =
@@ -137,40 +208,58 @@ export function playSeat(
                 ? m.deadline_server_ms - serverOffsetMs - Date.now()
                 : undefined;
             const policy = getBrowserBotConfig().time;
-            const budget = budgetMs(policy, {
-              remainingMs: ourMs ?? movetimeMs * 20,
-              incrementMs: c?.increment_ms ?? 0,
-              deadlineInMs,
-            });
             const plan = goCommand(policy, {
-              clock: c ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 } : null,
-              budgetMs: budget,
+              clock: c
+                ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 }
+                : null,
+              budgetMs: budgetMs(policy, {
+                remainingMs: ourMs ?? movetimeMs * 20,
+                incrementMs: c?.increment_ms ?? 0,
+                deadlineInMs,
+              }),
             });
-            // The engine's own move, full strength. Playing-style selection was
-            // measured and dropped — see apps/web/BENCH.md — so there is no
-            // MultiPV collection in the move loop; `lib/candidates.ts` remains
-            // as tested substrate if that decision is ever revisited.
-            let uci: string;
+            let played: string;
             if (booked) {
-              uci = booked;
+              played = booked;
             } else {
               try {
-                uci = await engine.bestMoveWithPlan(history, plan);
+                played = await engine.bestMoveWithPlan(history, plan);
               } catch (err) {
-                // The engine died mid-game. Resigning here used to be the only
-                // option, which meant a crashed worker cost a real stake — so
-                // try once with a fresh default engine before giving up. It
-                // costs some clock; a resignation costs the game.
+                // The engine itself died. Resigning here forfeits a real stake
+                // over a crashed worker, so try once with a fresh default
+                // engine first. Once only — a loop would burn the clock.
                 if (!onFallback) throw err;
                 const swap = onFallback;
-                onFallback = null; // one attempt only; a loop would burn the clock
+                onFallback = null;
                 engine = await swap();
-                uci = await engine.bestMoveWithPlan(history, plan);
+                played = await engine.bestMoveWithPlan(history, plan);
               }
             }
             if (cancelled()) {
               ws.close();
               return;
+            }
+            // Last gate before the wire. An illegal move is not survivable —
+            // the server rejects it and will not re-prompt this ply — so an
+            // out-of-sync engine gets one reset and one more try, and failing
+            // that the seat spends a legal move rather than the whole game:
+            // resigning is a certain loss (wagered, a certain loss of the
+            // stake) in a position that is usually perfectly fine.
+            let uci = played;
+            if (replay) {
+              let std = toStandardUci(replay.pos, played);
+              if (!std) {
+                console.warn(
+                  `[openchess] engine answered ${played} at ply ${m.ply}, which ` +
+                    `is not legal here — resetting it and asking again`,
+                );
+                std = await retryAfterResync(engine, replay, movetimeMs);
+                if (cancelled()) {
+                  ws.close();
+                  return;
+                }
+              }
+              uci = std ?? anyLegalUci(replay.pos) ?? played;
             }
             send({
               type: "move",

@@ -19,7 +19,7 @@ pub struct Tc {
     pub increment_ms: i64,
 }
 
-/// Optional on-chain wager attached to a game.
+/// Optional onchain wager attached to a game.
 #[derive(Clone)]
 pub struct Wager {
     pub white_addr: String,
@@ -72,6 +72,23 @@ pub struct TournamentRow {
     pub id: Uuid,
     pub buy_in: Option<String>,
     pub players: serde_json::Value,
+}
+
+/// Everything needed to rebuild an `open` tournament in memory after a restart.
+#[derive(Debug, sqlx::FromRow)]
+pub struct OpenTournamentRow {
+    pub id: Uuid,
+    pub name: String,
+    pub buy_in: Option<String>,
+    pub organizer: Option<String>,
+    pub initial_secs: i64,
+    pub increment_secs: i64,
+    pub players: serde_json::Value,
+    pub bots: serde_json::Value,
+    /// How long ago the tournament was created, so the caller can restore its
+    /// TTL clock instead of restarting it on every deploy. Computed by the
+    /// database — the server has no chrono of its own.
+    pub age_secs: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -340,7 +357,7 @@ impl Db {
 
     // -- tournament settlement outbox -------------------------------------
 
-    /// Enqueue a completed tournament's payout for durable on-chain settlement.
+    /// Enqueue a completed tournament's payout for durable onchain settlement.
     pub async fn enqueue_tournament_settlement(
         &self,
         tid: Uuid,
@@ -413,30 +430,56 @@ impl Db {
         id: Uuid,
         name: &str,
         buy_in: Option<&str>,
+        organizer: Option<&str>,
         initial_secs: i64,
         increment_secs: i64,
         status: &str,
         players: &serde_json::Value,
+        bots: &serde_json::Value,
     ) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO tournaments (id, name, buy_in, initial_secs, increment_secs, status, players)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)
-               ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, players=EXCLUDED.players"#,
+            r#"INSERT INTO tournaments
+                 (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+               ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
+                 players=EXCLUDED.players, bots=EXCLUDED.bots"#,
         )
         .bind(id)
         .bind(name)
         .bind(buy_in)
+        .bind(organizer)
         .bind(initial_secs)
         .bind(increment_secs)
         .bind(status)
         .bind(players)
+        .bind(bots)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
+    /// Tournaments still taking entrants when the process died. Unlike a
+    /// `running` one, an `open` tournament has no in-flight rooms, so every
+    /// field that defines it is on the row and it can be rebuilt exactly —
+    /// which is what keeps a restart from stranding entrants whose buy-in is
+    /// already locked in the onchain pool. Bounded and newest-first so a very
+    /// old backlog can't blow up boot.
+    pub async fn open_tournaments(&self, limit: i64) -> Result<Vec<OpenTournamentRow>> {
+        let rows = sqlx::query_as::<_, OpenTournamentRow>(
+            r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
+                      players, bots,
+                      GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
+               FROM tournaments WHERE status='open'
+               ORDER BY created_at DESC LIMIT $1"#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Buy-in tournaments the wallet entered that have reached a finished state
-    /// (a payout or refund may be collectable on-chain). DB-sourced so it
+    /// (a payout or refund may be collectable onchain). DB-sourced so it
     /// survives the restart that wipes the in-memory tournaments map. `address`
     /// must be lowercased (entrants are stored lowercased).
     pub async fn claimable_tournaments(&self, address: &str) -> Result<Vec<ClaimableTournamentRow>> {
@@ -460,7 +503,7 @@ impl Db {
     /// candidate list: the chain is the authority on whether the window is
     /// open (and on whether someone already claimed), so the UI checks each one.
     ///
-    /// Matches on the on-chain seat columns (`*_addr`), not the auth wallet
+    /// Matches on the onchain seat columns (`*_addr`), not the auth wallet
     /// columns — those are the addresses the escrow actually pays.
     pub async fn unsettled_wagered_games(&self, address: &str) -> Result<Vec<UnsettledGameRow>> {
         let rows = sqlx::query_as::<_, UnsettledGameRow>(

@@ -5,13 +5,13 @@ in-browser bot (`lib/engine.ts`):
 **Stockfish 18** (NNUE), the single-threaded "lite" WASM build.
 
 - **Source:** the [`stockfish`](https://www.npmjs.com/package/stockfish) npm
-  package (versioned to the engine — v18.0.x), file
+  package (versioned to the engine, v18.0.x), file
   `bin/stockfish-18-lite-single.{js,wasm}` (by nmrugg / Chess.com, GPLv3).
 - **Why lite-single:** single-threaded needs no `SharedArrayBuffer` (so no
   COOP/COEP headers, which would complicate the app and other cross-origin
-  assets). Lite is a 7 MB NNUE net vs 108 MB for the full net — the right
-  trade for an instant-play browser on-ramp; still vastly stronger than a
-  human. The downloadable native `chess-client` is the power tier for full
+  assets). Lite is a 7 MB NNUE net vs 108 MB for the full net, which is the
+  right trade for an instant-play browser on-ramp and still vastly stronger
+  than a human. The downloadable native `chess-client` is the power tier for full
   nets / GPU engines / multi-threading.
 
 ## Updating
@@ -30,4 +30,4 @@ cp package/bin/stockfish-18-lite-single.wasm apps/web/public/engines/sf18-lite-s
 ```
 
 The worker speaks plain UCI: `new Worker(url)`, `postMessage("uci")`, read
-lines back — so `BrowserEngine` needs no protocol change across versions.
+lines back, so `BrowserEngine` needs no protocol change across versions.

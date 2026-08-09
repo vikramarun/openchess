@@ -483,6 +483,99 @@ a:hover {
   padding: 4px;
 }
 
+/* ---------- pre-game confirmation (StakeConfirm) ---------- */
+.confirm-modal {
+  max-width: 400px;
+}
+.confirm-hero {
+  font-size: 40px;
+  line-height: 1;
+  text-align: center;
+  margin-bottom: -4px;
+}
+.confirm-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.confirm-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+/* The label column keeps the values aligned down the list. */
+.confirm-facts > div > .muted:first-child {
+  flex: 0 0 74px;
+  font-size: 13px;
+}
+.confirm-facts b {
+  color: var(--text-strong);
+}
+.confirm-stake {
+  margin-top: 0;
+  text-align: center;
+  border-left-width: 3px;
+}
+.confirm-stake-amount {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 3px;
+}
+.confirm-auto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 0;
+}
+.confirm-auto input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.confirm-countdown {
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.confirm-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 12px 0 4px;
+  color: var(--text-strong);
+  font-weight: 600;
+}
+.confirm-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: confirm-spin 0.8s linear infinite;
+}
+@keyframes confirm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .confirm-spinner {
+    animation: none;
+  }
+}
+
 /* lobby header row: title left, "play now" on the right */
 .lobby-head {
   display: flex;
@@ -496,7 +589,7 @@ a.play-now {
   white-space: nowrap;
 }
 
-/* read-only time-control chips (wager mode pages) */
+/* read-only time-control chips (staked mode pages) */
 .tc-chips-wrap {
   display: flex;
   align-items: center;
@@ -758,7 +851,7 @@ pre {
   background: var(--accent);
   color: #fff;
 }
-/* At-a-glance stake/payout disclosure at the point of wager. */
+/* At-a-glance stake/payout disclosure at the point of staking. */
 .stake-callout {
   padding: 9px 11px;
   margin-top: 6px;
@@ -1074,6 +1167,68 @@ pre {
 .status-pill.settled,
 .status-pill.complete {
   color: var(--text);
+}
+.status-pill.abandoned {
+  color: #e06c6c;
+}
+
+/* Standings + pairings, side by side on a wide screen and stacked on a narrow
+   one. Both are readable by anyone — you don't have to be an entrant to look. */
+.tourney-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .tourney-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+table.standings {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 14px;
+}
+table.standings th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 4px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+table.standings td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+table.standings th:last-child,
+table.standings td:last-child {
+  padding-right: 0;
+  text-align: right;
+}
+table.standings tr.me td {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+.pairing {
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.pairing.me {
+  background: var(--bg-2);
+}
+.pairing .won {
+  color: var(--accent);
+  font-weight: 600;
+}
+.pairing .lost {
+  color: var(--muted);
 }
 
 /* ---------- profile / stats ---------- */
