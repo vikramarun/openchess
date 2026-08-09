@@ -5,12 +5,18 @@ import { Chess } from "chessops/chess";
 
 import { ensureBookLoaded, getBrowserBotConfig, probeUserBook } from "./browserBot";
 import { SERVER_WS } from "./config";
-import { BrowserEngine } from "./engine";
+import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
 import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
+  /** Scores from THIS seat's own search, as it thinks about its move. `ply` is
+   *  the position being searched (moves played so far), so the side to move —
+   *  whose perspective the UCI score is from — is `ply % 2`. Lets the UI show an
+   *  eval bar without a second engine: this search is happening anyway. Silent
+   *  on a book move, since no search runs. */
+  onEval?: (info: EngineInfo, ply: number) => void;
   /** Asked once, before this seat declares itself ready. Resolving false holds
    *  the seat back: the server starts a game only when BOTH seats ready, so
    *  this is the hook a "confirm the stakes" prompt hangs off. Omit to ready
@@ -162,6 +168,9 @@ export function playSeat(
             // the time control is real (the engine self-allocates and can
             // flag). Fall back to a fixed think time if no clock is present.
             const c = m.clock;
+            const onInfo = handlers.onEval
+              ? (info: EngineInfo) => handlers.onEval!(info, history.length)
+              : undefined;
             const played =
               booked ??
               (c
@@ -170,8 +179,9 @@ export function playSeat(
                     c.white_ms,
                     c.black_ms,
                     c.increment_ms ?? 0,
+                    onInfo,
                   )
-                : await engine.bestMove(history, movetimeMs));
+                : await engine.bestMove(history, movetimeMs, onInfo));
             if (cancelled()) {
               ws.close();
               return;

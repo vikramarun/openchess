@@ -181,22 +181,48 @@ export class BrowserEngine {
     await this.waitFor((l) => l.includes("readyok"));
   }
 
-  /** Set the position and `go …`, resolving with the engine's bestmove. */
-  private async go(movesUci: string[], goCmd: string): Promise<string> {
+  /** Set the position and `go …`, resolving with the engine's bestmove.
+   *
+   *  `onInfo` streams the scores of that same search. A seat that is playing is
+   *  already evaluating the live position on every one of its turns, so a UI can
+   *  drive an eval bar off this for free — no second worker competing with the
+   *  engine whose move quality is on the line. */
+  private async go(
+    movesUci: string[],
+    goCmd: string,
+    onInfo?: (info: EngineInfo) => void,
+  ): Promise<string> {
     await this.ready;
     const pos = movesUci.length
       ? `position startpos moves ${movesUci.join(" ")}`
       : "position startpos";
     this.send(pos);
     const result = new Promise<string>((resolve, reject) => {
+      // `bestmove` is dispatched to a single waiter, so the score lines are read
+      // off the ordinary fan-out listeners instead — for exactly as long as this
+      // search runs. Leaving it attached would feed the caller the NEXT search's
+      // scores, which for a seat means a bar describing a position the viewer
+      // isn't looking at.
+      const infoFn = onInfo
+        ? (line: string) => {
+            const info = parseInfoLine(line);
+            if (info) onInfo(info);
+          }
+        : null;
+      const cleanup = () => {
+        if (infoFn) this.listeners = this.listeners.filter((l) => l !== infoFn);
+      };
+      if (infoFn) this.listeners.push(infoFn);
       const to = setTimeout(() => {
         // Drop our slot in the queue, or every later search would be answered
         // one bestmove late for the rest of the game.
         this.bestmoveWaiters = this.bestmoveWaiters.filter((w) => w !== fn);
+        cleanup();
         reject(new Error("bestmove timeout"));
       }, 120000);
       const fn = (uci: string) => {
         clearTimeout(to);
+        cleanup();
         resolve(uci);
       };
       this.bestmoveWaiters.push(fn);
@@ -214,8 +240,12 @@ export class BrowserEngine {
   }
 
   /** Best move (UCI) for the given move history under a fixed think time. */
-  async bestMove(movesUci: string[], movetimeMs: number): Promise<string> {
-    return this.go(movesUci, `go movetime ${movetimeMs}`);
+  async bestMove(
+    movesUci: string[],
+    movetimeMs: number,
+    onInfo?: (info: EngineInfo) => void,
+  ): Promise<string> {
+    return this.go(movesUci, `go movetime ${movetimeMs}`, onInfo);
   }
 
   /** Best move (UCI) with the engine managing its own time from the clock —
@@ -226,6 +256,7 @@ export class BrowserEngine {
     whiteMs: number,
     blackMs: number,
     incMs: number,
+    onInfo?: (info: EngineInfo) => void,
   ): Promise<string> {
     const w = Math.max(50, Math.floor(whiteMs));
     const b = Math.max(50, Math.floor(blackMs));
@@ -233,6 +264,7 @@ export class BrowserEngine {
     return this.go(
       movesUci,
       `go wtime ${w} btime ${b} winc ${inc} binc ${inc}`,
+      onInfo,
     );
   }
 
