@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
@@ -9,8 +9,12 @@ import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
 import {
+  casualIdentity,
   fetchTournament,
   fetchTournaments,
+  rememberCasualIdentity,
+  sameEntrant,
+  type Standing,
   type Tournament,
   type TournamentGame,
 } from "@/lib/tournaments";
@@ -20,9 +24,9 @@ import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { DEFAULT_TC, TIME_CONTROLS, type TimeControl } from "@/lib/timeControls";
 
-// Tournament + TournamentGame come from @/lib/tournaments. MyGame is this
+// Tournament/TournamentGame/Standing come from @/lib/tournaments. MyGame is this
 // page's per-entrant seat view (tokens are NOT in the public tournament view —
-// fetched via /my-games).
+// they're fetched from /my-games, which only ever returns the caller's own).
 type MyGame = {
   game_id: string;
   color: "white" | "black";
@@ -47,14 +51,18 @@ export default function TournamentPage() {
   );
 }
 
+const shortName = (p: string) =>
+  p.startsWith("0x") && p.length === 42 ? `${p.slice(0, 6)}…${p.slice(-4)}` : p;
+
+const isFinished = (t: Tournament) =>
+  t.status === "complete" || t.status === "settled" || t.status === "abandoned";
+
 function TournamentClient() {
   const { address } = useAccount();
   const token = useAuthToken();
   const { config, wagerOn } = useOnchainConfig();
   const [tourneys, setTourneys] = useState<Tournament[]>([]);
   const [err, setErr] = useState<string | null>(null);
-  // Tournaments this browser entered with its connected bot (→ spectate).
-  const [joinedAsBot, setJoinedAsBot] = useState<Record<string, boolean>>({});
 
   // create form
   const [name, setName] = useState("");
@@ -62,53 +70,180 @@ function TournamentClient() {
   const [tc, setTc] = useState<TimeControl>(DEFAULT_TC);
   const [casualName, setCasualName] = useState("");
 
-  // identity per tournament (casual name) + which I'm actively playing
-  const [joinedAs, setJoinedAs] = useState<Record<string, string>>({});
-  const [playingTid, setPlayingTid] = useState<string | null>(null);
-  // My own seat tokens for the tournament I'm playing (game_id -> {token,color}).
+  // Casual entrant identity, mirrored from localStorage so a reload doesn't turn
+  // an entrant into a stranger. Buy-in tournaments key on the wallet instead.
+  const [identities, setIdentities] = useState<Record<string, string>>({});
+  // The tournament whose detail page is open (standings, pairings, my game).
+  const [openTid, setOpenTid] = useState<string | null>(null);
+  // Rounds the player explicitly backed out of, per tournament. Leaving a round
+  // keeps you out of it — but a NEW round pulls you back in, because not being
+  // at the board when it dispatches is how you forfeit.
+  const [leftRound, setLeftRound] = useState<Record<string, number>>({});
+  // My own seat tokens for the open tournament (game_id -> seat).
   const [myTokens, setMyTokens] = useState<Record<string, MyGame>>({});
 
   const bot = useBotStatus(token);
+  const { available } = useAvailable(config?.escrow);
 
-  // Poll tournaments. In the lobby, refresh the whole list; while playing or
-  // spectating, refresh ONLY the active tournament (so new rounds appear) rather
-  // than an ever-growing N+1 fan-out over every tournament ever created.
+  const identityIn = useCallback(
+    (t: Tournament): string | null =>
+      t.buy_in ? (address ? address.toLowerCase() : null) : identities[t.id] ?? null,
+    [address, identities],
+  );
+  const isEntrant = useCallback(
+    (t: Tournament) => {
+      const me = identityIn(t);
+      return !!me && t.players.some((p) => sameEntrant(p, me));
+    },
+    [identityIn],
+  );
+  // Only the organizer may start a buy-in tournament (the server enforces it and
+  // 403s everyone else) — casual ones anyone can start. Offering a button that
+  // is guaranteed to fail just teaches people the page is broken.
+  const canStart = useCallback(
+    (t: Tournament) => !t.buy_in || sameEntrant(t.organizer, identityIn(t)),
+    [identityIn],
+  );
+  const myGames = useCallback(
+    (t: Tournament): TournamentGame[] => {
+      const me = identityIn(t);
+      if (!me) return [];
+      return t.games.filter((g) => sameEntrant(g.white, me) || sameEntrant(g.black, me));
+    },
+    [identityIn],
+  );
+
+  // Poll the lobby. One request for the whole list; while a tournament is open,
+  // refresh just that one so a new round shows up fast without re-fetching every
+  // tournament ever created.
   useEffect(() => {
     let live = true;
     const tick = async () => {
       try {
-        if (playingTid) {
-          const t = await fetchTournament(playingTid);
-          if (live) setTourneys((prev) => [...prev.filter((x) => x.id !== playingTid), t]);
+        if (openTid) {
+          const t = await fetchTournament(openTid);
+          if (live) setTourneys((prev) => prev.map((x) => (x.id === openTid ? t : x)));
           return;
         }
         const details = await fetchTournaments();
         if (live) setTourneys(details);
       } catch {
-        /* ignore */
+        /* transient — the next tick retries */
       }
     };
     tick();
-    const t = setInterval(tick, 3000);
+    const iv = setInterval(tick, 3000);
     return () => {
       live = false;
-      clearInterval(t);
+      clearInterval(iv);
     };
-  }, [playingTid]);
+  }, [openTid]);
 
-  const { available } = useAvailable(config?.escrow);
+  // Hydrate remembered casual identities once the lobby is known.
+  useEffect(() => {
+    setIdentities((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const t of tourneys) {
+        if (next[t.id]) continue;
+        const saved = casualIdentity(t.id);
+        if (saved) {
+          next[t.id] = saved;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [tourneys]);
 
-  const identityIn = (t: Tournament): string | null => {
-    if (t.buy_in) return address ? address.toLowerCase() : null;
-    return joinedAs[t.id] ?? null;
-  };
-  const myGames = (t: Tournament): TournamentGame[] => {
-    const me = identityIn(t);
-    if (!me) return [];
-    return t.games.filter(
-      (g) => g.white.toLowerCase() === me || g.black.toLowerCase() === me,
+  const openT = useMemo(() => tourneys.find((t) => t.id === openTid) ?? null, [tourneys, openTid]);
+  // Games whose board we actually sat at. A finished game's room is gone —
+  // `ws_handler` drops the socket the moment `room_channels` misses — so
+  // mounting SeatGame fresh on one just fast-fails to "disconnected" behind an
+  // empty board. Keeping a board we're ALREADY sitting at is different: it has
+  // the position and the result banner, which is the whole point of not
+  // unmounting the instant your game resolves.
+  const seated = useRef<Set<string>>(new Set());
+
+  // My game in the round currently being played, if any. Deliberately still
+  // returns it once it has FINISHED: the round doesn't advance until every
+  // pairing in it does, and unmounting the board the instant your own game
+  // resolves means you never get to see how it ended.
+  const currentGame = useCallback(
+    (t: Tournament): TournamentGame | undefined =>
+      t.status === "running"
+        ? myGames(t).find((g) => g.round === t.current_round && !g.forfeit)
+        : undefined,
+    [myGames],
+  );
+  // …but only a game still in progress should pull the board open.
+  const liveGame = useCallback(
+    (t: Tournament): TournamentGame | undefined => {
+      const g = currentGame(t);
+      return g && !g.result ? g : undefined;
+    },
+    [currentGame],
+  );
+
+  // Open the board automatically when a round I'm in is dispatched.
+  //
+  // This is the whole reason tournament games used to die unplayed: the server
+  // gives a room ~60s for both seats to connect, and a seat that never shows up
+  // forfeits. Requiring the entrant to notice a button appear and click it
+  // inside that window meant anyone who blinked lost the game — and every round
+  // after it, since the schedule marches on regardless.
+  useEffect(() => {
+    if (openTid) return;
+    const next = tourneys.find(
+      (t) => isEntrant(t) && liveGame(t) && (leftRound[t.id] ?? -1) < t.current_round,
     );
-  };
+    if (next) setOpenTid(next.id);
+  }, [tourneys, openTid, isEntrant, liveGame, leftRound]);
+
+  useEffect(() => {
+    const g = openT ? liveGame(openT) : undefined;
+    if (g?.game_id) seated.current.add(g.game_id);
+  }, [openT, liveGame]);
+
+  // Keep my seat tokens in sync while a tournament is open. Retries so a blip
+  // can't strand the player on "taking your seat…", and re-runs each round.
+  const openMe = openT ? identityIn(openT) : null;
+  useEffect(() => {
+    if (!openT || !isEntrant(openT)) return;
+    const me = openMe;
+    if (!me) return;
+    const tid = openT.id;
+    const buyIn = openT.buy_in;
+    let alive = true;
+    const load = async () => {
+      const url = buyIn
+        ? `${SERVER_HTTP}/tournaments/${tid}/my-games`
+        : `${SERVER_HTTP}/tournaments/${tid}/my-games?player=${encodeURIComponent(me)}`;
+      try {
+        const r = await fetch(url, { headers: buyIn && token ? { authorization: `Bearer ${token}` } : {} });
+        if (!r.ok || !alive) return;
+        const games: MyGame[] = await r.json();
+        setMyTokens((prev) => {
+          const map = { ...prev };
+          for (const g of games) map[g.game_id] = g;
+          return map;
+        });
+      } catch {
+        /* retry on the next tick */
+      }
+    };
+    load();
+    const iv = setInterval(load, 2500);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
+    // openT is re-created by every poll; key off the fields that actually matter.
+    // `openMe` has to be in here: it resolves from localStorage a render AFTER
+    // the lobby loads, and without it a casual entrant who opened the page
+    // before that landed would sit on "Taking your seat…" for the whole round.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openT?.id, openMe, openT?.current_round, openT?.games.length, token, address]);
 
   const create = async () => {
     setErr(null);
@@ -148,9 +283,13 @@ function TournamentClient() {
     setErr(null);
     if ((t.buy_in || asBot) && !token)
       return setErr(
-        asBot ? "Sign in to enter with your bot." : "Sign in (top right) to join a buy-in tournament.",
+        asBot
+          ? "Sign in to enter with your bot."
+          : "Sign in (top right) to join a buy-in tournament.",
       );
-    const player = t.buy_in ? undefined : casualName.trim() || `guest-${Math.floor(Date.now() % 100000)}`;
+    const player = t.buy_in
+      ? undefined
+      : casualName.trim() || `guest-${Math.floor(Date.now() % 100000)}`;
     try {
       const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/join`, {
         method: "POST",
@@ -169,12 +308,21 @@ function TournamentClient() {
             ? "Couldn't move your buy-in into the pool — check your deposited balance."
             : r.status === 424
               ? "Your bot is offline — check the chess-client window."
-              : `Couldn't join (${r.status}).`,
+              : r.status === 409
+                ? "That display name is already taken in this tournament."
+                : `Couldn't join (${r.status}).`,
         );
         return;
       }
-      if (!t.buy_in && player) setJoinedAs((m) => ({ ...m, [t.id]: player.toLowerCase() }));
-      if (asBot) setJoinedAsBot((m) => ({ ...m, [t.id]: true }));
+      // Store the entrant id the SERVER recorded — it sanitizes and caps the
+      // display name, and remembering our own version would leave us looking up
+      // an entrant that doesn't exist.
+      const recorded: string | undefined = (await r.json().catch(() => null))?.player;
+      if (!t.buy_in && recorded) {
+        rememberCasualIdentity(t.id, recorded);
+        setIdentities((m) => ({ ...m, [t.id]: recorded }));
+      }
+      setOpenTid(t.id);
     } catch {
       setErr("Server unreachable.");
     }
@@ -191,119 +339,72 @@ function TournamentClient() {
       if (!r.ok)
         setErr(
           r.status === 409
-            ? "Need at least 2 players."
+            ? "Need at least 2 entrants."
             : r.status === 403
               ? "Only the organizer can start this tournament."
               : `Couldn't start (${r.status}).`,
         );
+      else setOpenTid(t.id);
     } catch {
       setErr("Server unreachable.");
     }
   };
 
-  /// Fetch only MY seat tokens (never exposed in the public view) and enter play.
-  const enterPlay = async (t: Tournament) => {
-    setErr(null);
-    const me = identityIn(t);
-    if (!me) return setErr("Join the tournament first.");
-    try {
-      const url = t.buy_in
-        ? `${SERVER_HTTP}/tournaments/${t.id}/my-games`
-        : `${SERVER_HTTP}/tournaments/${t.id}/my-games?player=${encodeURIComponent(me)}`;
-      const r = await fetch(url, {
-        headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
-      });
-      if (!r.ok) return setErr(`Couldn't load your games (${r.status}).`);
-      const games: MyGame[] = await r.json();
-      const map: Record<string, MyGame> = {};
-      for (const g of games) map[g.game_id] = g;
-      setMyTokens(map);
-      setPlayingTid(t.id);
-    } catch {
-      setErr("Server unreachable.");
-    }
-  };
-
-  // ---- Playing / watching my tournament ----
-  const activeT = useMemo(
-    () => tourneys.find((t) => t.id === playingTid) ?? null,
-    [tourneys, playingTid],
-  );
-  // My games so far (they arrive one per round). The current game is the one in
-  // the round in progress; earlier rounds are done, later ones aren't dispatched.
-  const mine = activeT ? myGames(activeT) : [];
-  const current =
-    activeT && activeT.status !== "open"
-      ? mine.find((g) => g.round === activeT.current_round)
-      : undefined;
-  const currentId = current?.game_id ?? null;
-  // Am I a bot entrant here? Prefer the authoritative server seat (survives a
-  // page reload); fall back to the client-side join flag until my-games loads.
-  const currentSeat = currentId ? myTokens[currentId]?.seat : undefined;
-  const iAmBot = playingTid
-    ? currentSeat
-      ? currentSeat === "bot"
-      : !!joinedAsBot[playingTid]
-    : false;
-
-  // Keep my seat tokens in sync as new rounds start (browser entrants only — a
-  // bot entrant plays via its agent and just spectates). Retries until the
-  // token loads, so a transient blip can't strand the player on "Loading…".
-  useEffect(() => {
-    if (!playingTid || !currentId || iAmBot || myTokens[currentId]) return;
-    const t = tourneys.find((x) => x.id === playingTid);
-    if (!t) return;
-    const me = t.buy_in ? (address ? address.toLowerCase() : null) : joinedAs[t.id] ?? null;
-    if (!me) return;
-    let alive = true;
-    let iv: ReturnType<typeof setInterval> | undefined;
-    const fetchTokens = async () => {
-      const url = t.buy_in
-        ? `${SERVER_HTTP}/tournaments/${t.id}/my-games`
-        : `${SERVER_HTTP}/tournaments/${t.id}/my-games?player=${encodeURIComponent(me)}`;
-      try {
-        const r = await fetch(url, {
-          headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
-        });
-        if (!r.ok || !alive) return;
-        const games: MyGame[] = await r.json();
-        setMyTokens((prev) => {
-          const map = { ...prev };
-          for (const g of games) map[g.game_id] = g;
-          return map;
-        });
-        if (games.some((g) => g.game_id === currentId) && iv) clearInterval(iv);
-      } catch {
-        /* retry on the next tick */
-      }
+  // ---- One tournament, open ----
+  if (openT) {
+    const me = identityIn(openT);
+    const entrant = isEntrant(openT);
+    const current = currentGame(openT);
+    const seat = current?.game_id ? myTokens[current.game_id] : undefined;
+    const back = () => {
+      // Only count as "left" a round that HAD a live game to leave. Recording it
+      // unconditionally suppressed auto-open for the round that hadn't started
+      // yet: join -> back out to the lobby to wait -> organizer starts round 0 ->
+      // `leftRound = 0` is not < `current_round = 0`, so the board never opened
+      // and the seat was reaped as a no-show. That is the forfeit this whole
+      // mechanism exists to prevent, reached by the most ordinary click there is.
+      if (liveGame(openT)) setLeftRound((m) => ({ ...m, [openT.id]: openT.current_round }));
+      setOpenTid(null);
+      setMyTokens({}); // seat tokens are per-tournament; don't carry them over
     };
-    fetchTokens();
-    iv = setInterval(fetchTokens, 2500);
-    return () => {
-      alive = false;
-      if (iv) clearInterval(iv);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playingTid, currentId, iAmBot]);
 
-  if (playingTid && activeT) {
-    const done = activeT.status === "settled" || activeT.status === "complete";
-    const backBtn = (
-      <button className="primary" onClick={() => setPlayingTid(null)}>
-        Back to tournaments
-      </button>
-    );
+    return (
+      <>
+        <div className="panel" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+          <button className="ghost" onClick={back}>
+            ← All tournaments
+          </button>
+          <div style={{ flex: 1 }}>
+            <b style={{ color: "var(--text-strong)" }}>{openT.name}</b>{" "}
+            <span className={`status-pill ${openT.status}`}>{openT.status}</span>
+            <div className="muted" style={{ fontSize: 13 }}>
+              {openT.buy_in ? `${fmtUsdc(openT.buy_in)} USDC buy-in` : "casual"} ·{" "}
+              {openT.players.length} entrant{openT.players.length === 1 ? "" : "s"}
+              {openT.total_rounds > 0 &&
+                ` · round ${Math.min(openT.current_round + 1, openT.total_rounds)} of ${openT.total_rounds}`}
+            </div>
+          </div>
+          {openT.status === "open" && entrant && canStart(openT) && (
+            <button className="primary" onClick={() => startT(openT)}>
+              Start
+            </button>
+          )}
+          {openT.status === "open" && entrant && !canStart(openT) && (
+            <span className="muted" style={{ fontSize: 13 }}>
+              waiting for the organizer to start
+            </span>
+          )}
+        </div>
 
-    // Bot entrant: the agent plays; the browser watches the current round's game.
-    if (iAmBot) {
-      return (
-        <div className="panel" style={{ textAlign: "center" }}>
-          {current ? (
-            <>
-              <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>
-                🤖 Your bot is playing round {activeT.current_round + 1} of {activeT.total_rounds}
-              </div>
-              <div className="spinner" style={{ margin: "8px auto" }} />
+        {entrant && current && seat?.seat === "bot" && (
+          <div className="panel" style={{ textAlign: "center", marginBottom: 16 }}>
+            <div style={{ color: "var(--text-strong)", marginBottom: 6 }}>
+              {current.result
+                ? `🤖 Your bot finished round ${openT.current_round + 1}`
+                : `🤖 Your bot is playing round ${openT.current_round + 1}`}
+            </div>
+            {!current.result && <div className="spinner" style={{ margin: "8px auto" }} />}
+            {current.game_id && (
               <a
                 className="primary"
                 href={`/game/${current.game_id}`}
@@ -311,68 +412,106 @@ function TournamentClient() {
                 rel="noreferrer"
                 style={{ display: "inline-block", marginTop: 8 }}
               >
-                Watch live ↗
+                {current.result ? "Review the game ↗" : "Watch live ↗"}
               </a>
-              <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-                Your bot plays every round automatically — leave this tab open.
-              </div>
-            </>
-          ) : done ? (
-            <>
-              <b style={{ color: "var(--text-strong)" }}>Tournament finished 🎉</b>
-              <p className="muted">
-                Standings decide the pool; a winning share is credited to your bankroll — claim
-                any payout or refund from the wallet menu (top right).
-              </p>
-              {backBtn}
-            </>
-          ) : (
-            <span className="muted">Waiting for your bot’s next round…</span>
-          )}
-        </div>
-      );
-    }
-
-    // Browser entrant: play the current round's game.
-    const seat = current ? myTokens[current.game_id] : undefined;
-    if (current && seat && seat.token) {
-      return (
-        <SeatGame
-          key={current.game_id}
-          gameId={current.game_id}
-          token={seat.token}
-          color={seat.color}
-          subtitle={`${activeT.name} · round ${current.round + 1} of ${activeT.total_rounds}`}
-          // The server advances the round once every game in it finishes; the
-          // poll then moves `current` to the next round's game. Nothing to do here.
-          onResult={() => {}}
-        />
-      );
-    }
-    if (current) {
-      return (
-        <div className="panel">
-          <span className="muted">Loading your game…</span>
-        </div>
-      );
-    }
-    // No current game: between rounds, a bye, or finished.
-    return (
-      <div className="panel" style={{ textAlign: "center" }}>
-        {done ? (
-          <>
-            <b style={{ color: "var(--text-strong)" }}>You’ve finished your games 🎉</b>
-            <p className="muted">
-              Standings are tallied as every pairing completes. Small fields credit your winning
-              share to your bankroll directly; large fields settle a Merkle root — claim it from
-              the wallet menu (top right).
-            </p>
-          </>
-        ) : (
-          <p className="muted">Waiting for your next round to start…</p>
+            )}
+            <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
+              Your bot plays every round automatically — leave this tab open.
+            </div>
+          </div>
         )}
-        {backBtn}
-      </div>
+
+        {entrant &&
+          current &&
+          seat &&
+          seat.seat !== "bot" &&
+          seat.token &&
+          current.game_id &&
+          (!current.result || seated.current.has(current.game_id)) && (
+          <div style={{ marginBottom: 16 }}>
+            <SeatGame
+              key={current.game_id}
+              gameId={current.game_id}
+              token={seat.token}
+              color={seat.color}
+              subtitle={`${openT.name} · round ${current.round + 1} of ${openT.total_rounds}`}
+              // The server advances the round once every game in it finishes;
+              // the poll then moves `current` to the next round's game.
+              onResult={() => {}}
+            />
+          </div>
+        )}
+
+        {/* The exact complement of the board branch above for a finished game:
+            shown whenever we can't (or shouldn't) mount a live board for it —
+            including the moment after `back()` drops our tokens and we return
+            before the round has advanced. */}
+        {entrant &&
+          current?.result &&
+          current.game_id &&
+          seat?.seat !== "bot" &&
+          !(seat && seat.token && seated.current.has(current.game_id)) && (
+          <div className="panel" style={{ marginBottom: 16, textAlign: "center" }}>
+            <b style={{ color: "var(--text-strong)" }}>
+              Round {current.round + 1}:{" "}
+              {current.result === "draw"
+                ? "drawn"
+                : sameEntrant(
+                      current.result === "white" ? current.white : current.black,
+                      identityIn(openT),
+                    )
+                  ? "you won"
+                  : "you lost"}
+            </b>
+            <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+              Waiting for the rest of the field before the next round.{" "}
+              <a href={`/game/${current.game_id}`} target="_blank" rel="noreferrer">
+                Review the game ↗
+              </a>
+            </div>
+          </div>
+        )}
+
+        {/* Anything that isn't "bot seat" or "browser seat with a token" lands
+            here — a seat still loading, or the shouldn't-happen case of a
+            browser seat the server handed no token. Better a stated wait than a
+            blank page while the round's clock runs. */}
+        {entrant && current && !current.result && !(seat?.seat === "bot") && !(seat && seat.token) && (
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <span className="muted">Taking your seat…</span>
+          </div>
+        )}
+
+        {entrant && !current && openT.status === "running" && (
+          <div className="panel" style={{ marginBottom: 16, textAlign: "center" }}>
+            <span className="muted">
+              {myGames(openT).some((g) => g.round === openT.current_round)
+                ? "Your game this round is done — waiting for the rest of the field."
+                : "You sit out this round. The next one starts automatically."}
+            </span>
+          </div>
+        )}
+
+        {entrant && isFinished(openT) && (
+          <div className="panel" style={{ marginBottom: 16, textAlign: "center" }}>
+            <b style={{ color: "var(--text-strong)" }}>
+              {openT.status === "abandoned" ? "Tournament abandoned" : "Tournament finished 🎉"}
+            </b>
+            <p className="muted" style={{ marginBottom: 0 }}>
+              {openT.status === "abandoned"
+                ? "It was interrupted before it could settle — reclaim your buy-in from the wallet menu (top right)."
+                : "The pool is distributed by final standings. Small fields credit your share to your bankroll directly; large fields settle a Merkle root — claim it from the wallet menu (top right)."}
+            </p>
+          </div>
+        )}
+
+        <div className="tourney-detail">
+          <StandingsTable t={openT} me={me} />
+          <PairingsList t={openT} me={me} />
+        </div>
+
+        {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
+      </>
     );
   }
 
@@ -383,8 +522,14 @@ function TournamentClient() {
         <b style={{ color: "var(--text-strong)" }}>How it works</b>
         <ol className="muted" style={{ lineHeight: 1.8, marginBottom: 0 }}>
           <li>Create or join; your uniform buy-in locks into the on-chain pool.</li>
-          <li>The organizer starts a round-robin; you play your pairings in-browser.</li>
-          <li>The pool is distributed by final standings — small fields directly, large fields via a Merkle claim.</li>
+          <li>
+            The organizer starts a round-robin. Your board opens by itself each round — a seat
+            that doesn&apos;t show up within a minute forfeits.
+          </li>
+          <li>
+            The pool is distributed by final standings — small fields directly, large fields via
+            a Merkle claim.
+          </li>
           <li>If it never settles, every entrant reclaims their buy-in after a timeout.</li>
         </ol>
       </div>
@@ -447,20 +592,22 @@ function TournamentClient() {
         ) : (
           <div className="tourney-list">
             {tourneys.map((t) => {
-              const me = identityIn(t);
-              const joined = !!me && t.players.some((p) => p.toLowerCase() === me);
-              const mine = myGames(t);
+              const joined = isEntrant(t);
+              const leader = t.standings[0];
               return (
                 <div key={t.id} className="tourney-card">
                   <div className="tc-main">
                     <div className="tc-name">
-                      {t.name}{" "}
-                      <span className={`status-pill ${t.status}`}>{t.status}</span>
+                      {t.name} <span className={`status-pill ${t.status}`}>{t.status}</span>
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
                       {t.buy_in ? `${fmtUsdc(t.buy_in)} USDC buy-in` : "casual"} · {t.players.length}{" "}
-                      player{t.players.length === 1 ? "" : "s"}
-                      {t.games.length > 0 && ` · ${t.games.length} games`}
+                      entrant{t.players.length === 1 ? "" : "s"}
+                      {t.total_rounds > 0 &&
+                        ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}
+                      {t.status !== "open" && leader && leader.score > 0 && (
+                        <> · leader {shortName(leader.player)} {leader.score}</>
+                      )}
                     </div>
                   </div>
                   <div className="tc-actions">
@@ -482,21 +629,16 @@ function TournamentClient() {
                           )}
                         </>
                       ))}
-                    {t.status === "open" && joined && (
+                    {t.status === "open" && joined && canStart(t) && (
                       <button className="ghost" onClick={() => startT(t)}>
                         Start
                       </button>
                     )}
-                    {t.status !== "open" && mine.length > 0 && (
-                      <button className="primary" onClick={() => enterPlay(t)}>
-                        {joinedAsBot[t.id]
-                          ? "Watch my bot"
-                          : `Play my ${mine.length} game${mine.length === 1 ? "" : "s"}`}
-                      </button>
-                    )}
-                    {t.status !== "open" && joined && mine.length === 0 && (
-                      <span className="muted">no games</span>
-                    )}
+                    {/* Always openable — standings and pairings are for everyone,
+                        entrant or not, playing or long finished. */}
+                    <button className={joined ? "primary" : "ghost"} onClick={() => setOpenTid(t.id)}>
+                      {joined && t.status === "running" ? "Play" : "View"}
+                    </button>
                   </div>
                 </div>
               );
@@ -505,5 +647,129 @@ function TournamentClient() {
         )}
       </div>
     </>
+  );
+}
+
+function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
+  if (t.standings.length === 0)
+    return (
+      <div className="panel">
+        <b style={{ color: "var(--text-strong)" }}>Standings</b>
+        <div className="muted" style={{ marginTop: 8 }}>
+          No entrants yet.
+        </div>
+      </div>
+    );
+  const decided = isFinished(t) && t.status !== "abandoned";
+  return (
+    <div className="panel">
+      <b style={{ color: "var(--text-strong)" }}>Standings</b>
+      <table className="standings">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Entrant</th>
+            <th>Score</th>
+            <th>Played</th>
+          </tr>
+        </thead>
+        <tbody>
+          {t.standings.map((s: Standing) => (
+            <tr key={s.player} className={sameEntrant(s.player, me) ? "me" : undefined}>
+              {/* The position, never a shared rank: the pool is paid out by
+                  position, so two level entrants who both showed a gold medal
+                  were being promised money only one of them would get. */}
+              <td title={s.tied ? "level on score — separated by entry order" : undefined}>
+                {decided && s.rank === 1 ? "🥇" : s.rank}
+                {s.tied && <span className="muted">*</span>}
+              </td>
+              <td>
+                {shortName(s.player)}
+                {s.bot && <span className="muted"> 🤖</span>}
+                {sameEntrant(s.player, me) && <span className="muted"> (you)</span>}
+              </td>
+              <td>{s.score}</td>
+              <td className="muted">
+                {s.played}
+                {t.total_rounds > 0 ? `/${t.players.length - 1}` : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {t.standings.some((s) => s.tied) && (
+        <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+          * Level on score. Entry order separates them
+          {t.buy_in ? ", and the pool is split by finishing position" : ""}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PairingsList({ t, me }: { t: Tournament; me: string | null }) {
+  if (t.games.length === 0)
+    return (
+      <div className="panel">
+        <b style={{ color: "var(--text-strong)" }}>Pairings</b>
+        <div className="muted" style={{ marginTop: 8 }}>
+          {t.status === "open"
+            ? "The schedule is drawn when the tournament starts."
+            : "No pairings yet."}
+        </div>
+      </div>
+    );
+  const rounds = new Map<number, TournamentGame[]>();
+  for (const g of t.games) rounds.set(g.round, [...(rounds.get(g.round) ?? []), g]);
+  return (
+    <div className="panel">
+      <b style={{ color: "var(--text-strong)" }}>Pairings</b>
+      {[...rounds.keys()]
+        .sort((a, b) => a - b)
+        .map((round) => (
+          <div key={round} className="pairing-round">
+            <div className="muted" style={{ fontSize: 12, margin: "10px 0 4px" }}>
+              Round {round + 1}
+              {round === t.current_round && t.status === "running" && " · in progress"}
+            </div>
+            {(rounds.get(round) ?? []).map((g, i) => (
+              <div
+                key={g.game_id ?? `${round}-${i}`}
+                className={`pairing${sameEntrant(g.white, me) || sameEntrant(g.black, me) ? " me" : ""}`}
+              >
+                <span className={g.result === "white" ? "won" : g.result === "black" ? "lost" : ""}>
+                  {shortName(g.white)}
+                </span>
+                <span className="muted"> vs </span>
+                <span className={g.result === "black" ? "won" : g.result === "white" ? "lost" : ""}>
+                  {shortName(g.black)}
+                </span>
+                <span className="muted" style={{ marginLeft: 8 }}>
+                  {g.forfeit
+                    ? "forfeit"
+                    : g.result === "draw"
+                      ? "½–½"
+                      : g.result === "white"
+                        ? "1–0"
+                        : g.result === "black"
+                          ? "0–1"
+                          : "playing…"}
+                </span>
+                {g.game_id && !g.forfeit && (
+                  <a
+                    href={`/game/${g.game_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="muted"
+                    style={{ marginLeft: 8 }}
+                  >
+                    watch ↗
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        ))}
+    </div>
   );
 }

@@ -312,6 +312,7 @@ all in `crates/server` + a Redis dependency.
 - **Tournament UI gaps** — Swiss/knockout pairing is advertised but only
   round-robin is implemented; Merkle-claim + `claimRefund` have no browser UI
   (funds are recoverable on-chain, just not in-app for large/abandoned fields).
+  Standings, pairings and round auto-entry are done.
 
 ## Run / test / deploy (quick)
 
