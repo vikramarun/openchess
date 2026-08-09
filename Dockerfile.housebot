@@ -22,11 +22,24 @@ COPY crates ./crates
 RUN cargo build --release --bin chess-client
 
 # ---- runtime ----
-FROM debian:bookworm-slim AS runtime
+# trixie, NOT bookworm, and the reason is the engine: the house bot plays
+# whatever `apt install stockfish` gives it, and that is decided by this line.
+# bookworm pins Stockfish 15.1 (2022); trixie ships 17. Nobody had chosen 15.1 —
+# it was inherited from the base image while the browser seat ran an explicitly
+# pinned Stockfish 18, so the house was quietly playing a three-year-old engine.
+# Debian tops out at 17; 18 would mean fetching an upstream release binary
+# (pinned URL + checksum + a CPU-variant choice), which is a bigger decision
+# than this one-line change.
+#
+# The build stage below stays on bookworm on purpose: glibc is backward
+# compatible, so a binary built against bookworm's runs fine on trixie. The
+# reverse would not.
+FROM debian:trixie-slim AS runtime
 # ca-certificates: the client talks wss:// to the game server (rustls uses the
-# system roots). stockfish: the engine the autopilots drive. procps: the
-# script's shutdown trap uses pkill to reap the clients, which would otherwise
-# orphan and keep playing after the machine is told to stop.
+# system roots). stockfish: the engine the autopilots drive (/usr/games/stockfish
+# on both suites — verified, since a moved path would crash-loop the machine).
+# procps: the script's shutdown trap uses pkill to reap the clients, which would
+# otherwise orphan and keep playing after the machine is told to stop.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates stockfish procps \

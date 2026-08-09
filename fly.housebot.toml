@@ -30,6 +30,8 @@ primary_region = "iad"
 
 [env]
   SERVER = "https://openchess.fly.dev"
+  # Debian installs the engine here on both bookworm and trixie; the image is
+  # pinned to trixie so this is Stockfish 17 rather than bookworm's 15.1.
   ENGINE = "/usr/games/stockfish"
   NAME = "House Bot"
   # Stockfish "Skill Level" 0..20 — 20 is full strength. The house bot plays
