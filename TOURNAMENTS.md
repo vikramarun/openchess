@@ -281,7 +281,24 @@ token.balanceOf(escrow) == sum(bankroll) + sum(tournament pools)
 
 ---
 
-## Part 3 — admission control
+## Part 3 — admission control — **SERVER BUILT, NO UI YET**
+
+`Admission::{Open, Invite, Approval}` in
+[matchmaking.rs](crates/server/src/matchmaking.rs), migration
+[0018](crates/persistence/migrations/0018_tournament_admission.sql). Routes:
+`POST/GET /tournaments/{id}/invites`, `POST/GET /tournaments/{id}/requests`,
+`POST /tournaments/{id}/requests/{wallet}`. The detail view carries `admission`
+and the caller's own `my_admission`.
+
+Two things fell out that weren't in the plan below. A gated tournament now
+**requires an authenticated creator** — invite minting and approval are both
+organizer-only, so an anonymously-created one would be a door nobody could ever
+unlock. And approval is keyed on the **wallet even for a casual tournament**,
+whose entrant id is a self-chosen display name: approving a name would approve a
+string anyone else could type.
+
+Remaining: the organizer UI (mint/see codes, approve/reject requests) and the
+joiner's side (enter a code, ask to be let in, see where you stand).
 
 The creator picks one. All three are per-tournament settings, chosen at create.
 

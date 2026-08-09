@@ -222,6 +222,18 @@ pub fn routes() -> Router<AppState> {
         .route("/tournaments/{id}/join", post(tourney_join))
         .route("/tournaments/{id}/start", post(tourney_start))
         .route(
+            "/tournaments/{id}/invites",
+            post(tourney_invites_mint).get(tourney_invites_list),
+        )
+        .route(
+            "/tournaments/{id}/requests",
+            post(tourney_request).get(tourney_requests_list),
+        )
+        .route(
+            "/tournaments/{id}/requests/{wallet}",
+            post(tourney_request_decide),
+        )
+        .route(
             "/tournaments/{id}/claim/{address}",
             get(tourney_claim_proof),
         )
@@ -1395,6 +1407,18 @@ struct Tournament {
     /// How the pool is divided among the final standings. Creator-chosen, fixed
     /// at creation, persisted.
     payout: PayoutSpec,
+    /// Who may join. See `Admission`.
+    admission: Admission,
+    /// Single-use invite codes → the entrant that used one (`None` while
+    /// unused). Not the `Auth` link-code machinery: those are wallet-bound at
+    /// mint, globally keyed and TTL'd, where these belong to one tournament,
+    /// are claimed by whoever presents them, and have to survive a restart with
+    /// it.
+    invites: HashMap<String, Option<String>>,
+    /// Lowercased wallet → the organizer's decision. Keyed on the wallet even
+    /// for a casual tournament, whose entrant id is a self-chosen display name:
+    /// approving a name would approve a string anyone else could also type.
+    approvals: HashMap<String, ApprovalState>,
     /// Last known onchain pool, in USDC base units. `None` until first read.
     ///
     /// Not derivable any more. `buy_in × entrants` was the pool only while
@@ -1444,6 +1468,38 @@ struct Tournament {
     payout_leaves: Vec<(String, u128)>,
     created_at: Instant,
 }
+
+/// Who may join a tournament. Chosen by the creator, fixed at creation.
+///
+/// Only one of the three is enforced by the chain: a **nominal entry fee**,
+/// which is just `buy_in` and needs nothing here — N fake entrants cost N × fee,
+/// and the fee lands in the pool they were trying to farm. The two below are
+/// server policy, so they live in this single-node process's memory (and its
+/// durable row); they are a door, not a vault.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Admission {
+    /// Anyone may join.
+    #[default]
+    Open,
+    /// Must present an unused single-use code the organizer minted.
+    Invite,
+    /// Must be a signed-in wallet the organizer has approved.
+    Approval,
+}
+
+/// Where a wallet stands with an approval-gated tournament.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ApprovalState {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// Most codes an organizer may have outstanding on one tournament. Bounds the
+/// map that rides on every persist and every rehydrate.
+const MAX_INVITE_CODES: usize = 256;
 
 /// Dispatch info for a bot entrant (its seat is played by its connected agent).
 #[derive(Clone)]
@@ -1544,6 +1600,8 @@ struct TourneyCreateReq {
     /// How to divide the pool: basis points per finishing place, best first
     /// (`{"bps":[5000,3000,2000]}`). Omitted = the default 65/25/10.
     payout: Option<PayoutSpec>,
+    /// Who may join: `open` (default), `invite`, or `approval`.
+    admission: Option<Admission>,
 }
 
 #[derive(Serialize)]
@@ -1572,6 +1630,13 @@ async fn tourney_create(
     if let Err(why) = payout.validate() {
         tracing::warn!("rejecting tournament payout structure: {why}");
         return Err(StatusCode::BAD_REQUEST);
+    }
+    // A gated tournament needs someone who can open the gate. Both invite
+    // minting and approval are organizer-only, so an anonymously-created one
+    // would be a door nobody can ever unlock — every join refused, forever.
+    let admission = req.admission.unwrap_or_default();
+    if admission != Admission::Open && state.authed_wallet(&headers).is_none() {
+        return Err(StatusCode::UNAUTHORIZED);
     }
     // Global ceiling, casual included: every tournament in the map is walked by
     // every `GET /tournaments` under the lobby mutex, and a casual one costs
@@ -1643,6 +1708,9 @@ async fn tourney_create(
             name,
             buy_in: req.buy_in,
             payout,
+            admission,
+            invites: HashMap::new(),
+            approvals: HashMap::new(),
             pool: None,
             organizer,
             initial_secs: req.initial_secs,
@@ -1745,10 +1813,30 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
                 bots_json(&t.entrant_bots),
                 serde_json::to_value(&t.entrant_wallets).unwrap_or_else(|_| json!({})),
                 serde_json::to_value(&t.payout).unwrap_or_else(|_| json!({})),
+                serde_json::to_value(t.admission)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "open".into()),
+                serde_json::to_value(&t.invites).unwrap_or_else(|_| json!({})),
+                serde_json::to_value(&t.approvals).unwrap_or_else(|_| json!({})),
             )
         })
     };
-    if let Some((name, buy_in, organizer, init, inc, status, players, bots, wallets, payout)) = snap
+    if let Some((
+        name,
+        buy_in,
+        organizer,
+        init,
+        inc,
+        status,
+        players,
+        bots,
+        wallets,
+        payout,
+        admission,
+        invites,
+        approvals,
+    )) = snap
     {
         db.upsert_tournament(
             tid,
@@ -1762,6 +1850,9 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
             &bots,
             &wallets,
             &payout,
+            &admission,
+            &invites,
+            &approvals,
         )
         .await
         .map_err(|e| {
@@ -1784,6 +1875,8 @@ struct JoinReq {
     /// a tournament declared nothing, so its games recorded no engine while the
     /// same browser's park games did.
     engine: Option<String>,
+    /// Single-use code, for an `invite`-gated tournament.
+    invite: Option<String>,
 }
 
 /// Echoes back the entrant id the server actually recorded. A casual display
@@ -1796,11 +1889,102 @@ struct JoinResp {
     player: String,
 }
 
+/// Enforce the tournament's admission policy, then join.
+///
+/// **The gate runs before the money**, always, and that ordering is the whole
+/// design: there is no onchain path to return a rejected applicant's entry
+/// before the settle timeout, so anyone who paid first and was refused second
+/// would have USDC locked in a tournament they are not in — the exact failure
+/// `tourney_join_inner` already fires a `🚨` alert for when a buy-in lands after
+/// a start. So approval and invite are settled here, above `enter_tournament`.
 async fn tourney_join(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     Json(req): Json<JoinReq>,
+) -> Result<Json<JoinResp>, StatusCode> {
+    let (admission, already_in) = {
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+        // Someone already in the field re-joining (the retry path for a join
+        // that 500'd on its durable write) must not burn a second invite code.
+        let me = state.authed_wallet(&headers);
+        let already = me
+            .as_deref()
+            .is_some_and(|w| t.players.iter().any(|p| p.eq_ignore_ascii_case(w)));
+        (t.admission, already)
+    };
+
+    let mut claimed_code: Option<String> = None;
+    if !already_in {
+        match admission {
+            Admission::Open => {}
+            Admission::Approval => {
+                // Keyed on the wallet, so this needs one — including for a
+                // casual tournament, whose entrant id is a display name anyone
+                // could type.
+                let wallet = state
+                    .authed_wallet(&headers)
+                    .ok_or(StatusCode::UNAUTHORIZED)?
+                    .to_lowercase();
+                let ts = state.0.lobby.tournaments.lock();
+                let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+                match t.approvals.get(&wallet) {
+                    Some(ApprovalState::Approved) => {}
+                    // 403 for a decision that has been made, 404-ish semantics
+                    // for one that hasn't — the client shows different copy for
+                    // "waiting on the organizer" than for "you were turned down".
+                    Some(ApprovalState::Pending) => return Err(StatusCode::ACCEPTED),
+                    _ => return Err(StatusCode::FORBIDDEN),
+                }
+            }
+            Admission::Invite => {
+                let code = req.invite.clone().ok_or(StatusCode::FORBIDDEN)?;
+                let mut ts = state.0.lobby.tournaments.lock();
+                let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+                // Reserved under the lock rather than checked-then-used, so two
+                // joins racing one code can't both pass. Released below if the
+                // join then fails for any reason.
+                match t.invites.get_mut(&code) {
+                    Some(slot @ None) => *slot = Some(String::new()),
+                    _ => return Err(StatusCode::FORBIDDEN), // unknown or already used
+                }
+                claimed_code = Some(code);
+            }
+        }
+    }
+
+    let result = tourney_join_inner(state.clone(), id, headers, req).await;
+
+    if let Some(code) = claimed_code {
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            if let Some(t) = ts.get_mut(&id) {
+                if let Some(slot) = t.invites.get_mut(&code) {
+                    *slot = match &result {
+                        // Record who actually used it, now that they're seated.
+                        Ok(Json(resp)) => Some(resp.player.clone()),
+                        // The join failed after the reservation — hand the code
+                        // back rather than burning it on a seat nobody got.
+                        Err(_) => None,
+                    };
+                }
+            }
+        }
+        // Persist the code's FINAL state. The inner join persists mid-flight,
+        // while the code still holds its placeholder reservation, so without
+        // this a restart would leave a spent code showing no entrant and a
+        // handed-back one still spent.
+        let _ = persist_tournament(&state, id).await;
+    }
+    result
+}
+
+async fn tourney_join_inner(
+    state: AppState,
+    id: Uuid,
+    headers: HeaderMap,
+    req: JoinReq,
 ) -> Result<Json<JoinResp>, StatusCode> {
     // Drain: reject before locking a buy-in onchain for a tournament that
     // couldn't be started.
@@ -1995,6 +2179,204 @@ async fn tourney_join(
     }
 }
 
+// --------------------------------------------------------------------------
+// Admission control (organizer-only)
+// --------------------------------------------------------------------------
+
+/// Is this caller the tournament's organizer? Every gate-management route is
+/// theirs alone — a tournament whose door anyone could open is not gated.
+fn is_organizer(t: &Tournament, caller: Option<&str>) -> bool {
+    matches!((&t.organizer, caller), (Some(org), Some(c)) if org.eq_ignore_ascii_case(c))
+}
+
+#[derive(Deserialize)]
+struct MintInvitesReq {
+    #[serde(default = "one")]
+    count: usize,
+}
+fn one() -> usize {
+    1
+}
+
+#[derive(Serialize)]
+struct InviteRow {
+    code: String,
+    /// The entrant that used it; absent while the code is still good.
+    used_by: Option<String>,
+}
+
+/// Mint single-use invite codes. Organizer-only.
+async fn tourney_invites_mint(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(req): Json<MintInvitesReq>,
+) -> Result<Json<Vec<InviteRow>>, StatusCode> {
+    state.reject_if_rate_limited_create(&headers)?;
+    let caller = state.authed_wallet(&headers);
+    // Scoped so the (non-Send) lobby guard is provably gone before the persist
+    // below awaits.
+    let minted: Vec<String> = {
+        let mut ts = state.0.lobby.tournaments.lock();
+        let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+        if !is_organizer(t, caller.as_deref()) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        if req.count == 0 || req.count > MAX_INVITE_CODES {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if t.invites.len() + req.count > MAX_INVITE_CODES {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        let minted: Vec<String> = (0..req.count)
+            .map(|_| Uuid::new_v4().simple().to_string())
+            .collect();
+        for code in &minted {
+            t.invites.insert(code.clone(), None);
+        }
+        minted
+    };
+    // Best-effort: a code that isn't persisted stops working after a restart,
+    // which fails CLOSED (the holder is refused, nobody gets in wrongly).
+    let _ = persist_tournament(&state, id).await;
+    Ok(Json(
+        minted
+            .into_iter()
+            .map(|code| InviteRow {
+                code,
+                used_by: None,
+            })
+            .collect(),
+    ))
+}
+
+/// Every code and whether it has been spent. Organizer-only — the unused codes
+/// ARE the credentials, so this must never be public.
+async fn tourney_invites_list(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<InviteRow>>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
+    let caller = state.authed_wallet(&headers);
+    let ts = state.0.lobby.tournaments.lock();
+    let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    if !is_organizer(t, caller.as_deref()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut rows: Vec<InviteRow> = t
+        .invites
+        .iter()
+        .map(|(code, used)| InviteRow {
+            code: code.clone(),
+            // The empty string is the in-flight reservation `tourney_join`
+            // writes while a join is running; it isn't an entrant yet.
+            used_by: used.clone().filter(|u| !u.is_empty()),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.code.cmp(&b.code));
+    Ok(Json(rows))
+}
+
+#[derive(Serialize)]
+struct RequestRow {
+    wallet: String,
+    state: ApprovalState,
+}
+
+/// Ask to be let in. The applicant's own call; no money moves here — that is
+/// the point of the two-phase join (see `tourney_join`).
+async fn tourney_request(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    state.reject_if_rate_limited_create(&headers)?;
+    let wallet = state
+        .authed_wallet(&headers)
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .to_lowercase();
+    {
+        let mut ts = state.0.lobby.tournaments.lock();
+        let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+        if t.admission != Admission::Approval {
+            return Err(StatusCode::BAD_REQUEST); // nothing to request
+        }
+        if t.status != "open" {
+            return Err(StatusCode::CONFLICT);
+        }
+        // Bounded by the same cap as invites so an open request list can't be
+        // used to grow this map (and every persist of it) without limit.
+        if !t.approvals.contains_key(&wallet) && t.approvals.len() >= MAX_INVITE_CODES {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        // Re-requesting never overwrites a decision: an applicant must not be
+        // able to clear their own rejection by asking again.
+        t.approvals.entry(wallet).or_insert(ApprovalState::Pending);
+    }
+    let _ = persist_tournament(&state, id).await;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// The request list. Organizer-only.
+async fn tourney_requests_list(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RequestRow>>, StatusCode> {
+    state.reject_if_rate_limited_polls(&headers)?;
+    let caller = state.authed_wallet(&headers);
+    let ts = state.0.lobby.tournaments.lock();
+    let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    if !is_organizer(t, caller.as_deref()) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut rows: Vec<RequestRow> = t
+        .approvals
+        .iter()
+        .map(|(wallet, state)| RequestRow {
+            wallet: wallet.clone(),
+            state: *state,
+        })
+        .collect();
+    rows.sort_by(|a, b| a.wallet.cmp(&b.wallet));
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+struct DecideReq {
+    approve: bool,
+}
+
+/// Approve or reject an applicant. Organizer-only.
+async fn tourney_request_decide(
+    State(state): State<AppState>,
+    Path((id, wallet)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+    Json(req): Json<DecideReq>,
+) -> Result<StatusCode, StatusCode> {
+    state.reject_if_rate_limited_create(&headers)?;
+    let caller = state.authed_wallet(&headers);
+    {
+        let mut ts = state.0.lobby.tournaments.lock();
+        let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+        if !is_organizer(t, caller.as_deref()) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let key = wallet.to_lowercase();
+        // Only a wallet that actually asked can be decided on, so the map stays
+        // a record of requests rather than a place to write arbitrary keys.
+        let slot = t.approvals.get_mut(&key).ok_or(StatusCode::NOT_FOUND)?;
+        *slot = if req.approve {
+            ApprovalState::Approved
+        } else {
+            ApprovalState::Rejected
+        };
+    }
+    let _ = persist_tournament(&state, id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// One row of the standings table, in the order the pool is paid out.
 #[derive(Serialize)]
 struct Standing {
@@ -2064,6 +2446,16 @@ struct TourneyView {
     /// `buy_in: "0"` with a non-zero pool here — that pairing is how a client
     /// tells "free, sponsor-funded" from "casual, no prize".
     pool: Option<String>,
+    /// Who may join: `open`, `invite` or `approval`.
+    admission: Admission,
+    /// Where the CALLING wallet stands with an approval-gated tournament:
+    /// `pending`, `approved`, `rejected`, or absent if they never asked (or the
+    /// tournament isn't approval-gated). Only the authenticated detail route
+    /// fills this in — the lobby list is shared by every client and has no
+    /// caller. Nothing here is a credential: it says what the server will do,
+    /// and the server re-checks on join anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    my_admission: Option<ApprovalState>,
     /// What each `standings` row would be paid if the event ended now, in USDC
     /// base units and index-aligned with `standings`. Empty when there is no
     /// pool. Produced by the same `payout_split` that settles, so the table a
@@ -2239,6 +2631,8 @@ fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
         increment_secs: t.increment_secs,
         organizer: t.organizer.clone(),
         payout: t.payout.clone(),
+        admission: t.admission,
+        my_admission: None, // filled by `tourney_get`, which has a caller
         age_secs: t.created_at.elapsed().as_secs(),
     }
 }
@@ -2249,11 +2643,12 @@ async fn tourney_get(
     headers: HeaderMap,
 ) -> Result<Json<TourneyView>, StatusCode> {
     state.reject_if_rate_limited_polls(&headers)?;
+    let caller = state.authed_wallet(&headers).map(|w| w.to_lowercase());
     let t = state.0.lobby.tournaments.lock();
-    Ok(Json(view_of(
-        t.get(&id).ok_or(StatusCode::NOT_FOUND)?,
-        Pairings::All,
-    )))
+    let t = t.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let mut view = view_of(t, Pairings::All);
+    view.my_admission = caller.and_then(|w| t.approvals.get(&w).copied());
+    Ok(Json(view))
 }
 
 /// The lobby, with each tournament's view inlined. `tournament_id` is kept as
@@ -3012,6 +3407,13 @@ pub async fn recover_tournaments(state: &AppState) {
                     name: r.name,
                     buy_in: r.buy_in,
                     payout,
+                    // Restored, not defaulted: a tournament that came back
+                    // `Open` would be a closed door that silently stopped
+                    // existing — anyone could walk into an invite-only event
+                    // after a deploy.
+                    admission: serde_json::from_value(json!(r.admission)).unwrap_or_default(),
+                    invites: serde_json::from_value(r.invites).unwrap_or_default(),
+                    approvals: serde_json::from_value(r.approvals).unwrap_or_default(),
                     // Re-read from the chain by `pool_refresh_task`; a
                     // rehydrated tournament shows no pool figure until it is.
                     pool: None,
@@ -4124,6 +4526,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -4140,6 +4543,7 @@ mod tests {
                     seat: None,
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
             .await
@@ -4391,6 +4795,7 @@ mod tests {
                 payout: Some(PayoutSpec {
                     bps: vec![5_000, 3_000],
                 }),
+                admission: None,
             }),
         )
         .await;
@@ -4428,6 +4833,469 @@ mod tests {
             serde_json::from_value::<PayoutSpec>(json!({ "bps": [6500, 2500, 1000] })).unwrap(),
             PayoutSpec::default()
         );
+    }
+
+    /// Create a casual tournament with the given admission policy, organized by
+    /// `organizer` (whose bearer token is returned alongside).
+    async fn gated_tournament(state: &AppState, tok: &str, admission: Admission) -> Uuid {
+        tourney_create(
+            State(state.clone()),
+            bearer(tok),
+            Json(TourneyCreateReq {
+                name: "Gated".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: Some(admission),
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id
+    }
+
+    fn join_with(player: &str, invite: Option<&str>) -> JoinReq {
+        JoinReq {
+            player: Some(player.into()),
+            seat: None,
+            uci_options: None,
+            engine: None,
+            invite: invite.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gated_tournament_needs_someone_who_can_open_the_gate() {
+        // Minting invites and deciding requests are both organizer-only, so an
+        // anonymously-created gated tournament would refuse every join forever.
+        let (state, _c, _r) = test_state();
+        for admission in [Admission::Invite, Admission::Approval] {
+            let r = tourney_create(
+                State(state.clone()),
+                HeaderMap::new(), // no session
+                Json(TourneyCreateReq {
+                    name: "Nobody's".into(),
+                    buy_in: None,
+                    initial_secs: 60,
+                    increment_secs: 1,
+                    payout: None,
+                    admission: Some(admission),
+                }),
+            )
+            .await;
+            assert!(matches!(r, Err(StatusCode::UNAUTHORIZED)), "{admission:?}");
+        }
+        // An open one still needs no organizer at all.
+        assert!(tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "Anyone's".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_invite_code_admits_exactly_one_entrant() {
+        let (state, _c, _r) = test_state();
+        let org = "0xaa11111111111111111111111111111111111111";
+        let tok = state.0.auth.mint_session(org);
+        let tid = gated_tournament(&state, &tok, Admission::Invite).await;
+
+        // No code, no entry.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("nocode", None)),
+                )
+                .await
+            ),
+            StatusCode::FORBIDDEN
+        );
+        // A code nobody minted, likewise.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("guessed", Some("deadbeef"))),
+                )
+                .await
+            ),
+            StatusCode::FORBIDDEN
+        );
+
+        // Only the organizer may mint.
+        assert!(matches!(
+            tourney_invites_mint(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(MintInvitesReq { count: 1 }),
+            )
+            .await,
+            Err(StatusCode::FORBIDDEN)
+        ));
+        let codes = tourney_invites_mint(
+            State(state.clone()),
+            Path(tid),
+            bearer(&tok),
+            Json(MintInvitesReq { count: 2 }),
+        )
+        .await
+        .expect("mint")
+        .0;
+        assert_eq!(codes.len(), 2);
+        let code = codes[0].code.clone();
+
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("alice", Some(&code))),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        // Single use: the same code again is refused.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("bob", Some(&code))),
+                )
+                .await
+            ),
+            StatusCode::FORBIDDEN
+        );
+        // The OTHER code still works — burning one must not burn the batch.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("bob", Some(&codes[1].code))),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+
+        let listed = tourney_invites_list(State(state.clone()), Path(tid), bearer(&tok))
+            .await
+            .expect("list")
+            .0;
+        let used: Vec<_> = listed.iter().filter_map(|r| r.used_by.clone()).collect();
+        assert_eq!(used.len(), 2, "both codes record who spent them");
+        assert!(used.contains(&"alice".to_string()) && used.contains(&"bob".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_failed_join_hands_its_invite_code_back() {
+        // The code is reserved BEFORE the join runs (so two joins can't race one
+        // code), which means a join that then fails has to return it — otherwise
+        // a duplicate display name silently costs the organizer a code.
+        let (state, _c, _r) = test_state();
+        let org = "0xaa11111111111111111111111111111111111111";
+        let tok = state.0.auth.mint_session(org);
+        let tid = gated_tournament(&state, &tok, Admission::Invite).await;
+        let codes = tourney_invites_mint(
+            State(state.clone()),
+            Path(tid),
+            bearer(&tok),
+            Json(MintInvitesReq { count: 2 }),
+        )
+        .await
+        .expect("mint")
+        .0;
+
+        // Seat "alice" with the first code, then try the second under the SAME
+        // name — the join fails on the duplicate, and code 2 must survive.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("alice", Some(&codes[0].code))),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("alice", Some(&codes[1].code))),
+                )
+                .await
+            ),
+            StatusCode::CONFLICT,
+            "duplicate display name"
+        );
+        // …and is spendable by someone else.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("carol", Some(&codes[1].code))),
+                )
+                .await
+            ),
+            StatusCode::OK,
+            "the code was handed back, not burned"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_precedes_the_join_and_a_rejection_sticks() {
+        let (state, _c, _r) = test_state();
+        let org = "0xaa11111111111111111111111111111111111111";
+        let alice = "0xbb22222222222222222222222222222222222222";
+        let org_tok = state.0.auth.mint_session(org);
+        let alice_tok = state.0.auth.mint_session(alice);
+        let tid = gated_tournament(&state, &org_tok, Admission::Approval).await;
+
+        // Approval is keyed on the wallet, so an anonymous join can't be decided
+        // on at all — even for a casual tournament, whose entrant id is a name
+        // anyone could type.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    HeaderMap::new(),
+                    Json(join_with("stranger", None)),
+                )
+                .await
+            ),
+            StatusCode::UNAUTHORIZED
+        );
+        // Signed in but never asked.
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    bearer(&alice_tok),
+                    Json(join_with("alice", None)),
+                )
+                .await
+            ),
+            StatusCode::FORBIDDEN
+        );
+
+        // Ask. No money moves here — that IS the two-phase join.
+        assert_eq!(
+            tourney_request(State(state.clone()), Path(tid), bearer(&alice_tok))
+                .await
+                .expect("request"),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    bearer(&alice_tok),
+                    Json(join_with("alice", None)),
+                )
+                .await
+            ),
+            StatusCode::ACCEPTED,
+            "pending is distinguishable from refused"
+        );
+
+        // Only the organizer decides.
+        assert!(matches!(
+            tourney_request_decide(
+                State(state.clone()),
+                Path((tid, alice.into())),
+                bearer(&alice_tok),
+                Json(DecideReq { approve: true }),
+            )
+            .await,
+            Err(StatusCode::FORBIDDEN)
+        ));
+        // Reject first, and check the applicant can't clear it by re-asking.
+        tourney_request_decide(
+            State(state.clone()),
+            Path((tid, alice.into())),
+            bearer(&org_tok),
+            Json(DecideReq { approve: false }),
+        )
+        .await
+        .expect("reject");
+        let _ = tourney_request(State(state.clone()), Path(tid), bearer(&alice_tok)).await;
+        let rows = tourney_requests_list(State(state.clone()), Path(tid), bearer(&org_tok))
+            .await
+            .expect("list")
+            .0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].state,
+            ApprovalState::Rejected,
+            "re-requesting must not launder a rejection"
+        );
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    bearer(&alice_tok),
+                    Json(join_with("alice", None)),
+                )
+                .await
+            ),
+            StatusCode::FORBIDDEN
+        );
+
+        // Approve, and the same join now lands.
+        tourney_request_decide(
+            State(state.clone()),
+            Path((tid, alice.into())),
+            bearer(&org_tok),
+            Json(DecideReq { approve: true }),
+        )
+        .await
+        .expect("approve");
+        assert_eq!(
+            join_code(
+                &tourney_join(
+                    State(state.clone()),
+                    Path(tid),
+                    bearer(&alice_tok),
+                    Json(join_with("alice", None)),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+
+        // The detail view tells the caller where they stand.
+        let view = tourney_get(State(state.clone()), Path(tid), bearer(&alice_tok))
+            .await
+            .expect("view")
+            .0;
+        assert_eq!(view.admission, Admission::Approval);
+        assert_eq!(view.my_admission, Some(ApprovalState::Approved));
+        // …and says nothing about anyone else to an anonymous caller.
+        let anon = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
+        assert_eq!(anon.my_admission, None);
+    }
+
+    #[tokio::test]
+    async fn only_the_organizer_sees_the_unspent_codes() {
+        // An unused code IS the credential. Listing them publicly would make an
+        // invite-only tournament open to anyone who read the lobby.
+        let (state, _c, _r) = test_state();
+        let org = "0xaa11111111111111111111111111111111111111";
+        let other = "0xcc33333333333333333333333333333333333333";
+        let tok = state.0.auth.mint_session(org);
+        let other_tok = state.0.auth.mint_session(other);
+        let tid = gated_tournament(&state, &tok, Admission::Invite).await;
+        let secret = tourney_invites_mint(
+            State(state.clone()),
+            Path(tid),
+            bearer(&tok),
+            Json(MintInvitesReq { count: 1 }),
+        )
+        .await
+        .expect("mint")
+        .0[0]
+            .code
+            .clone();
+
+        for hdr in [HeaderMap::new(), bearer(&other_tok)] {
+            assert!(matches!(
+                tourney_invites_list(State(state.clone()), Path(tid), hdr).await,
+                Err(StatusCode::FORBIDDEN)
+            ));
+        }
+        assert!(
+            tourney_invites_list(State(state.clone()), Path(tid), bearer(&tok))
+                .await
+                .is_ok()
+        );
+        // The public view never carries them either.
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !json.contains(&secret),
+            "the code leaked into the public view: {json}"
+        );
+        // The MODE is public (a client has to know to ask for a code); the codes
+        // themselves are not.
+        assert_eq!(view.admission, Admission::Invite);
+    }
+
+    #[test]
+    fn the_admission_policy_survives_the_durable_round_trip() {
+        // A gated tournament that rehydrates as `open` is a closed door that
+        // silently stopped existing — and losing `invites` re-opens every code
+        // that had already been spent.
+        assert_eq!(
+            serde_json::to_value(Admission::Approval).unwrap(),
+            json!("approval")
+        );
+        assert_eq!(
+            serde_json::to_value(Admission::Open).unwrap(),
+            json!("open")
+        );
+        assert_eq!(
+            serde_json::from_value::<Admission>(json!("invite")).unwrap(),
+            Admission::Invite
+        );
+        // The column default is what a pre-0018 row carries, and it must mean
+        // "ungated" — those tournaments never had a gate.
+        assert_eq!(
+            serde_json::from_value::<Admission>(json!("open")).unwrap(),
+            Admission::default()
+        );
+
+        let invites: HashMap<String, Option<String>> =
+            serde_json::from_value(json!({ "abc": "alice", "def": null })).unwrap();
+        assert_eq!(invites.get("abc"), Some(&Some("alice".into())));
+        assert_eq!(
+            invites.get("def"),
+            Some(&None),
+            "an unspent code stays open"
+        );
+
+        let approvals: HashMap<String, ApprovalState> =
+            serde_json::from_value(json!({ "0xaa": "approved", "0xbb": "rejected" })).unwrap();
+        assert_eq!(approvals["0xaa"], ApprovalState::Approved);
+        assert_eq!(approvals["0xbb"], ApprovalState::Rejected);
     }
 
     #[test]
@@ -4492,7 +5360,10 @@ mod tests {
             .await
             .expect("view")
             .0;
-        assert_eq!(view.pool.as_deref(), Some((500 * USDC).to_string().as_str()));
+        assert_eq!(
+            view.pool.as_deref(),
+            Some((500 * USDC).to_string().as_str())
+        );
         assert_eq!(
             view.prizes,
             vec![
@@ -4686,6 +5557,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -4702,6 +5574,7 @@ mod tests {
                     seat: Some("bot".into()),
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
             .await;
@@ -4821,6 +5694,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -4837,6 +5711,7 @@ mod tests {
                     seat: None,
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
             .await
@@ -4938,6 +5813,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -4955,7 +5831,8 @@ mod tests {
                         player: Some("Alpha".into()),
                         seat: Some("bot".into()),
                         uci_options: None,
-                        engine: None
+                        engine: None,
+                        invite: None,
                     }),
                 )
                 .await
@@ -4972,7 +5849,8 @@ mod tests {
                         player: Some("Bravo".into()),
                         seat: Some("bot".into()),
                         uci_options: None,
-                        engine: None
+                        engine: None,
+                        invite: None,
                     }),
                 )
                 .await
@@ -4991,7 +5869,8 @@ mod tests {
                         player: Some("Bravo".into()),
                         seat: None,
                         uci_options: None,
-                        engine: None
+                        engine: None,
+                        invite: None,
                     }),
                 )
                 .await
@@ -5036,6 +5915,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -5052,6 +5932,7 @@ mod tests {
                     seat: None,
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
             .await
@@ -5159,6 +6040,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -5175,6 +6057,7 @@ mod tests {
                     seat: None,
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
             .await
@@ -5306,6 +6189,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -5324,6 +6208,7 @@ mod tests {
                 seat: Some("bot".into()),
                 uci_options: None,
                 engine: None,
+                invite: None,
             }),
         )
         .await
@@ -5339,6 +6224,7 @@ mod tests {
                 seat: None,
                 uci_options: None,
                 engine: None,
+                invite: None,
             }),
         )
         .await
@@ -5409,6 +6295,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -5425,6 +6312,7 @@ mod tests {
                     seat: Some("bot".into()),
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
             .await
@@ -5465,6 +6353,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -5481,6 +6370,7 @@ mod tests {
                     seat: None,
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
         };
@@ -5512,6 +6402,7 @@ mod tests {
                 initial_secs: 60,
                 increment_secs: 1,
                 payout: None,
+                admission: None,
             }),
         )
         .await
@@ -5532,6 +6423,7 @@ mod tests {
                     seat: None,
                     uci_options: None,
                     engine: None,
+                    invite: None,
                 }),
             )
         };

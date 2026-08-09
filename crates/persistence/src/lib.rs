@@ -150,6 +150,11 @@ pub struct OpenTournamentRow {
     /// Creator-defined prize structure, `{"bps":[…]}` (migration 0017). Must be
     /// restored, or a rehydrated tournament silently pays a different table.
     pub payout: serde_json::Value,
+    /// Admission policy + its state (migration 0018). Must be restored, or a
+    /// gated tournament comes back with its door open.
+    pub admission: String,
+    pub invites: serde_json::Value,
+    pub approvals: serde_json::Value,
     /// How long ago the tournament was created, so the caller can restore its
     /// TTL clock instead of restarting it on every deploy. Computed by the
     /// database — the server has no chrono of its own.
@@ -513,6 +518,9 @@ impl Db {
         bots: &serde_json::Value,
         entrant_wallets: &serde_json::Value,
         payout: &serde_json::Value,
+        admission: &str,
+        invites: &serde_json::Value,
+        approvals: &serde_json::Value,
     ) -> Result<()> {
         // `payout` is deliberately absent from the DO UPDATE set: the prize
         // structure is decided once, at creation, and entrants join on the
@@ -521,11 +529,15 @@ impl Db {
         sqlx::query(
             r#"INSERT INTO tournaments
                  (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
-                  entrant_wallets, payout)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                  entrant_wallets, payout, admission, invites, approvals)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
                  players=EXCLUDED.players, bots=EXCLUDED.bots,
-                 entrant_wallets=EXCLUDED.entrant_wallets"#,
+                 entrant_wallets=EXCLUDED.entrant_wallets,
+                 -- These DO change after creation (codes get minted and spent,
+                 -- requests get decided), unlike `payout` and `admission`, which
+                 -- are the terms a field joined on and stay as first written.
+                 invites=EXCLUDED.invites, approvals=EXCLUDED.approvals"#,
         )
         .bind(id)
         .bind(name)
@@ -538,6 +550,9 @@ impl Db {
         .bind(bots)
         .bind(entrant_wallets)
         .bind(payout)
+        .bind(admission)
+        .bind(invites)
+        .bind(approvals)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -553,6 +568,7 @@ impl Db {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
                       players, bots, entrant_wallets, payout,
+                      admission, invites, approvals,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,
