@@ -2531,10 +2531,7 @@ fn entrant_wallet(
 /// O(entrants²) under that lock. An entrant who joins between the snapshot and
 /// this read simply has no label for one poll, which is the right failure: a
 /// label is decoration, and the id underneath it is what everything is keyed on.
-async fn entrant_labels(
-    state: &AppState,
-    seats: &[EntrantSeats],
-) -> Vec<HashMap<String, String>> {
+async fn entrant_labels(state: &AppState, seats: &[EntrantSeats]) -> Vec<HashMap<String, String>> {
     // Only wallet-bound seats need a username lookup; guests are labelled from
     // their id alone. With no DB (dev/tests) the map is empty and wallets fall
     // through to their short address — exactly what the board does.
@@ -6970,7 +6967,10 @@ mod tests {
     #[tokio::test]
     async fn a_free_entry_event_may_not_be_open() {
         let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(1_000_000))));
-        let org = state.0.auth.mint_session("0xaa77777777777777777777777777777777777777");
+        let org = state
+            .0
+            .auth
+            .mint_session("0xaa77777777777777777777777777777777777777");
         let mk = |buy_in: Option<&str>, admission: Option<Admission>| {
             tourney_create(
                 State(state.clone()),

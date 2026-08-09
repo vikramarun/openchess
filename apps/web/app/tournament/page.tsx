@@ -297,7 +297,17 @@ function TournamentClient() {
         ? `${SERVER_HTTP}/tournaments/${tid}/my-games`
         : `${SERVER_HTTP}/tournaments/${tid}/my-games?player=${encodeURIComponent(me)}`;
       try {
-        const r = await fetch(url, { headers: buyIn && token ? { authorization: `Bearer ${token}` } : {} });
+        // authedFetch, always — casual included. A signed-in casual entrant's
+        // seat is WALLET-BOUND, and the server requires the matching wallet
+        // before handing out that seat's launch token (otherwise anyone could
+        // read the entrant's nickname off the standings and drive their seat).
+        // Sending no header there 401s, `load` bails, no token ever arrives, and
+        // the entrant sits on "Taking your seat…" until the round reaps them as
+        // a no-show — every round. authedFetch rather than a bare bearer so an
+        // expired session self-heals mid-tournament instead of silently
+        // forfeiting: it drops the dead token, the header re-prompts, and the
+        // auto-sign effect re-establishes the session.
+        const r = await authedFetch(url);
         if (!r.ok || !alive) return;
         const games: MyGame[] = await r.json();
         setMyTokens((prev) => {
@@ -445,12 +455,14 @@ function TournamentClient() {
                   ? BOT_OFFLINE_MSG
                   : r.status === 409
                     ? "That display name is already taken in this tournament."
-                    : // The admission gate. The server answers 403 for every
-                      // not-admitted case and never a 2xx — `fetch` counts 202
-                      // as ok, so a "you're still pending" success code would be
-                      // read here as a completed join. Which case it is comes
-                      // from `my_admission`, not the status.
-                      r.status === 403
+                    : // A display name shaped like a wallet address is refused:
+                      // the server reads an address-shaped entrant id AS that
+                      // wallet, so allowing one would let a guest bind the seat
+                      // to somebody else's address. Say which rule was hit —
+                      // otherwise this reads as a generic failure of the form.
+                      r.status === 400
+                      ? "Pick a display name that isn’t a wallet address."
+                      : r.status === 403
                       ? t.admission === "invite"
                         ? "That invite code isn’t valid — it may already have been used."
                         : t.my_admission === "pending"

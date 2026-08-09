@@ -96,7 +96,10 @@ mod tests {
         assert!(!out.contains("SECRETKEY123"), "API key survived: {out}");
         assert!(!out.contains("alchemy.com"), "host survived: {out}");
         assert!(out.contains("settlement failed"));
-        assert!(out.contains("timeout"), "text after the url was dropped: {out}");
+        assert!(
+            out.contains("timeout"),
+            "text after the url was dropped: {out}"
+        );
         assert!(out.contains("[redacted-url]"));
     }
 
