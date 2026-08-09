@@ -10,9 +10,12 @@ import {
   type Invite,
   type SeatRequest,
 } from "@/lib/admission";
-import type { Admission, Tournament } from "@/lib/tournaments";
+import { entrantLabel, type Admission, type Tournament } from "@/lib/tournaments";
 
-const shortWallet = (w: string) => (w.length > 12 ? `${w.slice(0, 6)}…${w.slice(-4)}` : w);
+// Applicants are wallets. Prefer a claimed handle when the tournament view
+// already resolved one (an approved entrant who has joined will have it), else
+// the shared shortener — never a bare 42-character address, and never a
+// second local copy of the truncation rule.
 
 /** The organizer's side of a gated tournament: mint and watch invite codes, or
  *  decide who gets in.
@@ -123,7 +126,7 @@ export function TournamentAdmission({ t }: { t: Tournament }) {
                 >
                   <code style={{ opacity: i.used_by ? 0.5 : 1 }}>{i.code}</code>
                   {i.used_by ? (
-                    <span className="muted">used by {shortWallet(i.used_by)}</span>
+                    <span className="muted">used by {entrantLabel(t, i.used_by)}</span>
                   ) : (
                     <button className="ghost" onClick={() => copy(i.code)}>
                       {copied === i.code ? "Copied ✓" : "Copy"}
@@ -153,7 +156,7 @@ export function TournamentAdmission({ t }: { t: Tournament }) {
                   key={r.wallet}
                   style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
                 >
-                  <span style={{ minWidth: 130 }}>{shortWallet(r.wallet)}</span>
+                  <span style={{ minWidth: 130 }}>{entrantLabel(t, r.wallet)}</span>
                   {r.state === "pending" ? (
                     <>
                       <button

@@ -16,6 +16,7 @@ mod players;
 mod ratelimit;
 mod room;
 mod singlenode;
+mod username;
 mod ws;
 
 use std::collections::HashMap;
@@ -129,6 +130,65 @@ pub fn seat_wallets(wager: Option<WagerSeats>, meta: &[SeatMeta; 2]) -> [Option<
             .map(|w| w.black.to_string())
             .or_else(|| meta[1].wallet.clone()),
     ]
+}
+
+/// The house bot's wallet (lowercased) from `HOUSE_WALLET`, if configured.
+fn house_wallet() -> Option<String> {
+    std::env::var("HOUSE_WALLET")
+        .ok()
+        .map(|w| w.trim().to_lowercase())
+        .filter(|w| !w.is_empty())
+}
+
+/// The house bot's own display name (`HOUSE_USERNAME`, default `HouseBot`).
+fn house_username() -> String {
+    std::env::var("HOUSE_USERNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "HouseBot".into())
+}
+
+/// Give the house bot's wallet its handle at boot, if it hasn't got one.
+///
+/// Without this the lobby's own bot renders as a hex address, because a seat's
+/// label is now resolved from its wallet's username and `scripts/house-bot.sh`
+/// has no way to claim one: `house`/`housebot` are on `username::RESERVED`, so
+/// `PUT /profile/username` refuses them — deliberately, since a lookalike in the
+/// offers table is exactly what that list exists to prevent. The bot may not
+/// claim it and nobody else may either, which leaves the server to grant it.
+///
+/// Idempotent, and cheap to leave in: `set_username` treats re-submitting the
+/// name a wallet already holds as a no-op that doesn't touch the cooldown, so
+/// every restart after the first is one query that changes nothing. Purely
+/// cosmetic, so every failure is a log line — a server that cannot name its bot
+/// must still boot and serve games.
+async fn ensure_house_username(state: &AppState) {
+    let (Some(db), Some(wallet)) = (state.0.db.as_ref(), house_wallet()) else {
+        return;
+    };
+    let name = house_username();
+    // Bypass the RESERVED list — that is the point of this function — but never
+    // the grammar. `persistence::set_username` validates nothing (the rules live
+    // in the HTTP layer), so an unchecked env var writes straight past every
+    // constraint the rest of the system assumes: `HOUSE_USERNAME="House Bot"` —
+    // the name this bot used to post under, and so the likeliest thing for
+    // someone to set — stored a handle with a space in it, which the profile
+    // then advertised while `/players/House%20Bot` 404'd and the canonical URL
+    // carried a raw space. Every stored username has to stay routable.
+    if !username::is_username_shape(&name) {
+        tracing::warn!(%name, "HOUSE_USERNAME is not a valid username; leaving the house bot unnamed");
+        return;
+    }
+    match db.set_username(&wallet, &name).await {
+        Ok(persistence::SetUsernameOutcome::Set { username }) => {
+            tracing::info!(%wallet, %username, "house bot username")
+        }
+        // Somebody else holds it, or the bot renamed too recently. Neither is
+        // worth failing a boot over; the lobby falls back to the short address.
+        Ok(other) => tracing::warn!(%wallet, %name, ?other, "house bot username not set"),
+        Err(e) => tracing::warn!(%wallet, "house bot username failed: {e:#}"),
+    }
 }
 
 /// Clean a client-supplied display label: strip control characters, collapse
@@ -346,6 +406,8 @@ async fn main() -> anyhow::Result<()> {
     // Recover tournaments interrupted by a restart: settle completed ones by
     // result, mark interrupted ones abandoned (entrants refund onchain).
     matchmaking::recover_tournaments(&state).await;
+
+    ensure_house_username(&state).await;
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
     // A malformed WEB_ORIGIN logs and falls back rather than panicking at boot.
@@ -598,6 +660,16 @@ struct ConfigInfo {
     /// Public — it's readable onchain — so the UI can show the admin control
     /// only to that wallet. `None` ⇒ admin actions disabled on this server.
     admin_wallet: Option<String>,
+    /// The house bot's wallet (lowercased), so the lobby can identify its
+    /// standing offers for the "play now" button. `None` ⇒ no shortcut.
+    ///
+    /// This used to be done by matching the offer's display name against the
+    /// literal `"House Bot"`, which stopped working the moment an offer's label
+    /// became a server-resolved username — `"House Bot"` has a space in it and
+    /// can never be one. Matching the address is strictly better anyway: a
+    /// display string was spoofable, and the old code could only mitigate that
+    /// by restricting the shortcut to free offers.
+    house_wallet: Option<String>,
 }
 
 /// Public snapshot of an in-progress game, for the spectate lobby.
@@ -609,9 +681,17 @@ pub struct LiveGame {
     /// signed in for the seat. `None` for anonymous engine-vs-engine games.
     pub white: Option<String>,
     pub black: Option<String>,
-    /// Self-declared display names + engines (informational, sanitized).
+    /// Each seat's RESOLVED username, or `None` when that wallet has not
+    /// claimed one (and for an anonymous seat). Deliberately not filled with a
+    /// shortened address: these have always been `None` whenever nothing was
+    /// declared, and the spectate lobby already falls back to `white`/`black`,
+    /// so substituting a short address here would change every live row for no
+    /// gain. A snapshot taken at game start — a rename mid-game shows the old
+    /// name until the game ends, which is fine at minutes-per-game and one
+    /// rename per week.
     pub white_name: Option<String>,
     pub black_name: Option<String>,
+    /// Self-declared engines (informational, sanitized, never verified).
     pub white_engine: Option<String>,
     pub black_engine: Option<String>,
     pub stake: Option<String>,
@@ -668,6 +748,7 @@ async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
         siwe_domain: auth::expected_domain(),
         maintenance: state.maintenance_on(),
         admin_wallet: state.0.admin_wallet.lock().clone(),
+        house_wallet: house_wallet(),
     })
 }
 
@@ -1126,15 +1207,49 @@ impl AppState {
             }
         }
 
-        // Resolve each seat's display identity: declared name, else shortened
-        // wallet, else "anonymous".
-        let seat_info = |m: &SeatMeta, wallet: Option<&String>| protocol::OpponentInfo {
-            name: m
-                .name
-                .clone()
-                .or_else(|| wallet.map(|w| short_addr(w)))
-                .unwrap_or_else(|| "anonymous".into()),
-            declared_engine: m.engine.clone(),
+        // Display identity is SERVER-OWNED. One batched read, here rather than
+        // in the closure below because this is the last await point before it —
+        // and `start_game` is the single chokepoint every mode funnels through,
+        // already awaiting Postgres several times, so this costs one more query
+        // per game and needs no cache to invalidate on a rename.
+        let usernames = match &self.0.db {
+            Some(db) => {
+                let want: Vec<String> = wallets.iter().flatten().cloned().collect();
+                db.usernames_for(&want).await.unwrap_or_default()
+            }
+            None => Default::default(),
+        };
+
+        // Resolve each seat's display identity.
+        //
+        // Precedence is username -> shortened wallet, and only a seat with NO
+        // wallet ever falls through to a client-supplied label (decorated, so it
+        // cannot read as a handle) and then to "anonymous".
+        //
+        // **A seat with a wallet never reads `m.name`, and that is the whole
+        // enforcement.** If a signed-in player without a username could have
+        // their declared string rendered, they could declare somebody else's
+        // username and the board would print it. Falling back to the short
+        // address instead is strictly less pretty and strictly not forgeable.
+        //
+        // No database (dev, tests) means no usernames and every seat falls
+        // straight through to its short address — what this did before, minus
+        // the declared names. There is nothing to fail closed against: a display
+        // label is not a money path.
+        let seat_info = |m: &SeatMeta, wallet: Option<&String>| {
+            let username = wallet.and_then(|w| usernames.get(&w.to_lowercase()).cloned());
+            protocol::OpponentInfo {
+                name: match wallet {
+                    Some(w) => username.clone().unwrap_or_else(|| short_addr(w)),
+                    None => m
+                        .name
+                        .as_deref()
+                        .map(username::guest_label)
+                        .unwrap_or_else(|| "anonymous".into()),
+                },
+                username,
+                declared_engine: m.engine.clone(),
+            }
         };
         let players = [
             seat_info(&meta[0], wallets[0].as_ref()),
@@ -1159,8 +1274,8 @@ impl AppState {
                 mode: mode.to_string(),
                 white: wallets[0].clone(),
                 black: wallets[1].clone(),
-                white_name: meta[0].name.clone(),
-                black_name: meta[1].name.clone(),
+                white_name: players[0].username.clone(),
+                black_name: players[1].username.clone(),
                 white_engine: meta[0].engine.clone(),
                 black_engine: meta[1].engine.clone(),
                 stake: wager.map(|w| w.stake.to_string()),
@@ -1537,6 +1652,100 @@ mod tests {
             !row.rated,
             "and it's a free game, so it's on the casual ladder"
         );
+    }
+
+    /// The impersonation guard, and the most important test in the username
+    /// change.
+    ///
+    /// A seat that has a wallet must render that wallet's username — or, failing
+    /// that, its short address — and must NEVER render a string the client
+    /// supplied. Otherwise a signed-in player with no username of their own
+    /// could declare somebody else's and the board would print it.
+    /// Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_seat_shows_its_wallets_username_not_the_string_the_client_sent() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
+        db.migrate().await.expect("migrate");
+        let state = test_state_with_db(db.clone(), Arc::new(ledger::LogSettlement));
+
+        // A unique handle per run, so this doesn't collide with a rerun.
+        let tag = Uuid::new_v4().simple().to_string();
+        let handle = format!("alice{}", &tag[..8]);
+        // 0x + 40 hex: a real address shape, since that is what the fallback
+        // shortens. `tag` is a 32-char simple UUID, so pad to length.
+        let named = format!("0xaa{tag}aaaaaa");
+        let nameless = format!("0xbb{tag}bbbbbb");
+        db.set_username(&named, &handle).await.expect("claim");
+
+        let resp = state
+            .start_game(
+                TC,
+                "park",
+                None,
+                Ladder::Casual,
+                [
+                    SeatMeta {
+                        wallet: Some(named.clone()),
+                        // Ignored: this seat has a wallet.
+                        name: Some("someone else".into()),
+                        ..Default::default()
+                    },
+                    SeatMeta {
+                        wallet: Some(nameless.clone()),
+                        // The attack: claim the handle the other seat owns.
+                        name: Some(handle.clone()),
+                        ..Default::default()
+                    },
+                ],
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("game starts");
+
+        // The wallet that owns the handle gets it, verified.
+        assert_eq!(resp.players[0].name, handle);
+        assert_eq!(resp.players[0].username.as_deref(), Some(&*handle));
+        // The one that doesn't falls back to its address — the declared string
+        // appears nowhere, and nothing is presented as a verified handle.
+        assert_eq!(resp.players[1].name, short_addr(&nameless));
+        assert_eq!(resp.players[1].username, None);
+
+        // And the live-games row carries usernames only, never a substitute.
+        let live = state.0.live_games.lock();
+        let g = live.get(&resp.game_id).expect("game is live");
+        assert_eq!(g.white_name.as_deref(), Some(&*handle));
+        assert_eq!(g.black_name, None);
+    }
+
+    /// The other half: a seat with NO wallet may carry a chosen label, but it is
+    /// decorated so it can never be read as a claimed handle.
+    #[tokio::test]
+    async fn an_anonymous_seats_declared_label_is_marked_as_one() {
+        let state = test_state(false, None);
+        let resp = state
+            .start_game(
+                TC,
+                "park",
+                None,
+                Ladder::Casual,
+                [
+                    SeatMeta {
+                        name: Some("alice".into()),
+                        ..Default::default()
+                    },
+                    SeatMeta::default(),
+                ],
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("game starts");
+        assert_eq!(resp.players[0].name, "~alice");
+        assert_eq!(resp.players[0].username, None);
+        assert_eq!(resp.players[1].name, "anonymous");
     }
 
     /// A staked game is ranked whatever the caller asked for. The `Ladder`

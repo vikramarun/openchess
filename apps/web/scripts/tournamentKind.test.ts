@@ -8,7 +8,13 @@
 // free event has a pool and needs all three. It is WRONG for anything showing
 // money, where it renders "0 USDC entry" and tags an unranked event Ranked.
 // That distinction is the whole reason `kindOf` exists.
-import { hasPrizePool, isRanked, kindOf, type Tournament } from "../lib/tournaments";
+import {
+  entrantLabel,
+  hasPrizePool,
+  isRanked,
+  kindOf,
+  type Tournament,
+} from "../lib/tournaments";
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -49,6 +55,34 @@ check("a buy-in event has some", hasPrizePool(t("1000000")), true);
 // A malformed figure must not throw inside a render.
 check("garbage degrades to casual rather than throwing", kindOf(t("not-a-number")), "casual");
 check("an empty string degrades too", kindOf(t("")), "casual");
+
+// --- entrant labels ---------------------------------------------------------
+//
+// The server resolves usernames into `labels` and says a client should render
+// `labels[id] ?? id`. The bare fallback is wrong for the tournament tables
+// though: an entrant id IS a 42-char wallet for a buy-in event, so `?? id`
+// prints a raw address where the lobby and board print a handle.
+
+const WALLET = "0xAAaa000000000000000000000000000000000001";
+const lab = (labels: Record<string, string>) => ({ labels }) as Pick<Tournament, "labels">;
+
+check("a claimed handle wins", entrantLabel(lab({ [WALLET]: "magnus" }), WALLET), "magnus");
+check(
+  "labels are matched case-insensitively too — the server lowercases wallets",
+  entrantLabel(lab({ [WALLET.toLowerCase()]: "magnus" }), WALLET),
+  "magnus",
+);
+check(
+  "a wallet with no handle shortens rather than printing 42 characters",
+  entrantLabel(lab({}), WALLET),
+  "0xAAaa…0001",
+);
+check(
+  "a casual nickname is its own label",
+  entrantLabel(lab({}), "alice"),
+  "alice",
+);
+check("no labels at all still renders something", entrantLabel(lab({}), "bob"), "bob");
 
 console.log(failed === 0 ? "\nall tournament-kind checks passed" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

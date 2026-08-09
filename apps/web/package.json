@@ -34,6 +34,7 @@
     "test:avatar": "tsx scripts/avatar.test.ts",
     "test:layout": "tsx scripts/layout.test.ts",
     "test:profile": "tsx scripts/profileFilter.test.ts",
+    "test:username": "tsx scripts/username.test.ts",
     "test:csp": "tsx scripts/csp.test.ts"
   },
   "dependencies": {

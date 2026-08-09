@@ -8,7 +8,7 @@ import { useAuthToken } from "@/lib/useAuthToken";
 /** Add / replace / remove the signed-in wallet's profile photo.
  *
  *  Rendered by `ProfileStats` only on your own profile (`editable`), never on
- *  the public `/player/[address]` page — the server would reject a write for
+ *  the public `/player/[ident]` page — the server would reject a write for
  *  someone else's wallet anyway, since it takes the wallet from the session. */
 export function AvatarEditor({
   hasPhoto,

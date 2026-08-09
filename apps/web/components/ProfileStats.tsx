@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { AvatarEditor } from "@/components/AvatarEditor";
-import { isAddress, shortAddress } from "@/lib/address";
+import { UsernameEditor } from "@/components/UsernameEditor";
+import { isAddress, isUsernameShape, shortAddress } from "@/lib/address";
+import { playerLabel } from "@/lib/playerLabel";
 import { avatarUrl } from "@/lib/avatar";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, fmtUsdcSigned } from "@/lib/escrow";
@@ -22,7 +24,11 @@ import {
 } from "@/lib/profileFilter";
 
 
-function outcome(g: GameItem, me: string): "win" | "loss" | "draw" | "-" {
+/** `me` is nullable because with a username in the URL the wallet isn't known
+ *  until the profile resolves — and no wallet means no side to score from. In
+ *  practice the history table only renders once it is known. */
+function outcome(g: GameItem, me: string | null): "win" | "loss" | "draw" | "-" {
+  if (!me) return "-";
   if (g.result === "draw") return "draw";
   const iWhite = g.white?.toLowerCase() === me;
   const iBlack = g.black?.toLowerCase() === me;
@@ -31,8 +37,15 @@ function outcome(g: GameItem, me: string): "win" | "loss" | "draw" | "-" {
   return "-";
 }
 
-/** Public rating + record + game history for a wallet. Rendered by the public
- *  /player/[address] page and by the signed-in /profile hub.
+/** Public rating + record + game history for a player. Rendered by the public
+ *  /player/[ident] page and by the signed-in /profile hub.
+ *
+ *  `ident` is either a wallet address or a username — the server resolves both
+ *  and answers with the wallet. That is the reason for the shape of this
+ *  component: with a username in the URL **the wallet is not known until the
+ *  profile fetch resolves**, so `me` is derived from the payload and every
+ *  wallet-keyed thing below it (the games request, its cache key, `outcome`, the
+ *  avatar URL) has to wait for it rather than assume it.
  *
  *  Everything below the header is scoped by an All / Casual / Ranked switcher,
  *  because the two ladders are genuinely separate: a free game moves the casual
@@ -41,11 +54,10 @@ function outcome(g: GameItem, me: string): "win" | "loss" | "draw" | "-" {
  *  owns the partitioning — including what to do when the server predates the
  *  split and sends neither bucket.
  *
- *  `editable` adds the profile-photo controls, and is only ever set on your own
- *  profile — the write itself is bound to the SIWE session server-side, so this
- *  decides what is offered, not what is allowed. */
-export function ProfileStats({ address, editable }: { address: string; editable?: boolean }) {
-  const me = address.toLowerCase();
+ *  `editable` adds the username + profile-photo controls, and is only ever set
+ *  on your own profile — both writes are bound to the SIWE session server-side,
+ *  so this decides what is offered, not what is allowed. */
+export function ProfileStats({ ident, editable }: { ident: string; editable?: boolean }) {
   const [p, setP] = useState<Profile | null>(null);
   const [bucket, setBucket] = useState<Bucket>("all");
   // Fetched pages, keyed by WALLET AND ladder — each ladder is its own server
@@ -57,25 +69,61 @@ export function ProfileStats({ address, editable }: { address: string; editable?
   // then skip the refetch and leave the previous wallet's games on screen,
   // under a header that had already updated to the new one.
   const [games, setGames] = useState<Record<string, GameItem[]>>({});
-  const page = pageKey(me, bucket);
   const [err, setErr] = useState<string | null>(null);
-  // Bumped after a photo change to refetch the profile: the new
-  // `avatar_updated_at` is what busts the cached image URL.
+  // Bumped after a photo or username change to refetch the profile: the new
+  // `avatar_updated_at` is what busts the cached image URL, and the new
+  // username is what the head renders. One counter, both editors.
   const [reload, setReload] = useState(0);
-  const onPhotoChanged = useCallback(() => setReload((n) => n + 1), []);
+  const onProfileChanged = useCallback(() => setReload((n) => n + 1), []);
+
+  // The wallet. Known up front only when the URL already carried one; otherwise
+  // it arrives with the payload. `null` means "not yet", which is why the games
+  // effect below waits on it.
+  const me = p?.address?.toLowerCase() ?? (isAddress(ident.toLowerCase()) ? ident.toLowerCase() : null);
+  // Keyed by WALLET and ladder, never by `ident`. Each ladder is its own server
+  // page (the 50-row limit applies after the filter) so they can't be derived
+  // from one another; and the wallet has to be in the key because it can change
+  // under a mounted component — `/profile` passes it from the connected
+  // account, so switching wallets changes it with no navigation at all. Keyed on
+  // the ladder alone, the "already fetched" check below would skip the refetch
+  // and leave the previous wallet's games on screen, under a header that had
+  // already updated. Keying on `ident` instead would fetch the same rows twice
+  // for `/player/alice` and `/player/0xabc…`.
+  const page = me ? pageKey(me, bucket) : "";
 
   useEffect(() => {
     let live = true;
-    // Validate the wallet before interpolating it into the API path — a route
-    // param is user-controlled, so reject anything that isn't a hex address.
-    if (!isAddress(me)) {
-      setErr("That isn’t a valid wallet address.");
+    // Drop the previous player's data first. Navigating /player/alice ->
+    // /player/bob keeps this component mounted and only changes `ident`, so
+    // without this the head renders alice's handle, address and stats under
+    // bob's URL until his fetch lands — and a stale `err` ("No player found."
+    // from a bad lookup) renders as a panel ABOVE a profile that loaded fine,
+    // since it is a sibling of the profile rather than a short-circuit.
+    setP(null);
+    setErr(null);
+    // Validate before interpolating into the API path — a route param is
+    // user-controlled, and this route now accepts two shapes.
+    const lower = ident.toLowerCase();
+    if (!isAddress(lower) && !isUsernameShape(ident)) {
+      setErr("That isn’t a valid wallet address or username.");
       return;
     }
+    // Lowercase an ADDRESS (its canonical form, and what every other caller
+    // sends — `/profile` hands us wagmi's checksummed one, which would otherwise
+    // fetch the same profile under a second URL). A username keeps its case: the
+    // server folds it anyway, and the canonical spelling comes back on the
+    // payload.
+    const seg = isAddress(lower) ? lower : ident;
     (async () => {
       try {
-        const seg = encodeURIComponent(me);
-        const r = await fetch(`${SERVER_HTTP}/players/${seg}`);
+        const r = await fetch(`${SERVER_HTTP}/players/${encodeURIComponent(seg)}`);
+        // A username nobody holds is a 404, distinct from a server that isn't
+        // answering — saying "is the server running?" for a typo'd name sends
+        // people to debug the wrong thing.
+        if (r.status === 404) {
+          if (live) setErr("No player found.");
+          return;
+        }
         // A 500 carries a JSON error body; parsing it as a profile renders a
         // header full of blanks with no explanation.
         if (!r.ok) throw new Error(`profile ${r.status}`);
@@ -88,13 +136,15 @@ export function ProfileStats({ address, editable }: { address: string; editable?
     return () => {
       live = false;
     };
-    // `reload` refetches this half only: a photo change moves
-    // `avatar_updated_at`, and nothing else here depends on it.
-  }, [me, reload]);
+    // `reload` refetches this half only: a photo or username change moves
+    // fields on this payload, and nothing else here depends on them.
+  }, [ident, reload]);
 
   useEffect(() => {
     let live = true;
-    if (!isAddress(me)) return;
+    // Waits for the wallet: with a username in the URL it isn't known until the
+    // profile above resolves, and the games route is keyed on the wallet.
+    if (!me) return;
     if (games[page]) return; // already fetched this wallet's ladder
     (async () => {
       try {
@@ -116,7 +166,7 @@ export function ProfileStats({ address, editable }: { address: string; editable?
   const stats = pickStats(p, bucket);
   const rows = games[page];
   const netClass = Number(stats.net) > 0 ? "pos" : Number(stats.net) < 0 ? "neg" : "";
-  const photo = avatarUrl(me, p?.avatar_updated_at);
+  const photo = me ? avatarUrl(me, p?.avatar_updated_at) : null;
   // Free games stake nothing, so a Net USDC tile on the casual view is a
   // permanent 0.00 that reads like a bug. Drop it (and the Stake column) there.
   const showNet = bucket !== "casual";
@@ -135,12 +185,24 @@ export function ProfileStats({ address, editable }: { address: string; editable?
           {photo ? <img src={photo} alt="" /> : "♟"}
         </div>
         <div>
-          <div className="who">{shortAddress(me)}</div>
+          {/* The handle is the headline, with the wallet demoted beneath it.
+              `playerLabel` rather than `p.username ?? shortAddress(me)` because
+              an empty string would render a BLANK headline — see its doc. */}
+          <div className={`who${p?.username ? " who-name" : ""}`}>
+            {playerLabel({ username: p?.username, address: me })}
+          </div>
           <div className="muted" style={{ fontSize: 13, wordBreak: "break-all" }}>
             {me}
           </div>
           {editable && (
-            <AvatarEditor hasPhoto={Boolean(p?.avatar_updated_at)} onChanged={onPhotoChanged} />
+            <>
+              <UsernameEditor
+                username={p?.username ?? null}
+                nextChangeAt={p?.username_next_change_at ?? null}
+                onChanged={onProfileChanged}
+              />
+              <AvatarEditor hasPhoto={Boolean(p?.avatar_updated_at)} onChanged={onProfileChanged} />
+            </>
           )}
         </div>
         {/* Both ladders, always. They're two facts about this wallet, not two

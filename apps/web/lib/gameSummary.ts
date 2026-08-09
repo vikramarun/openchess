@@ -5,26 +5,31 @@
 // generateMetadata, the card in a separate image request — so the labelling
 // lives here rather than in either one.
 
-import { shortAddress } from "./address";
 import { fmtUsdc } from "./escrow";
 import type { GameDetail } from "./gameApi";
+import { playerLabel } from "./playerLabel";
 
 /** What to call a seat: the engine it declared, else its wallet, else the
  *  color. Engine names are self-declared and unverified (see GameDetail), so
  *  they are shown as given but truncated — a seat could otherwise put a
- *  sentence in the field and blow out the card. */
+ *  sentence in the field and blow out the card.
+ *
+ *  ENGINE-first, unlike every other surface, and that stays a deliberate product
+ *  decision about what a shared link says rather than an oversight: a game card
+ *  is about the matchup, not the accounts. `pnpm test:gamemeta` pins the exact
+ *  strings, so this shares `playerLabel`'s implementation without adopting its
+ *  precedence. Preferring a username here needs `white_username`/`black_username`
+ *  on `GameDetail` first. */
 export function seatLabel(
   engine: string | null,
   address: string | null,
   color: "White" | "Black",
 ): string {
-  // Collapse all whitespace before measuring. The OG card renders the title
-  // with `white-space: pre-wrap` so the two seats stack, which means a name
-  // made of newlines pushes the opponent, the subtitle and the footer clean off
-  // the canvas — and it fits well inside the length cap while doing it.
-  const named = engine?.replace(/\s+/g, " ").trim();
-  if (named) return named.length > 28 ? `${named.slice(0, 27)}…` : named;
-  return shortAddress(address, color);
+  // The whitespace collapse is load-bearing, not cosmetic: the OG card renders
+  // the title with `white-space: pre-wrap` so the two seats stack, which means a
+  // name made of newlines pushes the opponent, the subtitle and the footer clean
+  // off the canvas — while fitting well inside the length cap on its way.
+  return playerLabel({ name: engine, address, fallback: color, maxLen: 28 });
 }
 
 /** "1-0" / "0-1" / "½-½", or null while the game is still running. */

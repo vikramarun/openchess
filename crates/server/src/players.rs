@@ -5,11 +5,12 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::username;
 use crate::AppState;
 
 /// Hard ceiling on a stored profile photo. The web client downsizes to a 256px
@@ -26,20 +27,32 @@ const AVATAR_MAX_PX: u32 = 1024;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/leaderboard", get(leaderboard))
-        .route("/players/{address}", get(profile))
+        // Prefix search for the player typeahead. A STATIC sibling of
+        // `/players/{ident}`, which the router prefers — which is exactly why
+        // `search` is on `username::RESERVED`: a wallet holding that name would
+        // own a URL that resolves to this handler instead of to its profile.
+        .route("/players/search", get(search))
+        // One route, two identifiers: a 0x address or a username. See
+        // `resolve_ident`.
+        .route("/players/{ident}", get(profile))
         // Profile photos. Public read, SIWE-authed write — and both live in
         // this router so they inherit its per-IP read throttle (a route added
         // anywhere else is unthrottled). The body limit is belt-and-braces
         // ahead of the handler's own size check, so an oversized upload is
         // rejected before it is buffered.
-        .route("/players/{address}/avatar", get(avatar))
+        .route("/players/{ident}/avatar", get(avatar))
         .route(
             "/profile/avatar",
             post(upload_avatar)
                 .delete(delete_avatar)
                 .layer(DefaultBodyLimit::max(AVATAR_MAX_BYTES)),
         )
-        .route("/players/{address}/games", get(games))
+        // Claim or change the signed-in wallet's username. Sits beside the photo
+        // write for the same reason: this router carries the throttle. PUT is
+        // the honest verb (idempotent, whole-value replacement); POST is
+        // accepted so a client that cannot send PUT through a proxy still works.
+        .route("/profile/username", put(set_username).post(set_username))
+        .route("/players/{ident}/games", get(games))
         // Single-game detail (replay + settlement status). Lives here so it
         // inherits the read rate-limit layer. Axum routes the static
         // `/games/live` (in main.rs) ahead of this dynamic `{id}`.
@@ -208,6 +221,39 @@ struct LeaderboardEntry {
     address: String,
     rating: i64,
     games: i64,
+    /// The player's handle, if they have claimed one. The client prefers it over
+    /// the address for both the label and the profile link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+}
+
+/// Resolve a profile identifier to the wallet it names.
+///
+/// Address first, and without touching the database: an address is a valid
+/// profile identifier whether or not that wallet has ever been seen, which is
+/// what keeps a fresh address rendering a default 1500 card. A username is only
+/// meaningful if somebody holds it, so an unknown one is a 404.
+///
+/// One behaviour change rides along: `GET /players/<garbage>` used to return 200
+/// with a default card, because nothing checked that the path was an address. It
+/// now 404s. The web client always sends an address or a validated username, so
+/// only bookmarks and crawlers see the difference.
+async fn resolve_ident(db: &persistence::Db, ident: &str) -> Result<String, StatusCode> {
+    if username::is_address_shape(ident) {
+        return Ok(ident.to_lowercase());
+    }
+    // The SHAPE gate, not the write gate: a name the server has already issued
+    // has to keep resolving even when the word is one nobody new may claim. The
+    // house bot is exactly that case — it holds `HouseBot` because the word is
+    // reserved to everyone else, and routing through `validate_username` 404'd
+    // its own profile while the address still served it.
+    if !username::is_username_shape(ident) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    db.wallet_for_username(ident)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 /// Top-rated players for the lobby board. Rank is 1-based (server-assigned so
@@ -228,6 +274,7 @@ async fn leaderboard(
             address: r.wallet.to_lowercase(),
             rating: r.rating.round() as i64,
             games: r.games,
+            username: r.username,
         })
         .collect();
     Ok(Json(entries))
@@ -281,6 +328,16 @@ struct Profile {
     /// has none. Doubles as the presence flag and as the cache-busting version
     /// the client appends to the image URL — the bytes are never inlined here.
     avatar_updated_at: Option<String>,
+    /// This wallet's handle, in the case it was claimed with. Absent for the
+    /// large majority of wallets, which never set one — so every client has to
+    /// keep its address fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    /// The earliest this wallet may change its username again (RFC 3339), or
+    /// null when it can change now. Public, and harmless: it says when a name
+    /// last moved, nothing more. Carried here so the owner's own profile page
+    /// can explain a disabled rename without a second request.
+    username_next_change_at: Option<String>,
     /// The same record split by ladder. Their sum is the flat fields above.
     casual: StatBucket,
     ranked: StatBucket,
@@ -288,9 +345,14 @@ struct Profile {
 
 async fn profile(
     State(state): State<AppState>,
-    Path(address): Path<String>,
+    Path(ident): Path<String>,
 ) -> Result<Json<Profile>, StatusCode> {
     let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // The resolved WALLET, never the identifier that was asked for: a client
+    // that requested `/players/alice` must get alice's address back, or every
+    // link built from this payload (the avatar URL, the games list, a block
+    // explorer) points at a string that isn't an address.
+    let address = resolve_ident(db, &ident).await?;
     let s = db
         .player_stats(&address)
         .await
@@ -310,9 +372,151 @@ async fn profile(
         draws: all.draws,
         net: all.net,
         avatar_updated_at: card.avatar_updated_at.map(|t| t.to_rfc3339()),
+        username_next_change_at: card.username_next_change_at().map(|t| t.to_rfc3339()),
+        username: card.username,
         casual: s.casual.into(),
         ranked: s.ranked.into(),
     }))
+}
+
+#[derive(Deserialize)]
+struct UsernameReq {
+    username: String,
+}
+
+/// One prefix-search hit, enough to render a result row without a second fetch.
+#[derive(Serialize)]
+struct PlayerHit {
+    username: String,
+    address: String,
+    rating: i64,
+    avatar_updated_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    /// `default` so a missing `q` is an empty search rather than a 400. Without
+    /// it axum's `Query` rejects the request before the handler runs, and the
+    /// promise below — that this endpoint answers `[]` instead of erroring —
+    /// would be false for the one malformed case a client can send by accident.
+    #[serde(default)]
+    q: String,
+    limit: Option<i64>,
+}
+
+/// Prefix search over usernames, for the player typeahead.
+///
+/// Capped two ways: `limit` is clamped regardless of what was asked, and `q`
+/// must itself be a well-formed username prefix. Validating the QUERY, not just
+/// the stored names, is what keeps this from becoming a pattern-matching
+/// endpoint — without it, `q=%` is a table scan that returns every user on the
+/// server.
+///
+/// Returns `[]` rather than an error for a short, malformed or unanswerable
+/// query: a typeahead that 400s mid-keystroke is worse than one that shows
+/// nothing. Throttled by this router's per-IP `reads` layer.
+async fn search(
+    State(state): State<AppState>,
+    Query(q): Query<SearchQuery>,
+) -> Json<Vec<PlayerHit>> {
+    let prefix = q.q.trim();
+    let well_formed = (2..=username::USERNAME_MAX).contains(&prefix.chars().count())
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let Some(db) = state.0.db.as_ref().filter(|_| well_formed) else {
+        return Json(Vec::new());
+    };
+    let hits = db
+        .search_usernames(
+            &username::like_prefix(prefix),
+            q.limit.unwrap_or(10).clamp(1, 20),
+        )
+        .await
+        .unwrap_or_default();
+    Json(
+        hits.into_iter()
+            .map(|h| PlayerHit {
+                username: h.username,
+                address: h.wallet,
+                rating: h.rating.round() as i64,
+                avatar_updated_at: h.avatar_updated_at.map(|t| t.to_rfc3339()),
+            })
+            .collect(),
+    )
+}
+
+/// Claim or change the signed-in wallet's username.
+///
+/// The wallet comes from the SIWE session, never the body — the same rule the
+/// money paths and the photo route follow. There is no address field to forge.
+///
+/// Returns a body on the failures a client has to tell apart, because status
+/// alone cannot: the cooldown is a **403** and not a 429 precisely so it can
+/// never be confused with either of this router's two rate limits (the per-IP
+/// layer's plain-text 429, and the per-wallet bucket's). Telling a
+/// merely-throttled user "you can change again in 7 days" would be wrong and
+/// would sound unrecoverable.
+///
+/// Success is 200 rather than 204 because the response is authoritative about
+/// the stored display case — a client that sent `ALICE` while holding `Alice`
+/// needs to be told what was actually kept.
+async fn set_username(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UsernameReq>,
+) -> Response {
+    let wallet = match state.authed_wallet_strict(&headers) {
+        Ok(Some(w)) => w,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(code) => return code.into_response(),
+    };
+    // Validate BEFORE charging the bucket. What this meters is write attempts
+    // against a unique index, and a name the grammar already rejects never
+    // reaches one — so a typo shouldn't spend a token from a budget that refills
+    // once every twenty seconds. Rejected requests are still covered by this
+    // router's per-IP layer, which is the one sized for junk traffic.
+    let name = match username::validate_username(&req.username) {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid", "reason": e.code() })),
+            )
+                .into_response()
+        }
+    };
+    if state.0.limits.username.check(&wallet).is_some() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+    let Some(db) = state.0.db.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match db.set_username(&wallet, name).await {
+        Ok(persistence::SetUsernameOutcome::Set { username }) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "username": username })),
+        )
+            .into_response(),
+        Ok(persistence::SetUsernameOutcome::Taken) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "taken" })),
+        )
+            .into_response(),
+        Ok(persistence::SetUsernameOutcome::Cooldown { next_allowed_at }) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "cooldown",
+                "next_change_at": next_allowed_at.to_rfc3339(),
+            })),
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// What a stored profile photo is allowed to be: its type, and how big it
@@ -424,9 +628,12 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// into interpreting these bytes as anything but the image format we verified.
 async fn avatar(
     State(state): State<AppState>,
-    Path(address): Path<String>,
+    Path(ident): Path<String>,
 ) -> Result<Response, StatusCode> {
     let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // Accepts a username too, so a username profile URL doesn't cost the client
+    // an extra round trip just to build the image `src`.
+    let address = resolve_ident(db, &ident).await?;
     let row = db
         .avatar(&address)
         .await
@@ -467,7 +674,7 @@ async fn upload_avatar(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    let wallet = authed_photo_owner(&state, &headers)?;
+    let wallet = authed_owner(&state, &headers, &state.0.limits.avatar)?;
     let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     // Belt-and-braces: `DefaultBodyLimit` already rejects an oversized body
     // before it is buffered, so this only fires if that layer is ever removed.
@@ -492,7 +699,7 @@ async fn delete_avatar(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    let wallet = authed_photo_owner(&state, &headers)?;
+    let wallet = authed_owner(&state, &headers, &state.0.limits.avatar)?;
     let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     db.clear_avatar(&wallet)
         .await
@@ -500,16 +707,23 @@ async fn delete_avatar(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The wallet whose photo this request may change, throttled per wallet.
+/// The wallet whose own profile this request may change, charged against
+/// `bucket`.
 ///
-/// Keyed on the wallet rather than the IP because that's what the write is
+/// Keyed on the wallet rather than the IP because that's what these writes are
 /// scoped to — one row — and because the per-IP layer on this router is sized
-/// for page reads, not for a stream of 256 KiB row rewrites.
-fn authed_photo_owner(state: &AppState, headers: &HeaderMap) -> Result<String, StatusCode> {
+/// for page reads, not for a stream of row rewrites. Each write takes its own
+/// bucket: settling on a profile photo must not eat the budget for picking a
+/// name.
+fn authed_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    bucket: &crate::ratelimit::TokenBucket,
+) -> Result<String, StatusCode> {
     let wallet = state
         .authed_wallet_strict(headers)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if state.0.limits.avatar.check(&wallet).is_some() {
+    if bucket.check(&wallet).is_some() {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     Ok(wallet)
@@ -663,10 +877,13 @@ struct GamesQuery {
 
 async fn games(
     State(state): State<AppState>,
-    Path(address): Path<String>,
+    Path(ident): Path<String>,
     Query(q): Query<GamesQuery>,
 ) -> Result<Json<Vec<GameItem>>, StatusCode> {
     let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // Accepts a username, like its sibling routes: `/players/alice/games` 404ing
+    // while `/players/alice` works is the kind of asymmetry nobody remembers.
+    let address = resolve_ident(db, &ident).await?;
     let rows = db
         // The limit applies AFTER the filter, which is why this isn't done in
         // the browser: 50 of one ladder, not one ladder's share of 50.

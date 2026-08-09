@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
-import { shortAddress } from "@/lib/address";
+import { playerLabel } from "@/lib/playerLabel";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { browserSeat, ensureRepertoireLoaded } from "@/lib/browserBot";
 import { prewarmPlayerEngine } from "@/lib/playerEngine";
@@ -77,9 +77,11 @@ type Pending = {
   incrementSecs: number;
 };
 
-/** One seat's display: name if declared, else shortened wallet, else fallback. */
+/** One seat's display. `name` is the server-resolved username for that wallet
+ *  (never a string the poster chose), so this is username → shortened wallet →
+ *  fallback. See `lib/playerLabel.ts`. */
 const seatLabel = (name: string | null, addr: string | null, fallback: string) =>
-  name ?? shortAddress(addr, fallback);
+  playerLabel({ name, address: addr, fallback });
 
 /** The casual-first play lobby: pick a time control to play instantly or open a
  *  challenge (your engine vs theirs), watch games in progress, or stake USDC.
@@ -201,7 +203,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
   // Whether the House Bot has a free seat standing at the picked clock — it
   // decides what the modal's instant-play button honestly promises.
   const houseSeat = pickTc
-    ? houseOfferGroup(groupOffers(offers), pickTc.initial, pickTc.inc)
+    ? houseOfferGroup(groupOffers(offers), pickTc.initial, pickTc.inc, config?.houseWallet)
     : null;
 
   // "Play the bot" means a real seat against the house, not the self-play
@@ -221,7 +223,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
         /* fall through to the demo */
       }
     }
-    const group = houseOfferGroup(groupOffers(pool), tc.initial, tc.inc);
+    const group = houseOfferGroup(groupOffers(pool), tc.initial, tc.inc, config?.houseWallet);
     if (group) return acceptOffer(group);
     router.push(`/play?tc=${encodeURIComponent(tc.label)}`);
   };
@@ -488,7 +490,12 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                 return (
                   <tr key={o.offer_id}>
                     <td>
-                      {seatLabel(o.poster_name, o.poster_addr, "casual")}
+                      {/* "Anonymous", not "casual": a casual offer may have no
+                          wallet at all, and now that the label is resolved from
+                          one, that row would otherwise read as the word
+                          "casual" — which looks like a bug rather than a
+                          person. */}
+                      {seatLabel(o.poster_name, o.poster_addr, "Anonymous")}
                       {o.poster_engine && (
                         <span className="muted" style={{ fontSize: 12 }}>
                           {" "}
@@ -578,9 +585,14 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                 <tr key={g.game_id}>
                   <td>
                     {(() => {
-                      const w = seatLabel(g.white_name, g.white, "");
-                      const b = seatLabel(g.black_name, g.black, "");
-                      const label = w && b ? `${w} vs ${b}` : "engine vs engine";
+                      // Each seat falls back on its own. Reading `w && b` threw
+                      // away the OTHER seat's real name whenever one was
+                      // anonymous, collapsing a half-known matchup to "engine vs
+                      // engine" — rare while names were declared, common now
+                      // that an unnamed seat is the default.
+                      const w = seatLabel(g.white_name, g.white, "Anonymous");
+                      const b = seatLabel(g.black_name, g.black, "Anonymous");
+                      const label = `${w} vs ${b}`;
                       const engines = [g.white_engine, g.black_engine].filter(Boolean).join(" vs ");
                       return (
                         <>

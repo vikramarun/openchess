@@ -1,4 +1,5 @@
 import { SERVER_HTTP } from "./config";
+import { isAddress, shortAddress } from "./address";
 import { DEFAULT_PAYOUT, type PayoutSpec } from "./payouts";
 import { KEYS } from "./storage";
 
@@ -57,6 +58,12 @@ export type Tournament = {
   /** The prize pool in USDC base units — entries plus sponsorship. `null` when
    *  there is no pool. A free event is `buy_in: "0"` with a pool here. */
   pool: string | null;
+  /** Entrant id → username, for entrants who have claimed one. Display only:
+   *  every id in `players`, `standings` and `games` stays the internal key, so
+   *  this is a lookup layered on top and nothing is keyed by it. Only the detail
+   *  and list routes fill it in, and an entrant who joined since the last poll
+   *  simply has no entry for one tick. */
+  labels: Record<string, string>;
   /** Who may join. The MODE is public (a joiner has to know to bring a code);
    *  the codes themselves are organizer-only and never appear here. */
   admission: Admission;
@@ -166,6 +173,7 @@ function normalize(id: string, view: Partial<Omit<Tournament, "id">>): Tournamen
     // has no intention of sending. Absent means "don't show one".
     prizes: Array.isArray(view.prizes) ? view.prizes : [],
     pool: view.pool ?? null,
+    labels: view.labels && typeof view.labels === "object" ? view.labels : {},
     // A server that predates admission control had no gates at all, so `open`
     // is what such a tournament actually is — not a guess.
     admission: view.admission === "invite" || view.admission === "approval" ? view.admission : "open",
@@ -242,6 +250,22 @@ export function rememberCasualIdentity(tid: string, player: string): void {
   } catch {
     /* private mode — identity just won't survive the reload */
   }
+}
+
+/** What to call an entrant.
+ *
+ *  An entrant id is either a wallet (buy-in) or a chosen nickname (casual), and
+ *  `labels` maps the ones whose seat has a claimed username. Falls back to a
+ *  shortened address for a wallet and to the nickname itself otherwise — never
+ *  to a raw 42-character id, which is what the standings printed before the
+ *  server started resolving handles.
+ *
+ *  Shared so the crosstable, the pairings and the organizer's request list all
+ *  say the same thing about the same person. */
+export function entrantLabel(t: Pick<Tournament, "labels">, id: string): string {
+  const named = t.labels[id] ?? t.labels[id.toLowerCase()];
+  if (named) return named;
+  return isAddress(id.toLowerCase()) ? shortAddress(id) : id;
 }
 
 /** Entrant ids are compared case-insensitively everywhere on the server. */

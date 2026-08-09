@@ -19,10 +19,13 @@ import {
 /** Shared small-button style used across this panel. */
 const SMALL_BTN = { fontSize: 13, padding: "4px 10px" } as const;
 
-/** Personalize the in-browser bot — a display name and an uploaded Polyglot
- *  opening book — with no download. Settings persist locally and apply to
- *  every browser-seat game. */
-export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string) => void }) {
+/** Personalize the in-browser bot — an opening repertoire, a thinking style and
+ *  an uploaded Polyglot book — with no download. Settings persist locally and
+ *  apply to every browser-seat game.
+ *
+ *  What a seat is CALLED is not here: that's your username, on the Profile tab,
+ *  and the server resolves it from the wallet in the seat. */
+export function BrowserBotPanel() {
   const [cfg, setCfg] = useState<BrowserBotConfig>(DEFAULT_CONFIG);
   const [book, setBook] = useState<BookInfo | null>(null);
   const [bookErr, setBookErr] = useState<string | null>(null);
@@ -38,7 +41,6 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
     const next = { ...cfg, ...patch };
     setCfg(next);
     saveBrowserBotConfig(next);
-    if (patch.name !== undefined) onNameChange?.(next.name);
     // Drop the warmed books so the next game plays the repertoire that's on
     // screen, not the one that was selected when the page loaded.
     if (patch.repertoire !== undefined) resetRepertoireCache();
@@ -62,21 +64,11 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
     <div className="panel" id="engine" style={{ marginBottom: 16 }}>
       <b style={{ color: "var(--text-strong)" }}>🤖 Your browser bot</b>
       <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
-        Full-strength Stockfish 18 in your browser, no download. Give it a name, an opening
-        repertoire and a thinking style, and they apply to every game your browser plays.
+        Full-strength Stockfish 18 in your browser, no download. Give it an opening repertoire
+        and a thinking style, and they apply to every game your browser plays.
       </div>
 
       <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
-        <label className="muted" style={{ fontSize: 13 }}>
-          Bot name (shown to opponents)
-          <input
-            placeholder="e.g. My Bot"
-            value={cfg.name}
-            maxLength={48}
-            onChange={(e) => update({ name: e.target.value })}
-          />
-        </label>
-
         {/* Openings are the one part of a bot's character that costs no
             strength — playing the Najdorf every game is theory, not a worse
             move. So it leads. */}

@@ -5,6 +5,7 @@ use anyhow::Result;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -85,7 +86,8 @@ pub struct PlayerStats {
     pub ranked: PlayerStatsRow,
 }
 
-/// The `users`-row half of a profile: both ladders and the photo version.
+/// The `users`-row half of a profile: both ladders, the photo version, and the
+/// handle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerCard {
     /// Ranked Elo — staked games and buy-in tournaments only.
@@ -93,6 +95,26 @@ pub struct PlayerCard {
     /// Casual Elo — everything else. A separate ladder, never mixed in.
     pub casual_rating: f32,
     pub avatar_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// This wallet's username, in the case it was claimed with. `None` for the
+    /// large majority of wallets, which never set one.
+    pub username: Option<String>,
+    /// When the username last changed. `None` means "never claimed".
+    pub username_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl PlayerCard {
+    /// The earliest this wallet may change its username again, or `None` if it
+    /// can change right now (never claimed, or the window has already passed).
+    ///
+    /// Derived here rather than in the HTTP layer so the deadline the client is
+    /// shown and the deadline `set_username`'s SQL enforces come from the same
+    /// constant. A client that renders a date the server would not honour is
+    /// worse than one that renders nothing.
+    pub fn username_next_change_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let next =
+            self.username_updated_at? + chrono::Duration::days(USERNAME_COOLDOWN_DAYS as i64);
+        (next > chrono::Utc::now()).then_some(next)
+    }
 }
 
 /// A stored profile photo. Only read on the image route — the profile JSON
@@ -108,7 +130,43 @@ pub struct LeaderboardRow {
     pub wallet: String,
     pub rating: f32,
     pub games: i64,
+    /// The player's handle, if they have claimed one. Free to carry — it's on
+    /// the `users` row this query already joins.
+    pub username: Option<String>,
 }
+
+/// One prefix-search hit: enough to render a result row without a second fetch.
+#[derive(Debug, sqlx::FromRow)]
+pub struct UsernameHit {
+    pub username: String,
+    pub wallet: String,
+    pub rating: f32,
+    pub avatar_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// What a rename attempt did.
+///
+/// `Taken` and `Cooldown` are the two ways it can legitimately fail, and they
+/// are different answers to the caller, so they are values rather than errors.
+/// An `Err` from `set_username` means the database itself broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetUsernameOutcome {
+    /// Stored, with the display case the caller asked for.
+    Set { username: String },
+    /// Another wallet holds it (case-insensitively).
+    Taken,
+    /// This wallet renamed too recently.
+    Cooldown {
+        next_allowed_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+/// How long a wallet must wait between renames.
+///
+/// One source of truth: bound into the SQL in `set_username` AND used by the
+/// HTTP layer to describe the wait, so the two can never disagree about when the
+/// next change is allowed.
+pub const USERNAME_COOLDOWN_DAYS: i32 = 7;
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct PlayerGameRow {
@@ -288,6 +346,18 @@ impl Db {
     }
 
     /// Create or fetch a user keyed by wallet address, returning its id.
+    ///
+    /// `wallet` is lowercased, and that is load-bearing rather than tidy. This
+    /// used to bind the address raw while `set_avatar` bound it lowercased, and
+    /// the only caller (`update_ratings`) passes `games.white_wallet` — which for
+    /// a wagered game is EIP-55 CHECKSUMMED (alloy's `Address` Display, via
+    /// `seat_wallets`). So a wallet that both played a staked game and set a
+    /// photo got two rows, one per casing. Every read folds through
+    /// `lower(wallet)` with `fetch_optional`, so it silently picked one; a
+    /// username would have been written to one row and read from the other.
+    /// Migration 0018 merged the existing twins and added
+    /// `users_wallet_lower_uidx`, which now makes a mixed-case insert fail loudly
+    /// instead of forking the row — this lowercase is what keeps it from firing.
     pub async fn upsert_user(&self, wallet: &str) -> Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(
             r#"INSERT INTO users (id, wallet) VALUES ($1, $2)
@@ -295,7 +365,7 @@ impl Db {
                RETURNING id"#,
         )
         .bind(Uuid::new_v4())
-        .bind(wallet)
+        .bind(wallet.to_lowercase())
         .fetch_one(&self.pool)
         .await?;
         Ok(id)
@@ -889,22 +959,189 @@ impl Db {
     /// is the most-hit public read on the server. Never selects the bytes.
     /// Defaults to 1500/1500 with no photo for a wallet never seen before.
     pub async fn player_card(&self, wallet: &str) -> Result<PlayerCard> {
-        let row: Option<(f32, f32, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        type CardRow = (
+            f32,
+            f32,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        );
+        let row: Option<CardRow> = sqlx::query_as(
             r#"SELECT rating, casual_rating,
                       CASE WHEN avatar_data IS NOT NULL AND avatar_mime IS NOT NULL
-                           THEN avatar_updated_at END
+                           THEN avatar_updated_at END,
+                      username, username_updated_at
                  FROM users
                 WHERE lower(wallet)=$1"#,
         )
         .bind(wallet.to_lowercase())
         .fetch_optional(&self.pool)
         .await?;
-        let (rating, casual_rating, avatar_updated_at) = row.unwrap_or((1500.0, 1500.0, None));
+        let (rating, casual_rating, avatar_updated_at, username, username_updated_at) =
+            row.unwrap_or((1500.0, 1500.0, None, None, None));
         Ok(PlayerCard {
             rating,
             casual_rating,
             avatar_updated_at,
+            username,
+            username_updated_at,
         })
+    }
+
+    /// Claim or change a wallet's username. Atomic, and deliberately not a
+    /// read-then-write.
+    ///
+    /// Two different races have to be closed, and they are closed by two
+    /// different mechanisms:
+    ///
+    ///   * **Collision** — two wallets racing for the same name — is decided by
+    ///     `users_username_lower_uidx`. Any check-then-insert is a TOCTOU, so the
+    ///     loser learns it lost from a `23505`, which is why that error is a
+    ///     RESULT here and not a failure.
+    ///   * **Cooldown** — one wallet racing itself (two tabs, a retry storm) — is
+    ///     decided by the `WHERE` on `ON CONFLICT DO UPDATE`. Postgres takes a
+    ///     row lock on the conflicting row and evaluates that predicate against
+    ///     the locked row, so two concurrent renames cannot both read a stale
+    ///     `username_updated_at` and both pass.
+    ///
+    /// A no-op rename does not burn the cooldown: when `lower(new) = lower(old)`
+    /// the predicate admits it unconditionally and the `CASE` leaves
+    /// `username_updated_at` alone. That covers both "resubmitted the same name"
+    /// and "fixed my own capitalisation" — the second updates the stored display
+    /// case for free, which a naive `WHERE username <> $3` would get wrong.
+    ///
+    /// `wallet` is lowercased in Rust (an address is hex, so that is locale-safe)
+    /// but `name` is NOT: it is compared with `lower()` on BOTH sides inside SQL,
+    /// so the fold is always the database's own. Lowercasing in Rust and
+    /// comparing against `lower(username)` would be a latent bug under a Turkish
+    /// locale, where `lower('I')` is U+0131 and never equals ASCII `i`.
+    pub async fn set_username(&self, wallet: &str, name: &str) -> Result<SetUsernameOutcome> {
+        let wallet = wallet.to_lowercase();
+        let res: std::result::Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
+            r#"INSERT INTO users (id, wallet, username, username_updated_at)
+               VALUES ($1, $2, $3, now())
+               ON CONFLICT (wallet) DO UPDATE
+                  SET username = EXCLUDED.username,
+                      username_updated_at = CASE
+                        WHEN lower(users.username) = lower(EXCLUDED.username)
+                          THEN users.username_updated_at
+                        ELSE now()
+                      END
+                WHERE users.username IS NULL
+                   OR users.username_updated_at IS NULL
+                   OR lower(users.username) = lower(EXCLUDED.username)
+                   OR users.username_updated_at <= now() - make_interval(days => $4)
+               RETURNING username"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(&wallet)
+        .bind(name)
+        .bind(USERNAME_COOLDOWN_DAYS)
+        .fetch_optional(&self.pool)
+        .await;
+
+        match res {
+            Ok(Some(stored)) => Ok(SetUsernameOutcome::Set { username: stored }),
+            // Zero rows can only mean the WHERE rejected it: the INSERT half
+            // always targets a row (it creates one for a wallet that has never
+            // played). Read the timestamp back rather than trusting the clock at
+            // check time, so the deadline reported is the row's own.
+            Ok(None) => {
+                let at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                    "SELECT username_updated_at FROM users WHERE lower(wallet)=$1",
+                )
+                .bind(&wallet)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
+                Ok(SetUsernameOutcome::Cooldown {
+                    next_allowed_at: at.unwrap_or_else(chrono::Utc::now)
+                        + chrono::Duration::days(USERNAME_COOLDOWN_DAYS as i64),
+                })
+            }
+            // Matched on the INDEX name, never on code 23505 alone: `wallet`
+            // conflicts are handled by ON CONFLICT above, so this is someone
+            // else's name — but a future constraint on `users` would otherwise
+            // silently start reporting itself as "name taken".
+            Err(sqlx::Error::Database(e))
+                if e.constraint() == Some("users_username_lower_uidx") =>
+            {
+                Ok(SetUsernameOutcome::Taken)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// A wallet's username, or `None`.
+    pub async fn username_for(&self, wallet: &str) -> Result<Option<String>> {
+        let name: Option<Option<String>> =
+            sqlx::query_scalar("SELECT username FROM users WHERE lower(wallet)=$1")
+                .bind(wallet.to_lowercase())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(name.flatten())
+    }
+
+    /// Usernames for several wallets in one round trip, keyed by LOWERCASED
+    /// wallet. This is what a game start uses: two seats, one query, on a path
+    /// that already awaits Postgres. Wallets with no name are simply absent.
+    pub async fn usernames_for(&self, wallets: &[String]) -> Result<HashMap<String, String>> {
+        if wallets.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let keys: Vec<String> = wallets.iter().map(|w| w.to_lowercase()).collect();
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT lower(wallet), username FROM users
+                WHERE lower(wallet) = ANY($1) AND username IS NOT NULL"#,
+        )
+        .bind(&keys)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// The wallet holding a username, lowercased, or `None`. An index lookup on
+    /// `users_username_lower_uidx`; backs `/players/{ident}`.
+    pub async fn wallet_for_username(&self, name: &str) -> Result<Option<String>> {
+        let wallet: Option<String> =
+            sqlx::query_scalar("SELECT lower(wallet) FROM users WHERE lower(username)=lower($1)")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(wallet)
+    }
+
+    /// Usernames starting with `prefix`, best (shortest, then alphabetical)
+    /// first.
+    ///
+    /// `prefix` MUST already have LIKE metacharacters escaped by the caller —
+    /// `_` is both a legal username character and LIKE's single-character
+    /// wildcard, so an unescaped `a_c` would match `abc`. The escape lives in the
+    /// caller (`username::like_prefix`) so it is unit-testable without a
+    /// database.
+    ///
+    /// Matching is case-insensitive, and `lower()` goes on BOTH sides — the same
+    /// rule `set_username` follows, and for the same reason. Folding only the
+    /// column made this silently case-SENSITIVE: a stored `Magnus` matched
+    /// `q=magnus` and missed `q=Magnus`, so anyone typing a name the way the UI
+    /// displays it got an empty typeahead. `lower()` is IMMUTABLE, so the pattern
+    /// still folds to a constant and `users_username_prefix_idx` is still used.
+    pub async fn search_usernames(&self, prefix: &str, limit: i64) -> Result<Vec<UsernameHit>> {
+        let rows = sqlx::query_as::<_, UsernameHit>(
+            r#"SELECT username, lower(wallet) AS wallet, rating,
+                      CASE WHEN avatar_data IS NOT NULL AND avatar_mime IS NOT NULL
+                           THEN avatar_updated_at END AS avatar_updated_at
+                 FROM users
+                WHERE username IS NOT NULL
+                  AND lower(username) LIKE lower($1) ESCAPE '\'
+                ORDER BY length(username), lower(username)
+                LIMIT $2"#,
+        )
+        .bind(format!("{prefix}%"))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Aggregate W/L/D + net winnings (USDC base units) for an address over
@@ -992,7 +1229,8 @@ impl Db {
         // keeps a hypothetical self-play game (white == black) counted once, and
         // the inner join makes the "at least one game" filter implicit.
         let rows = sqlx::query_as::<_, LeaderboardRow>(
-            r#"SELECT u.wallet AS wallet, u.rating AS rating, gc.games AS games
+            r#"SELECT u.wallet AS wallet, u.rating AS rating, gc.games AS games,
+                      u.username AS username
                FROM users u
                JOIN (
                  SELECT wallet, COUNT(DISTINCT game_id) AS games
@@ -1716,6 +1954,356 @@ mod tests {
         let only_casual = mine(Some(false)).await?;
         assert_eq!(only_casual.len(), 2);
         assert!(only_casual.iter().all(|g| !g.rated));
+        Ok(())
+    }
+
+    /// The regression guard for migration 0018.
+    ///
+    /// `upsert_user` used to bind the wallet raw while `set_avatar` lowercased
+    /// it, so a wallet that both played a staked game (checksummed address) and
+    /// set a photo got TWO rows. Reads folded through `lower(wallet)` with
+    /// `fetch_optional`, so it silently picked one — survivable for a rating,
+    /// fatal for a username, which would be written to one row and read from the
+    /// other. Without this test that bug reappears the first time someone edits
+    /// `upsert_user`.
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_wallet_has_exactly_one_row_whatever_case_it_arrives_in() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let checksummed = format!("0xAbC_{tag}");
+        let lowercased = checksummed.to_lowercase();
+
+        // All three writers, in the three casings the production paths use.
+        db.upsert_user(&checksummed).await?;
+        db.set_avatar(&lowercased, "image/png", b"\x89PNGx").await?;
+        let name = format!("u{}", &tag[..8]);
+        db.set_username(&checksummed, &name).await?;
+
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE lower(wallet)=$1")
+            .bind(&lowercased)
+            .fetch_one(&db.pool)
+            .await?;
+        assert_eq!(rows, 1, "one wallet, one row");
+
+        // And the name is findable from either casing, which is the thing the
+        // fork used to break.
+        assert_eq!(
+            db.username_for(&checksummed).await?.as_deref(),
+            Some(&*name)
+        );
+        assert_eq!(db.username_for(&lowercased).await?.as_deref(), Some(&*name));
+        assert_eq!(
+            db.wallet_for_username(&name).await?.as_deref(),
+            Some(&*lowercased)
+        );
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_username_is_stored_with_its_case_and_found_without_it() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let wallet = format!("0xA_{tag}");
+        let name = format!("Alice_{}", &tag[..8]);
+
+        assert_eq!(
+            db.set_username(&wallet, &name).await?,
+            SetUsernameOutcome::Set {
+                username: name.clone()
+            },
+            "stored in the case it was claimed with"
+        );
+        assert_eq!(db.username_for(&wallet).await?.as_deref(), Some(&*name));
+        // Found case-insensitively, from either direction.
+        assert_eq!(
+            db.wallet_for_username(&name.to_uppercase())
+                .await?
+                .as_deref(),
+            Some(&*wallet.to_lowercase())
+        );
+        assert_eq!(
+            db.player_card(&wallet).await?.username.as_deref(),
+            Some(&*name),
+            "and the profile card carries it"
+        );
+        Ok(())
+    }
+
+    /// What actually proves the unique index is doing the work, rather than a
+    /// lucky check-then-write: two wallets claiming the same name concurrently.
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn two_wallets_cannot_hold_the_same_name_in_any_case() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let a = format!("0xA_{tag}");
+        let b = format!("0xB_{tag}");
+        let name = format!("race_{}", &tag[..8]);
+        // Different casings of the same name: uniqueness is on lower(username).
+        let shouty = name.to_uppercase();
+        let (ra, rb) = tokio::join!(db.set_username(&a, &name), db.set_username(&b, &shouty));
+
+        let outcomes = [ra?, rb?];
+        let winners = outcomes
+            .iter()
+            .filter(|o| matches!(o, SetUsernameOutcome::Set { .. }))
+            .count();
+        let losers = outcomes
+            .iter()
+            .filter(|o| **o == SetUsernameOutcome::Taken)
+            .count();
+        assert_eq!(
+            (winners, losers),
+            (1, 1),
+            "exactly one claim wins: {outcomes:?}"
+        );
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_rename_inside_the_window_is_refused_and_the_old_name_stands() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let wallet = format!("0xA_{tag}");
+        let first = format!("first_{}", &tag[..8]);
+        let second = format!("second_{}", &tag[..8]);
+
+        db.set_username(&wallet, &first).await?;
+        assert!(
+            matches!(
+                db.set_username(&wallet, &second).await?,
+                SetUsernameOutcome::Cooldown { .. }
+            ),
+            "a second change inside 7 days is refused"
+        );
+        // And the refusal must not have half-applied.
+        assert_eq!(db.username_for(&wallet).await?.as_deref(), Some(&*first));
+        assert_eq!(db.wallet_for_username(&second).await?, None);
+        Ok(())
+    }
+
+    /// Claiming a name starts the clock — you cannot claim and immediately
+    /// change, which is what "once a week" has to mean to be worth anything.
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn the_first_claim_starts_the_cooldown() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let wallet = format!("0xA_{tag}");
+        db.set_username(&wallet, &format!("first_{}", &tag[..8]))
+            .await?;
+        assert!(matches!(
+            db.set_username(&wallet, &format!("second_{}", &tag[..8]))
+                .await?,
+            SetUsernameOutcome::Cooldown { .. }
+        ));
+        Ok(())
+    }
+
+    /// A no-op or case-only edit must not push `username_updated_at` forward.
+    /// Asserted on the timestamp itself rather than on a follow-up rename, since
+    /// that is the invariant — a naive `WHERE username <> $3` would fail it.
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn renaming_only_the_case_does_not_burn_the_cooldown() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let wallet = format!("0xA_{tag}");
+        let name = format!("alice_{}", &tag[..8]);
+        db.set_username(&wallet, &name).await?;
+
+        // Backdate past the window so the edits below are admitted at all, and
+        // so a stamp that moved would be unmistakable.
+        sqlx::query("UPDATE users SET username_updated_at = now() - interval '8 days' WHERE lower(wallet)=$1")
+            .bind(wallet.to_lowercase())
+            .execute(&db.pool)
+            .await?;
+        let before = db.player_card(&wallet).await?.username_updated_at;
+
+        // Fixing your own capitalisation updates the stored display case…
+        let shouty = name.to_uppercase();
+        assert_eq!(
+            db.set_username(&wallet, &shouty).await?,
+            SetUsernameOutcome::Set {
+                username: shouty.clone()
+            }
+        );
+        assert_eq!(db.username_for(&wallet).await?.as_deref(), Some(&*shouty));
+        // …and re-submitting the identical string is accepted too.
+        assert!(matches!(
+            db.set_username(&wallet, &shouty).await?,
+            SetUsernameOutcome::Set { .. }
+        ));
+        // …but neither counted as the one real change.
+        assert_eq!(
+            db.player_card(&wallet).await?.username_updated_at,
+            before,
+            "a case-only edit must not restart the week"
+        );
+
+        // So a genuinely different name is still allowed — and that one does
+        // spend it.
+        let other = format!("bob_{}", &tag[..8]);
+        assert!(matches!(
+            db.set_username(&wallet, &other).await?,
+            SetUsernameOutcome::Set { .. }
+        ));
+        assert!(
+            db.player_card(&wallet).await?.username_updated_at > before,
+            "a real rename restarts the week"
+        );
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_freed_name_is_immediately_claimable() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let a = format!("0xA_{tag}");
+        let b = format!("0xB_{tag}");
+        let name = format!("wanted_{}", &tag[..8]);
+
+        db.set_username(&a, &name).await?;
+        assert_eq!(
+            db.set_username(&b, &name).await?,
+            SetUsernameOutcome::Taken,
+            "held while A has it"
+        );
+
+        // Backdate A past the cooldown so it can rename away. There is no other
+        // way to reach this state in a test: the window is 7 days of wall clock.
+        sqlx::query("UPDATE users SET username_updated_at = now() - interval '8 days' WHERE lower(wallet)=$1")
+            .bind(a.to_lowercase())
+            .execute(&db.pool)
+            .await?;
+        let moved = format!("moved_{}", &tag[..8]);
+        assert!(matches!(
+            db.set_username(&a, &moved).await?,
+            SetUsernameOutcome::Set { .. }
+        ));
+
+        // Freed with no grace period — a deliberate product choice, recorded in
+        // 0018_usernames.sql.
+        assert_eq!(
+            db.set_username(&b, &name).await?,
+            SetUsernameOutcome::Set {
+                username: name.clone()
+            }
+        );
+        assert_eq!(
+            db.wallet_for_username(&name).await?.as_deref(),
+            Some(&*b.to_lowercase())
+        );
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn search_matches_a_prefix_and_treats_underscore_as_a_letter() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // A per-run prefix so concurrent runs and old rows can't bleed in.
+        let tag = Uuid::new_v4().simple().to_string();
+        let p = format!("s{}", &tag[..10]);
+        for (i, suffix) in ["ab", "a_b", "abcd", "zz"].iter().enumerate() {
+            db.set_username(&format!("0x{i}_{tag}"), &format!("{p}{suffix}"))
+                .await?;
+        }
+        let names = |hits: Vec<UsernameHit>| -> Vec<String> {
+            hits.into_iter().map(|h| h.username).collect()
+        };
+
+        // Shortest first, then alphabetical.
+        assert_eq!(
+            names(db.search_usernames(&format!("{p}a"), 10).await?),
+            vec![format!("{p}ab"), format!("{p}a_b"), format!("{p}abcd")],
+        );
+
+        // Case-insensitive on BOTH sides. Folding only the column made this
+        // silently case-sensitive: a stored `Magnus` matched `magnus` and missed
+        // `Magnus`, so typing a name the way the UI shows it found nothing. The
+        // seeds above are lowercase, which is exactly why the assertion above
+        // passed while the feature was broken — so query in every casing, and
+        // seed a mixed-case name to fold from the other direction too.
+        let mixed = format!("{p}MiXeD");
+        db.set_username(&format!("0xM_{tag}"), &mixed).await?;
+        for q in [
+            format!("{p}A"),
+            format!("{p}a").to_uppercase(),
+            format!("{p}a"),
+        ] {
+            assert_eq!(
+                names(db.search_usernames(&q, 10).await?).len(),
+                3,
+                "query {q:?} must find the same three"
+            );
+        }
+        for q in [format!("{p}mixed"), format!("{p}MIXED"), mixed.clone()] {
+            assert_eq!(
+                names(db.search_usernames(&q, 10).await?),
+                vec![mixed.clone()],
+                "query {q:?} must find the stored mixed-case name"
+            );
+        }
+        // `_` is a letter to this search, not LIKE's single-character wildcard.
+        // The caller escapes it (`username::like_prefix`); unescaped, this
+        // prefix would also match `{p}ab` and `{p}abcd`.
+        assert_eq!(
+            names(db.search_usernames(&format!("{p}a\\_"), 10).await?),
+            vec![format!("{p}a_b")],
+        );
+        assert_eq!(db.search_usernames(&p, 2).await?.len(), 2, "limit honoured");
         Ok(())
     }
 }

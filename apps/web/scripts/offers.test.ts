@@ -2,15 +2,11 @@
 // in a screenshot and expensive: merging two *anonymous* posters would send a
 // joiner to a stranger's board, and failing to merge the house bot's identical
 // seats brings back the duplicate-row noise the grouping exists to remove.
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { SESSION_EXPIRED } from "../lib/authedFetch";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "../lib/copy";
 import {
   acceptFromGroup,
   groupOffers,
-  HOUSE_BOT_NAME,
   houseOfferGroup,
   joinErrorMessage,
   seatColor,
@@ -155,34 +151,38 @@ const park = groupOffers([
   offer({ offer_id: "staked", stake: "1000000", initial_secs: 600 }),
   offer({ offer_id: "human", poster_name: "carl", poster_addr: "0xabc", initial_secs: 60 }),
 ]);
-check("finds the house seat at the clicked clock", houseOfferGroup(park, 180, 0)?.ids, [
+check("finds the house seat at the clicked clock", houseOfferGroup(park, 180, 0, HOUSE)?.ids, [
   "h1",
   "h2",
 ]);
-check("no house seat at that clock → null", houseOfferGroup(park, 60, 0), null);
+check("no house seat at that clock → null", houseOfferGroup(park, 60, 0, HOUSE), null);
 check(
   "a STAKED house offer never answers the free button",
-  houseOfferGroup(park, 600, 0),
+  houseOfferGroup(park, 600, 0, HOUSE),
   null,
 );
 check(
-  "an anonymous poster named like the house never qualifies",
-  houseOfferGroup(
-    groupOffers([offer({ offer_id: "x", poster_addr: null })]),
-    180,
-    0,
-  ),
+  "an anonymous poster never qualifies",
+  houseOfferGroup(groupOffers([offer({ offer_id: "x", poster_addr: null })]), 180, 0, HOUSE),
   null,
 );
-// The name is the contract with scripts/house-bot.sh. A rename there quietly
-// downgrades the button to the demo everywhere — this is what makes that loud.
+// The wallet, not a display name — an offer's label is a server-resolved
+// username now, and a spoofable string was never the right key for a button
+// that promises a specific opponent.
 check(
-  "HOUSE_BOT_NAME matches what house-bot.sh actually posts",
-  readFileSync(join(__dirname, "../../../scripts/house-bot.sh"), "utf8").includes(
-    `NAME="\${NAME:-${HOUSE_BOT_NAME}}"`,
-  ),
-  true,
+  "the house is matched case-insensitively",
+  houseOfferGroup(park, 180, 0, HOUSE.toLowerCase())?.ids,
+  ["h1", "h2"],
 );
+check(
+  "someone else's free offer at the same clock is NOT the house",
+  houseOfferGroup(park, 180, 0, "0x1111111111111111111111111111111111111111"),
+  null,
+);
+// No configured house wallet must degrade to the labelled demo, never to
+// "whoever happens to be standing an offer".
+check("no house wallet configured → null", houseOfferGroup(park, 180, 0, null), null);
+check("undefined house wallet → null", houseOfferGroup(park, 180, 0), null);
 
 // --- the join walk over a group's seats ---
 //

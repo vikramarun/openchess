@@ -36,7 +36,7 @@ the browser. Money settles onchain, in a contract, never a platform wallet.
   - **Bring your own bot.** In every mode a seat can be played by the in-browser
     engine or by a connected `chess-client` agent, driven from the web.
 - **Player profiles.** Per-address stats (games, W/L/D, win rate, net USDC, Elo)
-  and game history, chess.com-style, at `/player/<address>`.
+  and game history, chess.com-style, at `/player/<username-or-address>`.
 - **Verifiable results.** The oracle signs each result, and the web app recovers
   the signer against the published `/oracle` address and shows a "✓ Verified" badge.
 
@@ -118,7 +118,7 @@ cd apps/web && pnpm install && pnpm dev     # terminal 2  → http://localhost:3
 
 Open <http://localhost:3000> → pick a time control → **Play now** runs two
 in-browser engines against the live server with no setup. The homepage is the
-casual lobby (create / join / watch); `/player/<address>` shows profiles.
+casual lobby (create / join / watch); `/player/<username-or-address>` shows profiles.
 
 The in-browser bot is personalizable with **no download** (lobby → "Your
 browser bot"): a display name and an uploaded **Polyglot `.bin` opening book**,

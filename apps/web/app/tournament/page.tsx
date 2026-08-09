@@ -23,6 +23,7 @@ import {
 import { requestSeat } from "@/lib/admission";
 import {
   casualIdentity,
+  entrantLabel,
   fetchTournament,
   fetchTournaments,
   rememberCasualIdentity,
@@ -116,8 +117,9 @@ function Terms({ t }: { t: Tournament }) {
   );
 }
 
-const shortName = (p: string) =>
-  p.startsWith("0x") && p.length === 42 ? `${p.slice(0, 6)}…${p.slice(-4)}` : p;
+// Entrant labels come from `entrantLabel`, which reads the server-resolved
+// `labels` map. Rendering the raw id here would print a wallet in the standings
+// while the board and the lobby print that same person's handle.
 
 const isFinished = (t: Tournament) =>
   t.status === "complete" || t.status === "settled" || t.status === "abandoned";
@@ -952,7 +954,7 @@ function TournamentClient() {
                       {t.total_rounds > 0 &&
                         ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}
                       {t.status !== "open" && leader && leader.score > 0 && (
-                        <> · leader {shortName(leader.player)} {leader.score}</>
+                        <> · leader {entrantLabel(t, leader.player)} {leader.score}</>
                       )}
                     </div>
                   </div>
@@ -1044,7 +1046,7 @@ function StandingsTable({ t, me }: { t: Tournament; me: string | null }) {
                 {s.tied && <span className="muted">*</span>}
               </td>
               <td>
-                {shortName(s.player)}
+                {entrantLabel(t, s.player)}
                 {s.bot && <span className="muted"> 🤖</span>}
                 {sameEntrant(s.player, me) && <span className="muted"> (you)</span>}
               </td>
@@ -1102,11 +1104,11 @@ function PairingsList({ t, me }: { t: Tournament; me: string | null }) {
                 className={`pairing${sameEntrant(g.white, me) || sameEntrant(g.black, me) ? " me" : ""}`}
               >
                 <span className={g.result === "white" ? "won" : g.result === "black" ? "lost" : ""}>
-                  {shortName(g.white)}
+                  {entrantLabel(t, g.white)}
                 </span>
                 <span className="muted"> vs </span>
                 <span className={g.result === "black" ? "won" : g.result === "white" ? "lost" : ""}>
-                  {shortName(g.black)}
+                  {entrantLabel(t, g.black)}
                 </span>
                 <span className="muted" style={{ marginLeft: 8 }}>
                   {g.forfeit
