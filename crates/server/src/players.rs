@@ -574,7 +574,10 @@ mod tests {
         // of these compresses to ~236 KB — comfortably inside AVATAR_MAX_BYTES.
         let bomb = png(9000, 9000);
         let (_, w, h) = sniffed(&bomb).expect("a well-formed header, just an absurd one");
-        assert!(w > AVATAR_MAX_PX && h > AVATAR_MAX_PX, "must be refused by size");
+        assert!(
+            w > AVATAR_MAX_PX && h > AVATAR_MAX_PX,
+            "must be refused by size"
+        );
         // One oversized side is enough.
         let (_, w, h) = sniffed(&png(64, 4000)).unwrap();
         assert!(w <= AVATAR_MAX_PX && h > AVATAR_MAX_PX);

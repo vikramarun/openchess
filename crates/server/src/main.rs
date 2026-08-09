@@ -329,7 +329,9 @@ async fn main() -> anyhow::Result<()> {
     {
         let st = state.clone();
         let rx = Arc::new(tokio::sync::Mutex::new(results_rx));
-        supervise("results", move || matchmaking::results_task(st.clone(), rx.clone()));
+        supervise("results", move || {
+            matchmaking::results_task(st.clone(), rx.clone())
+        });
     }
     // Recover tournaments interrupted by a restart: settle completed ones by
     // result, mark interrupted ones abandoned (entrants refund onchain).
@@ -369,18 +371,22 @@ async fn main() -> anyhow::Result<()> {
         // Throttle the auth routes per-IP: SIWE verify does signature recovery
         // and nonce/link mint credentials, so they're the cheapest thing to
         // abuse. (Applied only to these routes via route_layer.)
-        .merge(auth::routes().route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit_auth,
-        )))
+        .merge(
+            auth::routes().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_auth,
+            )),
+        )
         .merge(admin::routes())
         .merge(matchmaking::routes())
         // Throttle the public read routes per-IP: cheap per hit, but the
         // leaderboard query is heavy, so cap how fast one IP can trigger it.
-        .merge(players::routes().route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit_reads,
-        )))
+        .merge(
+            players::routes().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_reads,
+            )),
+        )
         .merge(agents::routes())
         .route("/ws/game/{game_id}", get(ws::ws_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -1022,7 +1028,10 @@ impl AppState {
         // concurrent burst can overshoot by the number of in-flight creates —
         // that's bounded by the per-IP create throttle and fine for a DoS backstop.
         if self.0.rooms.lock().len() >= self.0.limits.max_rooms {
-            tracing::warn!("refusing new game: room ceiling reached ({})", self.0.limits.max_rooms);
+            tracing::warn!(
+                "refusing new game: room ceiling reached ({})",
+                self.0.limits.max_rooms
+            );
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
 
@@ -1514,7 +1523,10 @@ mod tests {
         assert_eq!(row.white_wallet.as_deref(), Some(white));
         assert_eq!(row.black_wallet.as_deref(), Some(black));
         assert_eq!(row.stake, None, "wallets recorded without a wager");
-        assert!(!row.rated, "and it's a free game, so it's on the casual ladder");
+        assert!(
+            !row.rated,
+            "and it's a free game, so it's on the casual ladder"
+        );
     }
 
     /// A staked game is ranked whatever the caller asked for. The `Ladder`

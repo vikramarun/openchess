@@ -90,7 +90,13 @@ impl Lobby {
     /// Update mode standings when a game finishes. Returns a follow-up action
     /// (e.g. a completed tournament that needs settling).
     pub fn record_outcome(&self, o: &GameOutcome) -> OutcomeAction {
-        let GameOutcome { game_id, winner, plies, white_showed_up, black_showed_up } = *o;
+        let GameOutcome {
+            game_id,
+            winner,
+            plies,
+            white_showed_up,
+            black_showed_up,
+        } = *o;
         // Gauntlet: bump each participating session's W/L/D + game count.
         if let Some(entries) = self.game_to_gauntlet.lock().remove(&game_id) {
             let mut g = self.gauntlets.lock();
@@ -168,7 +174,9 @@ pub enum OutcomeAction {
     None,
     /// The current tournament round finished; dispatch the next one (or settle
     /// if the schedule is exhausted).
-    AdvanceTournament { tid: Uuid },
+    AdvanceTournament {
+        tid: Uuid,
+    },
 }
 
 /// Consumes game outcomes and updates mode standings; drives tournament rounds
@@ -176,7 +184,10 @@ pub enum OutcomeAction {
 ///
 /// The receiver arrives in an Arc-Mutex because `supervise` re-invokes this on
 /// panic, and an owned receiver would die with the first incarnation.
-pub async fn results_task(state: AppState, rx: Arc<tokio::sync::Mutex<mpsc::Receiver<GameOutcome>>>) {
+pub async fn results_task(
+    state: AppState,
+    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<GameOutcome>>>,
+) {
     let mut rx = rx.lock().await;
     while let Some(o) = rx.recv().await {
         // Free any bots seated in the finished game NOW, deterministically, before
@@ -420,9 +431,7 @@ async fn park_create(
 
     // Cap simultaneously-open offers per owner (wallet if known, else IP) so a
     // single actor can't flood the lobby with challenges.
-    let owner_key = poster_addr
-        .clone()
-        .unwrap_or_else(|| format!("ip:{ip}"));
+    let owner_key = poster_addr.clone().unwrap_or_else(|| format!("ip:{ip}"));
     let id = Uuid::new_v4();
     let cancel_key = Uuid::new_v4().simple().to_string();
     {
@@ -1051,7 +1060,14 @@ async fn queue_join(
         // The popped opponent's session stopped: its ticket is stale. Drop it
         // and keep waiting for a live opponent.
         state.0.lobby.tickets.lock().remove(&opp_id);
-        state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+        state
+            .0
+            .lobby
+            .queue
+            .lock()
+            .entry(key)
+            .or_default()
+            .push_back(my_id);
         return Ok(Json(QueueResp { ticket_id: my_id }));
     }
     if session_stopped(req.session_id) {
@@ -1069,7 +1085,14 @@ async fn queue_join(
             // staked tickets are authed): keep me waiting, drop the bad opponent.
             None => {
                 state.0.lobby.tickets.lock().remove(&opp_id);
-                state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+                state
+                    .0
+                    .lobby
+                    .queue
+                    .lock()
+                    .entry(key)
+                    .or_default()
+                    .push_back(my_id);
                 return Ok(Json(QueueResp { ticket_id: my_id }));
             }
         };
@@ -1100,7 +1123,14 @@ async fn queue_join(
             // is stale — drop it and put me back to wait for a fresh opponent.
             Err(_) => {
                 state.0.lobby.tickets.lock().remove(&opp_id);
-                state.0.lobby.queue.lock().entry(key).or_default().push_back(my_id);
+                state
+                    .0
+                    .lobby
+                    .queue
+                    .lock()
+                    .entry(key)
+                    .or_default()
+                    .push_back(my_id);
                 return Ok(Json(QueueResp { ticket_id: my_id }));
             }
         }
@@ -1153,7 +1183,12 @@ async fn queue_join(
         links.push((sid, my_color));
     }
     if !links.is_empty() {
-        state.0.lobby.game_to_gauntlet.lock().insert(resp.game_id, links);
+        state
+            .0
+            .lobby
+            .game_to_gauntlet
+            .lock()
+            .insert(resp.game_id, links);
     }
 
     // Mark both tickets matched. A bot-held seat's token stays server-side (the
@@ -1548,7 +1583,9 @@ async fn tourney_create(
                 .filter(|t| {
                     t.buy_in.is_some()
                         && !matches!(t.status.as_str(), "settled" | "complete" | "abandoned")
-                        && t.organizer.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&creator))
+                        && t.organizer
+                            .as_deref()
+                            .is_some_and(|o| o.eq_ignore_ascii_case(&creator))
                 })
                 .count();
             if open >= state.0.limits.max_open_tournaments {
@@ -1643,7 +1680,13 @@ fn bots_from_json(v: &serde_json::Value) -> HashMap<String, BotEntry> {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    Some((player.clone(), BotEntry { wallet, uci_options }))
+                    Some((
+                        player.clone(),
+                        BotEntry {
+                            wallet,
+                            uci_options,
+                        },
+                    ))
                 })
                 .collect()
         })
@@ -2006,7 +2049,11 @@ fn standings_of(t: &Tournament) -> Vec<Standing> {
         .iter()
         .filter(|g| g.result.is_some())
         .map(|g| (g.white.as_str(), g.black.as_str()))
-        .chain(t.forfeits.iter().map(|f| (f.white.as_str(), f.black.as_str())))
+        .chain(
+            t.forfeits
+                .iter()
+                .map(|f| (f.white.as_str(), f.black.as_str())),
+        )
     {
         *played.entry(w).or_default() += 1;
         *played.entry(b).or_default() += 1;
@@ -2066,14 +2113,19 @@ fn pairings_of(t: &Tournament, scope: Pairings) -> Vec<TourneyPairing> {
             result: g.result.map(result_label),
             forfeit: false,
         })
-        .chain(t.forfeits.iter().filter(|f| keep(f.round)).map(|f| TourneyPairing {
-            game_id: None,
-            white: f.white.clone(),
-            black: f.black.clone(),
-            round: f.round,
-            result: Some(result_label(f.winner)),
-            forfeit: true,
-        }))
+        .chain(
+            t.forfeits
+                .iter()
+                .filter(|f| keep(f.round))
+                .map(|f| TourneyPairing {
+                    game_id: None,
+                    white: f.white.clone(),
+                    black: f.black.clone(),
+                    round: f.round,
+                    result: Some(result_label(f.winner)),
+                    forfeit: true,
+                }),
+        )
         .collect();
     out.sort_by_key(|p| p.round);
     out
@@ -2194,12 +2246,15 @@ async fn tourney_my_games(
     // client lowercases the display name it sends, so an exact-match lookup
     // missed any entrant who typed a capital letter and handed their browser a
     // live token for a seat their agent was already playing.
-    let is_bot = t
-        .entrant_bots
-        .keys()
-        .any(|k| k.eq_ignore_ascii_case(&me));
+    let is_bot = t.entrant_bots.keys().any(|k| k.eq_ignore_ascii_case(&me));
     let seat = if is_bot { "bot" } else { "browser" };
-    let tok = |real: &str| if is_bot { String::new() } else { real.to_string() };
+    let tok = |real: &str| {
+        if is_bot {
+            String::new()
+        } else {
+            real.to_string()
+        }
+    };
     let mut mine = Vec::new();
     for g in &t.games {
         if g.white.eq_ignore_ascii_case(&me) {
@@ -2367,9 +2422,10 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
         // in entrant_wallets); a buy-in entrant's id already IS its wallet.
         wallet: match bots.get(p) {
             Some(be) => Some(be.wallet.clone()),
-            None => wallets.get(p).cloned().or_else(|| {
-                (p.starts_with("0x") && p.len() == 42).then(|| p.to_string())
-            }),
+            None => wallets
+                .get(p)
+                .cloned()
+                .or_else(|| (p.starts_with("0x") && p.len() == 42).then(|| p.to_string())),
         },
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
@@ -2377,10 +2433,13 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
     let make_seat = |id: &str, claimed: &mut Vec<String>| -> Result<SeatDelivery, ()> {
         match bots.get(id) {
             None => Ok(SeatDelivery::Browser),
-            Some(be) => {
-                claim_agent_seat(&state.0.agents, be.wallet.clone(), be.uci_options.clone(), claimed)
-                    .map_err(|_| ())
-            }
+            Some(be) => claim_agent_seat(
+                &state.0.agents,
+                be.wallet.clone(),
+                be.uci_options.clone(),
+                claimed,
+            )
+            .map_err(|_| ()),
         }
     };
 
@@ -2604,8 +2663,7 @@ pub async fn recover_tournaments(state: &AppState) {
                 // function exists to prevent.
                 let age = Duration::from_secs(r.age_secs.max(0) as u64).min(TOURNEY_TTL);
                 let created_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
-                let players: Vec<String> =
-                    serde_json::from_value(r.players).unwrap_or_default();
+                let players: Vec<String> = serde_json::from_value(r.players).unwrap_or_default();
                 ts.entry(r.id).or_insert_with(|| Tournament {
                     name: r.name,
                     buy_in: r.buy_in,
@@ -2629,15 +2687,16 @@ pub async fn recover_tournaments(state: &AppState) {
                     entrant_engines: HashMap::new(),
                     // Restored: attribution is NOT cosmetic — a casual entrant's
                     // games dispatched after a restart still belong to them.
-                    entrant_wallets: serde_json::from_value(r.entrant_wallets)
-                        .unwrap_or_default(),
+                    entrant_wallets: serde_json::from_value(r.entrant_wallets).unwrap_or_default(),
                     payout_leaves: Vec::new(),
                     created_at,
                 });
                 restored += 1;
             }
             if restored > 0 || found > 0 {
-                tracing::info!("rehydrated {restored}/{found} open tournament(s) from the database");
+                tracing::info!(
+                    "rehydrated {restored}/{found} open tournament(s) from the database"
+                );
             }
             // Never let a cap hide work silently: if the query came back full,
             // older open tournaments exist that this node will not serve.
@@ -2747,7 +2806,13 @@ fn payout_split(pool: u128, standings: &[(String, f64)]) -> anyhow::Result<Vec<u
             // 0.000001 USDC rather than a quarter of the pool.
             let mut rem = total - share * members;
             for slot in by_rank[i..j].iter_mut() {
-                *slot = share + if rem > 0 { rem -= 1; 1 } else { 0 };
+                *slot = share
+                    + if rem > 0 {
+                        rem -= 1;
+                        1
+                    } else {
+                        0
+                    };
             }
         }
         i = j;
@@ -3015,8 +3080,14 @@ mod tests {
         let _ = queue_join(State(state.clone()), bearer(&ta), Json(bot_req()))
             .await
             .expect("A join");
-        assert!(rx_a.try_recv().is_err(), "A must not be dispatched while waiting");
-        assert!(state.0.agents.claim(wa).is_ok(), "A not claimed while waiting");
+        assert!(
+            rx_a.try_recv().is_err(),
+            "A must not be dispatched while waiting"
+        );
+        assert!(
+            state.0.agents.claim(wa).is_ok(),
+            "A not claimed while waiting"
+        );
         state.0.agents.release(wa);
 
         // Bot B queues — pairs with A; BOTH seats dispatch to their agents.
@@ -3036,7 +3107,10 @@ mod tests {
         );
 
         // B's ticket is matched, holds NO launch token (its bot has it), seat=bot.
-        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new()).await.expect("ticket").0;
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new())
+            .await
+            .expect("ticket")
+            .0;
         assert_eq!(tr.status, "matched");
         assert!(tr.token.is_none(), "a bot seat's token stays server-side");
         assert_eq!(tr.seat.as_deref(), Some("bot"));
@@ -3136,9 +3210,15 @@ mod tests {
             .expect("accept")
             .0;
 
-            let posted = park_get(State(state.clone()), Path(offer_id), headers).await.expect("offer").0;
+            let posted = park_get(State(state.clone()), Path(offer_id), headers)
+                .await
+                .expect("offer")
+                .0;
             let poster_color = posted.color.expect("a matched offer reports a colour");
-            assert_ne!(poster_color, acc.color, "the two seats can't share a colour");
+            assert_ne!(
+                poster_color, acc.color,
+                "the two seats can't share a colour"
+            );
 
             for (token, want) in [
                 (acc.token.expect("acceptor's token"), acc.color.as_str()),
@@ -3195,8 +3275,14 @@ mod tests {
                 .0
                 .ticket_id;
 
-            let ta = queue_get(State(state.clone()), Path(a), HeaderMap::new()).await.expect("ticket").0;
-            let tb = queue_get(State(state.clone()), Path(b), HeaderMap::new()).await.expect("ticket").0;
+            let ta = queue_get(State(state.clone()), Path(a), HeaderMap::new())
+                .await
+                .expect("ticket")
+                .0;
+            let tb = queue_get(State(state.clone()), Path(b), HeaderMap::new())
+                .await
+                .expect("ticket")
+                .0;
             assert_eq!(ta.status, "matched");
             assert_eq!(tb.status, "matched");
             let (ca, cb) = (ta.color.expect("A colour"), tb.color.expect("B colour"));
@@ -3245,7 +3331,13 @@ mod tests {
     /// A game outcome for a contested game (both seats showed up). Never-started
     /// reaps set `plies`/`*_showed_up` explicitly at the call site instead.
     fn outcome(game_id: GameId, winner: Option<Color>, plies: u32) -> GameOutcome {
-        GameOutcome { game_id, winner, plies, white_showed_up: true, black_showed_up: true }
+        GameOutcome {
+            game_id,
+            winner,
+            plies,
+            white_showed_up: true,
+            black_showed_up: true,
+        }
     }
 
     #[test]
@@ -3256,13 +3348,19 @@ mod tests {
         // engine, so the session auto-stops instead of bleeding the stake.
         let black_sid = running_session(&lobby, Some("1000000"));
         let g1 = Uuid::new_v4();
-        lobby.game_to_gauntlet.lock().insert(g1, vec![(black_sid, Color::Black)]);
+        lobby
+            .game_to_gauntlet
+            .lock()
+            .insert(g1, vec![(black_sid, Color::Black)]);
         lobby.record_outcome(&outcome(g1, Some(Color::White), 1));
 
         // White seat lost having never moved (a no-show forfeit → ply 0).
         let white_sid = running_session(&lobby, Some("1000000"));
         let g2 = Uuid::new_v4();
-        lobby.game_to_gauntlet.lock().insert(g2, vec![(white_sid, Color::White)]);
+        lobby
+            .game_to_gauntlet
+            .lock()
+            .insert(g2, vec![(white_sid, Color::White)]);
         lobby.record_outcome(&outcome(g2, Some(Color::Black), 0));
 
         let g = lobby.gauntlets.lock();
@@ -3277,13 +3375,19 @@ mod tests {
         let sid = running_session(&lobby, Some("1000000"));
         // Black seat lost a real game (both sides moved → ply >= 2): keep going.
         let gid = Uuid::new_v4();
-        lobby.game_to_gauntlet.lock().insert(gid, vec![(sid, Color::Black)]);
+        lobby
+            .game_to_gauntlet
+            .lock()
+            .insert(gid, vec![(sid, Color::Black)]);
         lobby.record_outcome(&outcome(gid, Some(Color::White), 42));
 
         let g = lobby.gauntlets.lock();
         let s = g.get(&sid).unwrap();
         assert_eq!(s.losses, 1);
-        assert_eq!(s.status, "running", "a genuine loss must not stop the gauntlet");
+        assert_eq!(
+            s.status, "running",
+            "a genuine loss must not stop the gauntlet"
+        );
     }
 
     #[test]
@@ -3295,10 +3399,10 @@ mod tests {
         let white_sid = running_session(&lobby, Some("1000000"));
         let black_sid = running_session(&lobby, Some("1000000"));
         let gid = Uuid::new_v4();
-        lobby
-            .game_to_gauntlet
-            .lock()
-            .insert(gid, vec![(white_sid, Color::White), (black_sid, Color::Black)]);
+        lobby.game_to_gauntlet.lock().insert(
+            gid,
+            vec![(white_sid, Color::White), (black_sid, Color::Black)],
+        );
         lobby.record_outcome(&GameOutcome {
             game_id: gid,
             winner: None,
@@ -3308,16 +3412,30 @@ mod tests {
         });
         {
             let g = lobby.gauntlets.lock();
-            assert_eq!(g.get(&white_sid).unwrap().status, "running", "the seat that showed up is spared");
-            assert_eq!(g.get(&black_sid).unwrap().status, "stopped", "the no-show seat stops");
+            assert_eq!(
+                g.get(&white_sid).unwrap().status,
+                "running",
+                "the seat that showed up is spared"
+            );
+            assert_eq!(
+                g.get(&black_sid).unwrap().status,
+                "stopped",
+                "the no-show seat stops"
+            );
         }
 
         // A real drawn game (both played, plies > 0) never stops.
         let live_sid = running_session(&lobby, None);
         let g2 = Uuid::new_v4();
-        lobby.game_to_gauntlet.lock().insert(g2, vec![(live_sid, Color::White)]);
+        lobby
+            .game_to_gauntlet
+            .lock()
+            .insert(g2, vec![(live_sid, Color::White)]);
         lobby.record_outcome(&outcome(g2, None, 40));
-        assert_eq!(lobby.gauntlets.lock().get(&live_sid).unwrap().status, "running");
+        assert_eq!(
+            lobby.gauntlets.lock().get(&live_sid).unwrap().status,
+            "running"
+        );
     }
 
     #[tokio::test]
@@ -3397,7 +3515,10 @@ mod tests {
         let r2 = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
             .await
             .expect("p2");
-        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new()).await.expect("ticket").0;
+        let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new())
+            .await
+            .expect("ticket")
+            .0;
         assert_eq!(tr.status, "matched");
         assert!(tr.token.is_some(), "a browser seat gets a launch token");
         assert_eq!(tr.seat.as_deref(), Some("browser"));
@@ -3450,7 +3571,11 @@ mod tests {
         // wallets reached the game, not who moves first.
         let mut got = [g.white.as_deref(), g.black.as_deref()];
         got.sort();
-        assert_eq!(got, [Some(poster), Some(acceptor)], "both wallets are seated");
+        assert_eq!(
+            got,
+            [Some(poster), Some(acceptor)],
+            "both wallets are seated"
+        );
         assert_eq!(g.stake, None, "and none of this needed a stake");
     }
 
@@ -3459,7 +3584,10 @@ mod tests {
     #[tokio::test]
     async fn a_dead_session_is_rejected_rather_than_seated_anonymously() {
         let (state, _c, _r) = test_state();
-        let pt = state.0.auth.mint_session("0xaa11111111111111111111111111111111111111");
+        let pt = state
+            .0
+            .auth
+            .mint_session("0xaa11111111111111111111111111111111111111");
         let offer = park_create(
             State(state.clone()),
             bearer(&pt),
@@ -3488,7 +3616,13 @@ mod tests {
         assert_eq!(err, Some(StatusCode::UNAUTHORIZED));
         // ...and the rejected join must not have consumed the offer.
         assert_eq!(
-            state.0.lobby.park.lock().get(&offer.offer_id).map(|o| o.status.clone()),
+            state
+                .0
+                .lobby
+                .park
+                .lock()
+                .get(&offer.offer_id)
+                .map(|o| o.status.clone()),
             Some("open".to_string())
         );
     }
@@ -3504,7 +3638,10 @@ mod tests {
                 let mut seen = std::collections::HashSet::new();
                 for &(a, b) in round {
                     assert!(a < n && b < n, "n={n}: index in range");
-                    assert!(seen.insert(a) && seen.insert(b), "n={n}: player twice in a round");
+                    assert!(
+                        seen.insert(a) && seen.insert(b),
+                        "n={n}: player twice in a round"
+                    );
                     let key = if a < b { (a, b) } else { (b, a) };
                     assert!(all_pairs.insert(key), "n={n}: pair {key:?} repeated");
                 }
@@ -3533,11 +3670,17 @@ mod tests {
         assert_eq!(a.wallet, "0xaa11111111111111111111111111111111111111");
         assert_eq!(
             a.uci_options,
-            vec![("Threads".to_string(), "2".to_string()), ("Hash".to_string(), "64".to_string())],
+            vec![
+                ("Threads".to_string(), "2".to_string()),
+                ("Hash".to_string(), "64".to_string())
+            ],
             "UCI overrides come back with the binding"
         );
         assert!(bots_from_json(&json!({})).is_empty());
-        assert!(bots_from_json(&json!(null)).is_empty(), "a legacy row without bots is empty");
+        assert!(
+            bots_from_json(&json!(null)).is_empty(),
+            "a legacy row without bots is empty"
+        );
     }
 
     #[tokio::test]
@@ -3565,7 +3708,12 @@ mod tests {
                 State(state.clone()),
                 Path(tid),
                 HeaderMap::new(),
-                Json(JoinReq { player: Some(n.into()), seat: None, uci_options: None, engine: None }),
+                Json(JoinReq {
+                    player: Some(n.into()),
+                    seat: None,
+                    uci_options: None,
+                    engine: None,
+                }),
             )
             .await
             .expect("join");
@@ -3578,16 +3726,28 @@ mod tests {
             t.scores.insert("Third".into(), 1.0);
         }
 
-        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
         let ranks: Vec<usize> = view.standings.iter().map(|s| s.rank).collect();
         assert_eq!(ranks, vec![1, 1, 3], "level entrants share the place");
-        assert!(view.standings[0].tied && view.standings[1].tied, "both level rows are flagged");
+        assert!(
+            view.standings[0].tied && view.standings[1].tied,
+            "both level rows are flagged"
+        );
         assert!(!view.standings[2].tied);
         // …and sharing the place is honest because they share the money.
-        let field: Vec<(String, f64)> =
-            view.standings.iter().map(|s| (s.player.clone(), s.score)).collect();
+        let field: Vec<(String, f64)> = view
+            .standings
+            .iter()
+            .map(|s| (s.player.clone(), s.score))
+            .collect();
         let amounts = payout_split(30_000_000, &field).expect("split");
-        assert_eq!(amounts[0], amounts[1], "a shared place must mean a shared prize");
+        assert_eq!(
+            amounts[0], amounts[1],
+            "a shared place must mean a shared prize"
+        );
 
         // And the table's order IS the order the pool is paid in.
         let payout_order: Vec<String> = {
@@ -3598,7 +3758,10 @@ mod tests {
                 .collect()
         };
         let shown: Vec<String> = view.standings.iter().map(|s| s.player.clone()).collect();
-        assert_eq!(shown, payout_order, "what a player is looking at is what the pool pays");
+        assert_eq!(
+            shown, payout_order,
+            "what a player is looking at is what the pool pays"
+        );
     }
 
     /// Drive the REAL `payout_split` from a list of scores.
@@ -3615,22 +3778,34 @@ mod tests {
     fn tied_entrants_split_their_bracket_evenly() {
         const USDC: u128 = 1_000_000; // 6dp
                                       //
-        // Two level at the top of a field of four. This used to pay 26 and 10
-        // USDC — a 16 USDC gap for pressing Join first. The bracket is worth
-        // 65% + 25% = 90% of a 40 USDC pool, so each takes 18.
+                                      // Two level at the top of a field of four. This used to pay 26 and 10
+                                      // USDC — a 16 USDC gap for pressing Join first. The bracket is worth
+                                      // 65% + 25% = 90% of a 40 USDC pool, so each takes 18.
         let p = payouts_for(&[2.0, 2.0, 1.0, 0.5], 10 * USDC);
         assert_eq!(p, vec![18 * USDC, 18 * USDC, 4 * USDC, 0]);
-        assert_eq!(p.iter().sum::<u128>(), 40 * USDC, "the whole pool is still paid out");
+        assert_eq!(
+            p.iter().sum::<u128>(),
+            40 * USDC,
+            "the whole pool is still paid out"
+        );
 
         // Everyone level: nobody out-performed anybody, so nobody is paid more.
         let p = payouts_for(&[1.5, 1.5, 1.5, 1.5], 10 * USDC);
-        assert_eq!(p, vec![10 * USDC; 4], "an all-draw field returns every buy-in");
+        assert_eq!(
+            p,
+            vec![10 * USDC; 4],
+            "an all-draw field returns every buy-in"
+        );
         assert_eq!(p.iter().sum::<u128>(), 40 * USDC);
 
         // A tie spanning into the zero-weight tail still shares what it is worth.
         let p = payouts_for(&[3.0, 1.0, 1.0, 1.0, 1.0], 10 * USDC);
         assert_eq!(p[0], 32_500_000, "outright winner keeps 65%");
-        assert_eq!(&p[1..], &[4_375_000; 4], "the 25%+10% bracket splits four ways");
+        assert_eq!(
+            &p[1..],
+            &[4_375_000; 4],
+            "the 25%+10% bracket splits four ways"
+        );
         assert_eq!(p.iter().sum::<u128>(), 50 * USDC);
 
         // No ties: unchanged from before.
@@ -3653,11 +3828,14 @@ mod tests {
         assert!(err.to_string().contains("ranked order"), "got: {err}");
         // The sole real caller's input is accepted, so this can't fire in
         // normal operation.
-        assert!(payout_split(30_000_000, &[
-            ("a".to_string(), 2.0),
-            ("b".to_string(), 2.0),
-            ("c".to_string(), 1.0),
-        ])
+        assert!(payout_split(
+            30_000_000,
+            &[
+                ("a".to_string(), 2.0),
+                ("b".to_string(), 2.0),
+                ("c".to_string(), 1.0),
+            ]
+        )
         .is_ok());
     }
 
@@ -3809,7 +3987,10 @@ mod tests {
         // next round can re-claim them. If that freeing regresses (the T1 race),
         // round 1+ pairings forfeit, no real games get created, and the
         // per-round wait below times out — this test is the regression guard.
-        tokio::spawn(results_task(state.clone(), Arc::new(tokio::sync::Mutex::new(results_rx))));
+        tokio::spawn(results_task(
+            state.clone(),
+            Arc::new(tokio::sync::Mutex::new(results_rx)),
+        ));
         let tx = state.0.results_tx.clone();
         let _ = &mut rxs; // agents keep receiving AssignSeat; we don't assert on it here
 
@@ -3823,7 +4004,11 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
-            assert_eq!(games.len(), 2, "round {round}: two real games (no spurious forfeits)");
+            assert_eq!(
+                games.len(),
+                2,
+                "round {round}: two real games (no spurious forfeits)"
+            );
             for gid in games {
                 tx.send(GameOutcome {
                     game_id: gid,
@@ -3890,7 +4075,12 @@ mod tests {
                 State(state.clone()),
                 Path(tid),
                 HeaderMap::new(),
-                Json(JoinReq { player: Some(name.into()), seat: None, uci_options: None, engine: None }),
+                Json(JoinReq {
+                    player: Some(name.into()),
+                    seat: None,
+                    uci_options: None,
+                    engine: None,
+                }),
             )
             .await
             .expect("join");
@@ -3898,7 +4088,10 @@ mod tests {
         let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
             .await
             .expect("start");
-        tokio::spawn(results_task(state.clone(), Arc::new(tokio::sync::Mutex::new(results_rx))));
+        tokio::spawn(results_task(
+            state.clone(),
+            Arc::new(tokio::sync::Mutex::new(results_rx)),
+        ));
         let tx = state.0.results_tx.clone();
 
         let round_games = |round: usize| -> Vec<GameId> {
@@ -3955,7 +4148,10 @@ mod tests {
         }
         assert!(settled, "tournament settled after the last round");
 
-        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
         assert_eq!(view.games.len(), 3, "every pairing is visible");
         assert!(view.games.iter().all(|g| g.result.is_some() && !g.forfeit));
         let total: f64 = view.standings.iter().map(|s| s.score).sum();
@@ -3997,7 +4193,12 @@ mod tests {
                     State(state.clone()),
                     Path(tid),
                     bearer(&tok_a),
-                    Json(JoinReq { player: Some("Alpha".into()), seat: Some("bot".into()), uci_options: None, engine: None }),
+                    Json(JoinReq {
+                        player: Some("Alpha".into()),
+                        seat: Some("bot".into()),
+                        uci_options: None,
+                        engine: None
+                    }),
                 )
                 .await
             ),
@@ -4009,7 +4210,12 @@ mod tests {
                     State(state.clone()),
                     Path(tid),
                     bearer(&tok_b),
-                    Json(JoinReq { player: Some("Bravo".into()), seat: Some("bot".into()), uci_options: None, engine: None }),
+                    Json(JoinReq {
+                        player: Some("Bravo".into()),
+                        seat: Some("bot".into()),
+                        uci_options: None,
+                        engine: None
+                    }),
                 )
                 .await
             ),
@@ -4023,7 +4229,12 @@ mod tests {
                     State(state.clone()),
                     Path(tid),
                     HeaderMap::new(),
-                    Json(JoinReq { player: Some("Bravo".into()), seat: None, uci_options: None, engine: None }),
+                    Json(JoinReq {
+                        player: Some("Bravo".into()),
+                        seat: None,
+                        uci_options: None,
+                        engine: None
+                    }),
                 )
                 .await
             ),
@@ -4031,7 +4242,11 @@ mod tests {
         );
         // Now make Alpha's bot busy so it can't be claimed at dispatch → its
         // single pairing forfeits to Bravo, the round is empty, tournament settles.
-        assert!(state.0.agents.claim("0xaa11111111111111111111111111111111111111").is_ok());
+        assert!(state
+            .0
+            .agents
+            .claim("0xaa11111111111111111111111111111111111111")
+            .is_ok());
         let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
             .await
             .expect("start");
@@ -4039,7 +4254,11 @@ mod tests {
         let t = t.get(&tid).unwrap();
         assert_eq!(t.games.len(), 0, "no game created — the pairing forfeited");
         assert_eq!(t.status, "settled");
-        assert_eq!(t.scores.get("Bravo").copied(), Some(1.0), "Bravo wins the forfeit");
+        assert_eq!(
+            t.scores.get("Bravo").copied(),
+            Some(1.0),
+            "Bravo wins the forfeit"
+        );
     }
 
     #[tokio::test]
@@ -4069,7 +4288,12 @@ mod tests {
                 State(state.clone()),
                 Path(tid),
                 HeaderMap::new(),
-                Json(JoinReq { player: Some(name.into()), seat: None, uci_options: None, engine: None }),
+                Json(JoinReq {
+                    player: Some(name.into()),
+                    seat: None,
+                    uci_options: None,
+                    engine: None,
+                }),
             )
             .await
             .expect("join");
@@ -4097,12 +4321,29 @@ mod tests {
             });
         }
 
-        let detail = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("detail").0;
-        assert_eq!(detail.games.len(), 3, "the detail route still serves every pairing");
+        let detail = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("detail")
+            .0;
+        assert_eq!(
+            detail.games.len(),
+            3,
+            "the detail route still serves every pairing"
+        );
 
-        let list = tourney_list(State(state.clone()), HeaderMap::new()).await.expect("list").0;
-        let row = list.iter().find(|r| r.tournament_id == tid).expect("in the lobby");
-        assert_eq!(row.view.games.len(), 1, "the lobby carries only the live round");
+        let list = tourney_list(State(state.clone()), HeaderMap::new())
+            .await
+            .expect("list")
+            .0;
+        let row = list
+            .iter()
+            .find(|r| r.tournament_id == tid)
+            .expect("in the lobby");
+        assert_eq!(
+            row.view.games.len(),
+            1,
+            "the lobby carries only the live round"
+        );
         assert!(row.view.games.iter().all(|g| g.round == 1));
         // Standings are cheap and the lobby shows the leader, so they stay.
         assert_eq!(row.view.standings.len(), 4);
@@ -4113,9 +4354,18 @@ mod tests {
         // Rows written before the organizer column existed can never be started
         // (only the organizer may). Putting one back in the lobby would invite
         // fresh entrants to lock USDC into a pool that can never pay out.
-        assert!(!is_rehydratable(Some("1000000"), None), "unstartable buy-in row is skipped");
-        assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "organized buy-in row is kept");
-        assert!(is_rehydratable(None, None), "a casual row needs no organizer — anyone may start it");
+        assert!(
+            !is_rehydratable(Some("1000000"), None),
+            "unstartable buy-in row is skipped"
+        );
+        assert!(
+            is_rehydratable(Some("1000000"), Some("0xabc")),
+            "organized buy-in row is kept"
+        );
+        assert!(
+            is_rehydratable(None, None),
+            "a casual row needs no organizer — anyone may start it"
+        );
         assert!(is_rehydratable(None, Some("0xabc")));
     }
 
@@ -4127,9 +4377,16 @@ mod tests {
         // copies it back, so a rehydrated paid tournament keeps dispatching
         // ranked games instead of quietly coming back casual for its whole
         // remaining schedule.
-        assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "it comes back at all");
+        assert!(
+            is_rehydratable(Some("1000000"), Some("0xabc")),
+            "it comes back at all"
+        );
         assert_eq!(tournament_ladder(Some("1000000")), Ladder::Ranked);
-        assert_eq!(tournament_ladder(None), Ladder::Casual, "a free tournament is casual");
+        assert_eq!(
+            tournament_ladder(None),
+            Ladder::Casual,
+            "a free tournament is casual"
+        );
     }
 
     #[tokio::test]
@@ -4177,14 +4434,29 @@ mod tests {
             State(state.clone()),
             Path(tid),
             HeaderMap::new(),
-            Json(JoinReq { player: Some("Bravo".into()), seat: None, uci_options: None, engine: None }),
+            Json(JoinReq {
+                player: Some("Bravo".into()),
+                seat: None,
+                uci_options: None,
+                engine: None,
+            }),
         )
         .await
         .expect("bravo joins");
 
-        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
-        assert_eq!(view.standings.len(), 2, "an open tournament still has a table");
-        assert!(view.standings.iter().all(|s| s.score == 0.0 && s.played == 0));
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
+        assert_eq!(
+            view.standings.len(),
+            2,
+            "an open tournament still has a table"
+        );
+        assert!(view
+            .standings
+            .iter()
+            .all(|s| s.score == 0.0 && s.played == 0));
         assert!(
             view.standings.iter().any(|s| s.player == "Alpha" && s.bot),
             "the bot entrant is flagged"
@@ -4196,10 +4468,21 @@ mod tests {
             .await
             .expect("start");
 
-        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new()).await.expect("view").0;
-        assert_eq!(view.games.len(), 1, "the forfeited pairing is still a visible row");
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
+        assert_eq!(
+            view.games.len(),
+            1,
+            "the forfeited pairing is still a visible row"
+        );
         assert!(view.games[0].forfeit && view.games[0].game_id.is_none());
-        assert_eq!(view.games[0].result.as_deref(), Some("black"), "Bravo awarded it");
+        assert_eq!(
+            view.games[0].result.as_deref(),
+            Some("black"),
+            "Bravo awarded it"
+        );
         let bravo = view.standings.iter().find(|s| s.player == "Bravo").unwrap();
         assert_eq!((bravo.score, bravo.played, bravo.rank), (1.0, 1, 1));
         let alpha = view.standings.iter().find(|s| s.player == "Alpha").unwrap();
@@ -4253,7 +4536,9 @@ mod tests {
         let mine = tourney_my_games(
             State(state.clone()),
             Path(tid),
-            Query(MyGamesQuery { player: Some("alpha".into()) }),
+            Query(MyGamesQuery {
+                player: Some("alpha".into()),
+            }),
             HeaderMap::new(),
         )
         .await
@@ -4261,7 +4546,10 @@ mod tests {
         .0;
         assert_eq!(mine.len(), 1, "lowercased name still finds the pairing");
         assert_eq!(mine[0].seat, "bot");
-        assert!(mine[0].token.is_empty(), "a bot seat must never leak a token");
+        assert!(
+            mine[0].token.is_empty(),
+            "a bot seat must never leak a token"
+        );
     }
 
     #[tokio::test]
@@ -4365,7 +4653,10 @@ mod tests {
             .await
             .expect("start");
         let live = state.0.live_games.lock();
-        let g = live.values().next().expect("round 0 dispatched the pairing");
+        let g = live
+            .values()
+            .next()
+            .expect("round 0 dispatched the pairing");
         // Who got White is the round-robin's business; what matters is that
         // BOTH sessions' wallets reached the seats.
         let mut got = [g.white.as_deref(), g.black.as_deref()];
@@ -4421,8 +4712,14 @@ mod tests {
         // A bot seat keeps its token server-side; the browser spectates.
         assert!(resp.token.is_none(), "bot acceptor gets no launch token");
         assert_eq!(resp.seat, "bot");
-        assert!(matches!(rx_a.try_recv(), Ok(ServerToAgent::AssignSeat { .. })), "poster bot seated");
-        assert!(matches!(rx_b.try_recv(), Ok(ServerToAgent::AssignSeat { .. })), "acceptor bot seated");
+        assert!(
+            matches!(rx_a.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "poster bot seated"
+        );
+        assert!(
+            matches!(rx_b.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "acceptor bot seated"
+        );
         assert!(state.0.agents.claim(wa).is_err(), "poster busy");
         assert!(state.0.agents.claim(wb).is_err(), "acceptor busy");
     }

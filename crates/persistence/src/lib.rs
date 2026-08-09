@@ -434,19 +434,20 @@ impl Db {
         mode: &str,
         payload: serde_json::Value,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO tournament_outbox (id, tid, mode, payload) VALUES ($1,$2,$3,$4)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(tid)
-        .bind(mode)
-        .bind(payload)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO tournament_outbox (id, tid, mode, payload) VALUES ($1,$2,$3,$4)")
+            .bind(Uuid::new_v4())
+            .bind(tid)
+            .bind(mode)
+            .bind(payload)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    pub async fn claim_tournament_settlements(&self, limit: i64) -> Result<Vec<TournamentOutboxRow>> {
+    pub async fn claim_tournament_settlements(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<TournamentOutboxRow>> {
         let rows = sqlx::query_as::<_, TournamentOutboxRow>(
             r#"UPDATE tournament_outbox
                SET status='processing', attempts=attempts+1, claimed_at=now()
@@ -557,7 +558,10 @@ impl Db {
     /// (a payout or refund may be collectable onchain). DB-sourced so it
     /// survives the restart that wipes the in-memory tournaments map. `address`
     /// must be lowercased (entrants are stored lowercased).
-    pub async fn claimable_tournaments(&self, address: &str) -> Result<Vec<ClaimableTournamentRow>> {
+    pub async fn claimable_tournaments(
+        &self,
+        address: &str,
+    ) -> Result<Vec<ClaimableTournamentRow>> {
         let rows = sqlx::query_as::<_, ClaimableTournamentRow>(
             r#"SELECT id, name, status FROM tournaments
                WHERE status IN ('complete','settled','abandoned')
@@ -1100,7 +1104,10 @@ mod tests {
             false,
             Some("0xwhite"),
             Some("0xblack"),
-            Tc { initial_ms: 60000, increment_ms: 1000 },
+            Tc {
+                initial_ms: 60000,
+                increment_ms: 1000,
+            },
             None,
             [Some("Stockfish 18 · Sharp"), None],
         )
@@ -1108,8 +1115,17 @@ mod tests {
         db.set_game_active(id).await?;
         db.append_move(id, 1, "e2e4", "e4", 60000, 60000).await?;
         db.append_move(id, 2, "e7e5", "e5", 60000, 60000).await?;
-        db.finish_and_enqueue(id, "white", "checkmate", "deadbeef", None, "1. e4 e5", None, false)
-            .await?;
+        db.finish_and_enqueue(
+            id,
+            "white",
+            "checkmate",
+            "deadbeef",
+            None,
+            "1. e4 e5",
+            None,
+            false,
+        )
+        .await?;
 
         // Engines must survive to the public detail view — the whole point of
         // migration 0013 is that a finished game can say what played it.
@@ -1140,18 +1156,29 @@ mod tests {
         let tag = Uuid::new_v4().simple().to_string();
         let wallet = format!("0xAbC_{tag}");
 
-        assert!(db.avatar(&wallet).await?.is_none(), "no photo to begin with");
+        assert!(
+            db.avatar(&wallet).await?.is_none(),
+            "no photo to begin with"
+        );
         // Unseen wallet: the default rating, and nothing for the client to
         // build an image URL out of.
         let card = db.player_card(&wallet).await?;
-        assert_eq!((card.rating, card.casual_rating, card.avatar_updated_at), (1500.0, 1500.0, None));
+        assert_eq!(
+            (card.rating, card.casual_rating, card.avatar_updated_at),
+            (1500.0, 1500.0, None)
+        );
 
         // Sets a photo for a wallet that has never played — no users row yet.
-        db.set_avatar(&wallet, "image/jpeg", b"\xff\xd8\xffbytes").await?;
+        db.set_avatar(&wallet, "image/jpeg", b"\xff\xd8\xffbytes")
+            .await?;
         let got = db.avatar(&wallet.to_lowercase()).await?.expect("photo");
         assert_eq!(got.mime, "image/jpeg");
         assert_eq!(got.data, b"\xff\xd8\xffbytes");
-        let first = db.player_card(&wallet).await?.avatar_updated_at.expect("timestamp");
+        let first = db
+            .player_card(&wallet)
+            .await?
+            .avatar_updated_at
+            .expect("timestamp");
 
         // Replacing keeps one row and moves the version forward, which is what
         // busts the cached image URL.
@@ -1159,11 +1186,20 @@ mod tests {
         let got = db.avatar(&wallet).await?.expect("photo");
         assert_eq!(got.mime, "image/png");
         assert_eq!(got.data, b"\x89PNGnew");
-        assert!(db.player_card(&wallet).await?.avatar_updated_at.expect("timestamp") >= first);
+        assert!(
+            db.player_card(&wallet)
+                .await?
+                .avatar_updated_at
+                .expect("timestamp")
+                >= first
+        );
 
         db.clear_avatar(&wallet).await?;
         assert!(db.avatar(&wallet).await?.is_none(), "cleared");
-        assert!(db.player_card(&wallet).await?.avatar_updated_at.is_none(), "and no version left");
+        assert!(
+            db.player_card(&wallet).await?.avatar_updated_at.is_none(),
+            "and no version left"
+        );
         Ok(())
     }
 
@@ -1203,22 +1239,34 @@ mod tests {
                     rated,
                     Some(&white),
                     Some(&black),
-                    Tc { initial_ms: 60000, increment_ms: 1000 },
+                    Tc {
+                        initial_ms: 60000,
+                        increment_ms: 1000,
+                    },
                     None,
                     [None, None],
                 )
                 .await?;
                 db.set_game_active(id).await?;
-                db.finish_and_enqueue(id, result, "checkmate", "hash", None, "1. e4 e5", None, false)
-                    .await?;
+                db.finish_and_enqueue(
+                    id,
+                    result,
+                    "checkmate",
+                    "hash",
+                    None,
+                    "1. e4 e5",
+                    None,
+                    false,
+                )
+                .await?;
                 db.update_ratings(id).await?;
                 Ok::<_, anyhow::Error>(())
             }
         };
         finish(alice.clone(), bob.clone(), "white", true).await?; // alice (white) wins
         finish(bob.clone(), alice.to_lowercase(), "black", true).await?; // alice (black) wins
-        // Casual games: they exist, they're finished, they have two known
-        // wallets — and none of that puts anyone on the ranked ladder.
+                                                                         // Casual games: they exist, they're finished, they have two known
+                                                                         // wallets — and none of that puts anyone on the ranked ladder.
         finish(dave.clone(), alice.clone(), "white", false).await?;
         finish(alice.clone(), dave.clone(), "white", false).await?;
 
@@ -1230,7 +1278,10 @@ mod tests {
             true,
             Some(&alice),
             Some(&bob),
-            Tc { initial_ms: 60000, increment_ms: 1000 },
+            Tc {
+                initial_ms: 60000,
+                increment_ms: 1000,
+            },
             None,
             [None, None],
         )
@@ -1249,15 +1300,22 @@ mod tests {
             "her two ranked games count (case-folded), her two casual ones don't"
         );
         assert_eq!(b.games, 2, "both finished games count for bob");
-        assert!(get(&carol).is_none(), "no finished games => not on the board");
+        assert!(
+            get(&carol).is_none(),
+            "no finished games => not on the board"
+        );
         assert!(
             get(&dave).is_none(),
             "only casual games => no ranked ladder entry, not a free 1500"
         );
 
         // Ordered by rating desc: alice (won both -> higher Elo) before bob.
-        let ai = board.iter().position(|r| r.wallet.to_lowercase() == alice.to_lowercase());
-        let bi = board.iter().position(|r| r.wallet.to_lowercase() == bob.to_lowercase());
+        let ai = board
+            .iter()
+            .position(|r| r.wallet.to_lowercase() == alice.to_lowercase());
+        let bi = board
+            .iter()
+            .position(|r| r.wallet.to_lowercase() == bob.to_lowercase());
         assert!(ai < bi, "higher rating ranks first");
         Ok(())
     }
@@ -1285,7 +1343,10 @@ mod tests {
             false, // <- casual
             Some(&alice),
             Some(&bob),
-            Tc { initial_ms: 60000, increment_ms: 1000 },
+            Tc {
+                initial_ms: 60000,
+                increment_ms: 1000,
+            },
             None, // <- the point: no wager
             [None, None],
         )
@@ -1293,27 +1354,49 @@ mod tests {
         db.set_game_active(id).await?;
         db.append_move(id, 1, "e2e4", "e4", 60000, 60000).await?;
         db.append_move(id, 2, "e7e5", "e5", 60000, 60000).await?;
-        db.finish_and_enqueue(id, "white", "checkmate", "hash", None, "1. e4 e5", None, false)
-            .await?;
+        db.finish_and_enqueue(
+            id,
+            "white",
+            "checkmate",
+            "hash",
+            None,
+            "1. e4 e5",
+            None,
+            false,
+        )
+        .await?;
         db.update_ratings(id).await?;
 
         let mine = db.player_games(&alice.to_lowercase(), 50, None).await?;
-        let row = mine.iter().find(|g| g.id == id).expect("in alice's history");
+        let row = mine
+            .iter()
+            .find(|g| g.id == id)
+            .expect("in alice's history");
         assert_eq!(row.result.as_deref(), Some("white"));
         assert_eq!(row.stake, None, "casual game, no stake");
         assert!(!row.rated, "and it counted for the casual ladder");
         assert_eq!(row.moves, 2);
         assert!(
-            db.player_games(&bob, 50, None).await?.iter().any(|g| g.id == id),
+            db.player_games(&bob, 50, None)
+                .await?
+                .iter()
+                .any(|g| g.id == id),
             "and in bob's"
         );
 
         // The same row is what the record reads — under the casual bucket, and
         // in the combined view, but never under ranked.
         let stats = db.player_stats(&alice).await?;
-        assert_eq!((stats.casual.games, stats.casual.wins, stats.casual.losses), (1, 1, 0));
+        assert_eq!(
+            (stats.casual.games, stats.casual.wins, stats.casual.losses),
+            (1, 1, 0)
+        );
         assert_eq!((stats.all.games, stats.all.wins), (1, 1));
-        assert_eq!(stats.ranked, PlayerStatsRow::default(), "nothing ranked here");
+        assert_eq!(
+            stats.ranked,
+            PlayerStatsRow::default(),
+            "nothing ranked here"
+        );
         Ok(())
     }
 
@@ -1339,17 +1422,33 @@ mod tests {
             false,
             Some(&wallet),
             Some(&wallet),
-            Tc { initial_ms: 60000, increment_ms: 1000 },
+            Tc {
+                initial_ms: 60000,
+                increment_ms: 1000,
+            },
             None,
             [None, None],
         )
         .await?;
         db.set_game_active(id).await?;
-        db.finish_and_enqueue(id, "white", "checkmate", "hash", None, "1. e4 e5", None, false)
-            .await?;
+        db.finish_and_enqueue(
+            id,
+            "white",
+            "checkmate",
+            "hash",
+            None,
+            "1. e4 e5",
+            None,
+            false,
+        )
+        .await?;
         db.update_ratings(id).await?;
 
-        assert_eq!(db.player_rating(&wallet).await?, 1500.0, "unrated self-play");
+        assert_eq!(
+            db.player_rating(&wallet).await?,
+            1500.0,
+            "unrated self-play"
+        );
         assert_eq!(
             db.rating_on(&wallet, false).await?,
             1500.0,
@@ -1360,13 +1459,7 @@ mod tests {
 
     /// Play one finished game on a ladder and hand back both wallets' ratings.
     #[cfg(test)]
-    async fn played(
-        db: &Db,
-        white: &str,
-        black: &str,
-        rated: bool,
-        result: &str,
-    ) -> Result<Uuid> {
+    async fn played(db: &Db, white: &str, black: &str, rated: bool, result: &str) -> Result<Uuid> {
         let id = Uuid::new_v4();
         db.create_game(
             id,
@@ -1374,14 +1467,26 @@ mod tests {
             rated,
             Some(white),
             Some(black),
-            Tc { initial_ms: 60000, increment_ms: 1000 },
+            Tc {
+                initial_ms: 60000,
+                increment_ms: 1000,
+            },
             None,
             [None, None],
         )
         .await?;
         db.set_game_active(id).await?;
-        db.finish_and_enqueue(id, result, "checkmate", "hash", None, "1. e4 e5", None, false)
-            .await?;
+        db.finish_and_enqueue(
+            id,
+            result,
+            "checkmate",
+            "hash",
+            None,
+            "1. e4 e5",
+            None,
+            false,
+        )
+        .await?;
         db.update_ratings(id).await?;
         Ok(id)
     }
@@ -1403,17 +1508,31 @@ mod tests {
         let bob = format!("0xb_{tag}");
 
         played(&db, &alice, &bob, false, "white").await?;
-        assert!(db.rating_on(&alice, false).await? > 1500.0, "casual win moves casual Elo");
+        assert!(
+            db.rating_on(&alice, false).await? > 1500.0,
+            "casual win moves casual Elo"
+        );
         assert!(db.rating_on(&bob, false).await? < 1500.0);
-        assert_eq!(db.player_rating(&alice).await?, 1500.0, "and NOT the ranked one");
+        assert_eq!(
+            db.player_rating(&alice).await?,
+            1500.0,
+            "and NOT the ranked one"
+        );
         assert_eq!(db.player_rating(&bob).await?, 1500.0);
 
         // The mirror: a ranked game leaves the casual ladder where it was.
         let casual_before = db.rating_on(&alice, false).await?;
         played(&db, &alice, &bob, true, "white").await?;
-        assert!(db.player_rating(&alice).await? > 1500.0, "ranked win moves ranked Elo");
+        assert!(
+            db.player_rating(&alice).await? > 1500.0,
+            "ranked win moves ranked Elo"
+        );
         assert!(db.player_rating(&bob).await? < 1500.0);
-        assert_eq!(db.rating_on(&alice, false).await?, casual_before, "casual untouched");
+        assert_eq!(
+            db.rating_on(&alice, false).await?,
+            casual_before,
+            "casual untouched"
+        );
         Ok(())
     }
 
@@ -1441,22 +1560,45 @@ mod tests {
             true, // ranked...
             Some(&alice),
             Some(&bob),
-            Tc { initial_ms: 60000, increment_ms: 1000 },
+            Tc {
+                initial_ms: 60000,
+                increment_ms: 1000,
+            },
             None, // ...with no wager on the game itself
             [None, None],
         )
         .await?;
         db.set_game_active(id).await?;
-        db.finish_and_enqueue(id, "white", "checkmate", "hash", None, "1. e4 e5", None, false)
-            .await?;
+        db.finish_and_enqueue(
+            id,
+            "white",
+            "checkmate",
+            "hash",
+            None,
+            "1. e4 e5",
+            None,
+            false,
+        )
+        .await?;
         db.update_ratings(id).await?;
 
-        assert!(db.player_rating(&alice).await? > 1500.0, "moves the ranked ladder");
-        assert_eq!(db.rating_on(&alice, false).await?, 1500.0, "not the casual one");
+        assert!(
+            db.player_rating(&alice).await? > 1500.0,
+            "moves the ranked ladder"
+        );
+        assert_eq!(
+            db.rating_on(&alice, false).await?,
+            1500.0,
+            "not the casual one"
+        );
         let stats = db.player_stats(&alice).await?;
         assert_eq!(stats.ranked.games, 1);
         assert_eq!(stats.casual.games, 0);
-        assert_eq!(stats.ranked.net, Decimal::ZERO, "ranked, but nothing was staked");
+        assert_eq!(
+            stats.ranked.net,
+            Decimal::ZERO,
+            "ranked, but nothing was staked"
+        );
         Ok(())
     }
 
@@ -1501,7 +1643,9 @@ mod tests {
         // `GROUP BY` returns NO row for a ladder the player has never touched,
         // so the fold has to invent the zeroes. The profile must render `0`,
         // not a blank tile.
-        let s = db.player_stats(&format!("0xZ_{}", Uuid::new_v4().simple())).await?;
+        let s = db
+            .player_stats(&format!("0xZ_{}", Uuid::new_v4().simple()))
+            .await?;
         assert_eq!(s.all, PlayerStatsRow::default());
         assert_eq!(s.casual, PlayerStatsRow::default());
         assert_eq!(s.ranked, PlayerStatsRow::default());

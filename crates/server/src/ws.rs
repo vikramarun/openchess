@@ -29,7 +29,11 @@ pub async fn ws_handler(
     // Abuse guardrails on a public endpoint (spectators need no auth): throttle
     // upgrade churn per-IP, then cap concurrent sockets globally + per-IP so a
     // flood of connections can't exhaust the node.
-    let guard = match state.0.limits.admit_ws(&headers, &state.0.limits.game_conns) {
+    let guard = match state
+        .0
+        .limits
+        .admit_ws(&headers, &state.0.limits.game_conns)
+    {
         Ok(g) => g,
         Err(resp) => return resp,
     };

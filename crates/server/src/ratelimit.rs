@@ -228,7 +228,10 @@ impl RateLimits {
                 env_parse("RL_CREATE_BURST", 20),
                 env_parse("RL_CREATE_PER_SEC", 0.5),
             ),
-            ws: TokenBucket::new(env_parse("RL_WS_BURST", 60), env_parse("RL_WS_PER_SEC", 2.0)),
+            ws: TokenBucket::new(
+                env_parse("RL_WS_BURST", 60),
+                env_parse("RL_WS_PER_SEC", 2.0),
+            ),
             reads: TokenBucket::new(
                 env_parse("RL_READS_BURST", 60),
                 env_parse("RL_READS_PER_SEC", 5.0),

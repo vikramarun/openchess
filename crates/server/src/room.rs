@@ -754,8 +754,14 @@ mod tests {
     fn no_show_forfeits_to_the_present_ready_side() {
         // White connected + ready, Black never connected → White wins by
         // forfeit and takes the stake. Symmetric for Black.
-        assert_eq!(reap_forfeit_winner(true, true, false, false), Some(Color::White));
-        assert_eq!(reap_forfeit_winner(false, false, true, true), Some(Color::Black));
+        assert_eq!(
+            reap_forfeit_winner(true, true, false, false),
+            Some(Color::White)
+        );
+        assert_eq!(
+            reap_forfeit_winner(false, false, true, true),
+            Some(Color::Black)
+        );
     }
 
     #[test]

@@ -86,7 +86,10 @@ impl OpeningBook {
 
         // All entries for this key sit contiguously (the file is key-sorted).
         let lo = self.entries.partition_point(|e| e.key < key);
-        let n = self.entries[lo..].iter().take_while(|e| e.key == key).count();
+        let n = self.entries[lo..]
+            .iter()
+            .take_while(|e| e.key == key)
+            .count();
         let entry = self.choose(&self.entries[lo..lo + n])?;
 
         // Match the encoded Polyglot move against a legal move and emit UCI.
@@ -253,7 +256,9 @@ mod tests {
         // P(missing one) < (3/5)^200 — not a flaky assertion.
         assert_eq!(
             seen,
-            ["d2d4".to_string(), "e2e4".to_string()].into_iter().collect()
+            ["d2d4".to_string(), "e2e4".to_string()]
+                .into_iter()
+                .collect()
         );
     }
 
@@ -283,8 +288,8 @@ mod shipped_book {
     use shakmaty::san::San;
 
     fn book() -> OpeningBook {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/house-book.bin");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/house-book.bin");
         OpeningBook::open(&path, 16, BookPolicy::Weighted).expect("shipped book must load")
     }
 
@@ -292,7 +297,10 @@ mod shipped_book {
     fn after(moves: &str) -> Chess {
         let mut pos = Chess::default();
         for tok in moves.split_whitespace() {
-            let m = San::from_ascii(tok.as_bytes()).unwrap().to_move(&pos).unwrap();
+            let m = San::from_ascii(tok.as_bytes())
+                .unwrap()
+                .to_move(&pos)
+                .unwrap();
             pos = pos.play(&m).unwrap();
         }
         pos
@@ -301,8 +309,14 @@ mod shipped_book {
     #[test]
     fn shipped_book_answers_the_start_position() {
         let b = book();
-        assert!(b.positions() > 400, "book looks truncated: {}", b.positions());
-        let mv = b.pick(&Chess::default(), 0).expect("no book move for startpos");
+        assert!(
+            b.positions() > 400,
+            "book looks truncated: {}",
+            b.positions()
+        );
+        let mv = b
+            .pick(&Chess::default(), 0)
+            .expect("no book move for startpos");
         assert!(
             ["e2e4", "d2d4", "c2c4", "g1f3"].contains(&mv.as_str()),
             "unexpected first move {mv}"
@@ -340,16 +354,21 @@ mod shipped_book {
         let repertoire_order = after("e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6");
         assert_eq!(
             shuffled.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0,
-            repertoire_order.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0,
+            repertoire_order
+                .zobrist_hash::<Zobrist64>(EnPassantMode::Legal)
+                .0,
             "these move orders should reach one position"
         );
-        assert!(b.pick(&shuffled, 10).is_some(), "no entry after a transposition");
+        assert!(
+            b.pick(&shuffled, 10).is_some(),
+            "no entry after a transposition"
+        );
     }
 
     #[test]
     fn shipped_book_stops_at_the_ply_limit() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/house-book.bin");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/house-book.bin");
         let b = OpeningBook::open(&path, 4, BookPolicy::Weighted).unwrap();
         assert!(b.pick(&Chess::default(), 0).is_some());
         assert!(b.pick(&after("e4 c5 Nf3 d6"), 4).is_none());

@@ -137,14 +137,11 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
         // because clients shipped before this line polled anonymously.
         println!("game {}/{}: waiting for an opponent...", i + 1, opts.count);
         let (game_id, token) = loop {
-            let t: Value = with_auth(
-                client.get(format!("{http}/queue/{ticket_id}")),
-                &auth_token,
-            )
-            .send()
-            .await?
-            .json()
-            .await?;
+            let t: Value = with_auth(client.get(format!("{http}/queue/{ticket_id}")), &auth_token)
+                .send()
+                .await?
+                .json()
+                .await?;
             if t["status"] == "matched" {
                 break (
                     t["game_id"].as_str().unwrap_or_default().to_string(),
