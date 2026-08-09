@@ -20,6 +20,19 @@ contract Handler {
     uint256 tournamentCounter;
     bytes32[] tournaments;
 
+    /// The two leaves committed by a root settle, kept so `claimTournament` can
+    /// rebuild the proof the contract will verify. Two leaves is the smallest
+    /// tree that still exercises sorted-pair hashing and a non-empty proof.
+    struct RootPayout {
+        address a0;
+        uint256 amt0;
+        address a1;
+        uint256 amt1;
+    }
+
+    mapping(bytes32 => RootPayout) rootPayouts;
+    bytes32[] rootTournaments;
+
     /// Every tournament this handler has opened, so the invariant can account
     /// for the pools the escrow still holds.
     function tournamentIdsAll() external view returns (bytes32[] memory) {
@@ -158,6 +171,79 @@ contract Handler {
         if (settled || block.timestamp <= openedAt + escrow.settleTimeout()) return;
         if (escrow.sponsorship(t, a) == 0) return;
         escrow.refundSponsorship(t, a);
+    }
+
+    /// Settle by committing a Merkle root, the path large fields take.
+    ///
+    /// This half of tournament settlement was outside the invariant entirely:
+    /// with only the direct settle fuzzed, `payoutRoot` was never set, so
+    /// `claimTournament` below was unreachable and the regime where the escrow
+    /// holds a pool it has already committed but not yet paid out — the only
+    /// one where `pool - claimedAmount` is neither 0 nor the whole pool — was
+    /// never asserted against.
+    function settleTournamentRoot(uint256 tSeed, uint256 seed) public {
+        if (tournaments.length == 0) return;
+        bytes32 t = tournaments[tSeed % tournaments.length];
+        (, uint256 pool,,, uint64 openedAt, bool settled,,) = escrow.tournaments(t);
+        if (settled || block.timestamp > openedAt + escrow.settleTimeout()) return;
+
+        RootPayout memory p;
+        p.a0 = actors[seed % 3];
+        p.a1 = actors[(seed / 7 + 1) % 3];
+        // Distinct leaves: the same account twice would be blocked by
+        // `tournamentClaimed` on the second claim, so it would only waste a run.
+        if (p.a0 == p.a1) return;
+
+        // Sum to at most the pool, so both an exhaustive split and one leaving a
+        // rake remainder are covered.
+        p.amt0 = pool == 0 ? 0 : uint256(keccak256(abi.encode(seed, "a"))) % (pool + 1);
+        uint256 rest = pool - p.amt0;
+        p.amt1 = rest == 0 ? 0 : uint256(keccak256(abi.encode(seed, "b"))) % (rest + 1);
+
+        // Signing lives in its own frame — inline it and this function is one
+        // local past "stack too deep".
+        _commitRoot(t, p);
+        rootPayouts[t] = p;
+        rootTournaments.push(t);
+    }
+
+    function _commitRoot(bytes32 t, RootPayout memory p) private {
+        bytes32 l0 = _leaf(p.a0, p.amt0);
+        bytes32 l1 = _leaf(p.a1, p.amt1);
+        bytes32 root =
+            l0 <= l1 ? keccak256(abi.encodePacked(l0, l1)) : keccak256(abi.encodePacked(l1, l0));
+        uint256 total = p.amt0 + p.amt1;
+        uint256 deadline = 1 << 250;
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(oracleKey, escrow.digestTournamentRoot(t, root, total, deadline));
+        escrow.settleTournamentRoot(t, root, total, deadline, v, r, s);
+    }
+
+    /// Claim one committed leaf. Bounded by `claimedAmount + amount <= pool`
+    /// onchain, which is the check the corrected invariant term relies on.
+    function claimTournament(uint256 tSeed, uint256 which) public {
+        if (rootTournaments.length == 0) return;
+        bytes32 t = rootTournaments[tSeed % rootTournaments.length];
+        RootPayout memory p = rootPayouts[t];
+
+        address who;
+        uint256 amount;
+        bytes32 sibling;
+        if (which % 2 == 0) {
+            (who, amount, sibling) = (p.a0, p.amt0, _leaf(p.a1, p.amt1));
+        } else {
+            (who, amount, sibling) = (p.a1, p.amt1, _leaf(p.a0, p.amt0));
+        }
+        if (escrow.tournamentClaimed(t, who)) return;
+
+        bytes32[] memory proof = new bytes32[](1);
+        proof[0] = sibling;
+        escrow.claimTournament(t, who, amount, proof);
+    }
+
+    /// OZ-style double-hashed leaf, matching `ChessEscrow._verifyProof`.
+    function _leaf(address a, uint256 amt) internal pure returns (bytes32) {
+        return keccak256(bytes.concat(keccak256(abi.encode(a, amt))));
     }
 
     /// Advance time in small steps so a sequence crosses the settle timeout part
