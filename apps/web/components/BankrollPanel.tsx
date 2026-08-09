@@ -169,18 +169,21 @@ export function BankrollPanel({
   return (
     <div className="panel">
       <b style={{ color: "var(--text-strong)" }}>Balance</b>
+      {/* Label before figure, in the DOM as well as on screen: these are rows,
+          and reordering them in CSS would leave a screen reader announcing
+          "0, available" while the popover reads "available, 0". */}
       <div className="bankroll-stats">
         <div className="bk">
-          <span className="bk-v">{fmtUsdc(available as bigint)}</span>
           <span className="bk-l">Available (USDC)</span>
+          <span className="bk-v">{fmtUsdc(available as bigint)}</span>
         </div>
         <div className="bk">
-          <span className="bk-v">{fmtUsdc(locked as bigint)}</span>
           <span className="bk-l">Locked in games</span>
+          <span className="bk-v">{fmtUsdc(locked as bigint)}</span>
         </div>
         <div className="bk">
-          <span className="bk-v">{fmtUsdc(walletBal as bigint)}</span>
           <span className="bk-l">In wallet</span>
+          <span className="bk-v">{fmtUsdc(walletBal as bigint)}</span>
         </div>
       </div>
 
