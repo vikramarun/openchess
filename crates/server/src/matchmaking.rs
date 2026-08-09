@@ -10,7 +10,7 @@
 //! TTL eviction (the Redis layer in production).
 
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1392,6 +1392,9 @@ async fn gauntlet_stop(
 struct Tournament {
     name: String,
     buy_in: Option<String>,
+    /// How the pool is divided among the final standings. Creator-chosen, fixed
+    /// at creation, persisted.
+    payout: PayoutSpec,
     /// The authenticated wallet that created the tournament (if any). Only the
     /// organizer may start it.
     organizer: Option<String>,
@@ -1529,6 +1532,9 @@ struct TourneyCreateReq {
     initial_secs: u64,
     #[serde(default = "dinc")]
     increment_secs: u64,
+    /// How to divide the pool: basis points per finishing place, best first
+    /// (`{"bps":[5000,3000,2000]}`). Omitted = the default 65/25/10.
+    payout: Option<PayoutSpec>,
 }
 
 #[derive(Serialize)]
@@ -1550,6 +1556,14 @@ async fn tourney_create(
     // the logs — the same reasons every other user-supplied label here goes
     // through sanitize_label (control chars out, length capped).
     let name = sanitize_label(&req.name).ok_or(StatusCode::BAD_REQUEST)?;
+    // Validate the prize structure BEFORE anything commits — in particular
+    // before a buy-in tournament opens its onchain pool below. A structure
+    // rejected at settlement time would already have locked everyone's entry.
+    let payout = req.payout.unwrap_or_default();
+    if let Err(why) = payout.validate() {
+        tracing::warn!("rejecting tournament payout structure: {why}");
+        return Err(StatusCode::BAD_REQUEST);
+    }
     // Global ceiling, casual included: every tournament in the map is walked by
     // every `GET /tournaments` under the lobby mutex, and a casual one costs
     // nothing to create and lives a day — unbounded, the map is a DoS surface.
@@ -1615,6 +1629,7 @@ async fn tourney_create(
         Tournament {
             name,
             buy_in: req.buy_in,
+            payout,
             organizer,
             initial_secs: req.initial_secs,
             increment_secs: req.increment_secs,
@@ -1715,10 +1730,12 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
                 serde_json::to_value(&t.players).unwrap_or_else(|_| json!([])),
                 bots_json(&t.entrant_bots),
                 serde_json::to_value(&t.entrant_wallets).unwrap_or_else(|_| json!({})),
+                serde_json::to_value(&t.payout).unwrap_or_else(|_| json!({})),
             )
         })
     };
-    if let Some((name, buy_in, organizer, init, inc, status, players, bots, wallets)) = snap {
+    if let Some((name, buy_in, organizer, init, inc, status, players, bots, wallets, payout)) = snap
+    {
         db.upsert_tournament(
             tid,
             &name,
@@ -1730,6 +1747,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
             &players,
             &bots,
             &wallets,
+            &payout,
         )
         .await
         .map_err(|e| {
@@ -2011,6 +2029,13 @@ struct TourneyView {
     /// The wallet that may start a buy-in tournament (`None` for casual, which
     /// anyone may start).
     organizer: Option<String>,
+    /// How the pool is divided: basis points per finishing place, best first.
+    payout: PayoutSpec,
+    /// What each `standings` row would be paid if the event ended now, in USDC
+    /// base units and index-aligned with `standings`. Empty when there is no
+    /// pool. Produced by the same `payout_split` that settles, so the table a
+    /// player is looking at is the one that pays them.
+    prizes: Vec<String>,
     /// Seconds since creation. Gives the lobby a stable sort order that doesn't
     /// depend on a hash map's iteration order.
     age_secs: u64,
@@ -2131,19 +2156,47 @@ fn pairings_of(t: &Tournament, scope: Pairings) -> Vec<TourneyPairing> {
     out
 }
 
+/// What the pool would pay each standings row if the event ended now.
+///
+/// Derived (`buy_in × entrants`) rather than read from the chain: this runs
+/// under the lobby lock on a route every client polls, and today entries are
+/// the only thing that can fund a pool, so the two agree. Settlement reads the
+/// chain (see `distribute_pool`) — once anything else can add to a pool, this
+/// needs a cached figure from the same source rather than a fresh derivation.
+fn prizes_of(t: &Tournament, standings: &[Standing]) -> Vec<String> {
+    let Some(buy_in) = t
+        .buy_in
+        .as_deref()
+        .and_then(|b| b.parse::<u128>().ok())
+        .and_then(|b| b.checked_mul(standings.len() as u128))
+    else {
+        return Vec::new(); // casual, or an unparseable buy-in
+    };
+    let ranked: Vec<(String, f64)> = standings
+        .iter()
+        .map(|s| (s.player.clone(), s.score))
+        .collect();
+    payout_split(buy_in, &ranked, &t.payout)
+        .map(|p| p.iter().map(|amt| amt.to_string()).collect())
+        .unwrap_or_default()
+}
+
 fn view_of(t: &Tournament, scope: Pairings) -> TourneyView {
+    let standings = standings_of(t);
     TourneyView {
         name: t.name.clone(),
         buy_in: t.buy_in.clone(),
         status: t.status.clone(),
         players: t.players.clone(),
         games: pairings_of(t, scope),
-        standings: standings_of(t),
+        prizes: prizes_of(t, &standings),
+        standings,
         current_round: t.current_round,
         total_rounds: t.rounds.len(),
         initial_secs: t.initial_secs,
         increment_secs: t.increment_secs,
         organizer: t.organizer.clone(),
+        payout: t.payout.clone(),
         age_secs: t.created_at.elapsed().as_secs(),
     }
 }
@@ -2286,6 +2339,10 @@ async fn tourney_my_games(
 /// player isn't in yet from being reaped before they're played. Games are
 /// unwagered; the buy-in *pool* is the money, decided by final standings.
 /// Organizer-authenticated for buy-in tournaments.
+///
+/// Also the **resume** path for a tournament the server paused mid-round
+/// (maintenance drain, room ceiling): it keeps the existing schedule, scores and
+/// round position and re-dispatches only the pairings that never got a game.
 async fn tourney_start(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -2310,22 +2367,28 @@ async fn tourney_start(
                 return Err(StatusCode::FORBIDDEN);
             }
         }
-        if t.status != "open" || t.players.len() < 2 {
-            return Err(StatusCode::CONFLICT);
-        }
         validate_tc(t.initial_secs, t.increment_secs)?;
-        // Build the round schedule by player id, then start at round 0.
-        let players = t.players.clone();
-        t.rounds = round_robin_rounds(players.len())
-            .iter()
-            .map(|round| {
-                round
-                    .iter()
-                    .map(|&(i, j)| (players[i].clone(), players[j].clone()))
-                    .collect()
-            })
-            .collect();
-        t.current_round = 0;
+        // Resuming a tournament the server paused mid-round (see
+        // `dispatch_from_current`) keeps its schedule, scores and position —
+        // rebuilding the schedule would re-pair a field that has already played
+        // rounds, and resetting `current_round` would replay them.
+        if t.status != "paused" {
+            if t.status != "open" || t.players.len() < 2 {
+                return Err(StatusCode::CONFLICT);
+            }
+            // Build the round schedule by player id, then start at round 0.
+            let players = t.players.clone();
+            t.rounds = round_robin_rounds(players.len())
+                .iter()
+                .map(|round| {
+                    round
+                        .iter()
+                        .map(|&(i, j)| (players[i].clone(), players[j].clone()))
+                        .collect()
+                })
+                .collect();
+            t.current_round = 0;
+        }
         t.status = "running".into();
     }
     if let Some(db) = &state.0.db {
@@ -2370,7 +2433,40 @@ async fn dispatch_from_current(state: &AppState, tid: Uuid) {
             settle_tournament(state, tid).await;
             return;
         };
-        if dispatch_round(state, tid, round_idx).await > 0 {
+        let d = dispatch_round(state, tid, round_idx).await;
+        if let Some(code) = d.blocked {
+            // The server declined to create a game. Park the tournament exactly
+            // where it is: `current_round` does not advance, no pairing is
+            // scored, and nothing settles. Any games this round DID start keep
+            // playing and record their results; `record_outcome` only advances a
+            // "running" tournament, so a paused one freezes instead of falling
+            // through to settlement on a half-played round.
+            //
+            // Resume with POST /tournaments/{id}/start once the cause has
+            // cleared — dispatch_round is idempotent per pairing, so the round
+            // picks up exactly where it stopped.
+            if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+                t.status = "paused".into();
+            }
+            if let Some(db) = &state.0.db {
+                let _ = db.set_tournament_status(tid, "paused").await;
+            }
+            tracing::error!(
+                tournament = %tid,
+                round = round_idx,
+                status = %code,
+                "round dispatch blocked — tournament paused, NOT scored"
+            );
+            crate::alert::fire(format!(
+                "⚠️ OpenChess: tournament {tid} paused at round {} — the server refused to \
+                 create its games ({code}). Nothing was scored and no pool was settled. \
+                 Resume it with POST /tournaments/{tid}/start once the cause has cleared \
+                 (maintenance drain? room ceiling?).",
+                round_idx + 1
+            ));
+            return;
+        }
+        if d.live > 0 {
             return; // games in flight; results_task advances when they finish
         }
         // All-forfeit (or empty) round → advance and try the next.
@@ -2380,26 +2476,74 @@ async fn dispatch_from_current(state: &AppState, tid: Uuid) {
     }
 }
 
+/// What one `dispatch_round` call left behind.
+struct RoundDispatch {
+    /// Unresolved games in this round after the call — what `round_remaining`
+    /// was set to. Zero means the round is fully resolved and the schedule may
+    /// advance.
+    live: usize,
+    /// Set when the SERVER refused to create a game: the maintenance drain, the
+    /// global room ceiling, a failed persist, a failed escrow open. Categorically
+    /// different from a pairing that *cannot be played* (a bot seat that is
+    /// offline), which is a forfeit and scores like a game. See
+    /// `dispatch_from_current` for what this stops.
+    blocked: Option<StatusCode>,
+}
+
 /// Dispatch every pairing of round `round_idx`: create a game per pairing whose
 /// seats can be filled, and immediately FORFEIT any pairing where a bot seat is
 /// offline/busy (its opponent wins; both unavailable ⇒ draw). Sets
-/// `round_remaining` to (and returns) the number of real games created.
-async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize {
+/// `round_remaining` to the number of unresolved games in the round.
+///
+/// **Idempotent per pairing.** A pairing that already has a game or a recorded
+/// forfeit for this round is skipped, so a round that was only partly dispatched
+/// (because the server blocked partway through) can be finished by calling this
+/// again — without double-creating the games that did get through.
+async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundDispatch {
     // Snapshot pairings + tc + bot entrants (never hold the lock across .await).
     // The buy-in comes along as a bool: a paid tournament's games are ranked
     // even though no pairing carries a stake of its own (the pool settles
     // separately), and this is the only place that knows it. The amount is
     // irrelevant here, so don't clone the string every round.
-    let (pairings, tc, bots, engines, wallets, ladder) = {
+    let (pairings, resolved, tc, bots, engines, wallets, ladder) = {
         let ts = state.0.lobby.tournaments.lock();
-        let Some(t) = ts.get(&tid) else { return 0 };
-        let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
-        let Ok(tc) = validate_tc(t.initial_secs, t.increment_secs) else {
-            return 0;
+        let Some(t) = ts.get(&tid) else {
+            return RoundDispatch {
+                live: 0,
+                blocked: None,
+            };
         };
+        let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
+        // An unusable time control can never dispatch a game, so treat it as
+        // blocked rather than as an empty round: advancing past it would walk
+        // the whole schedule scoring nothing and settle the pool on a field
+        // where nobody played. Can't happen from the normal flow (tc is
+        // validated at create and again at start) — this is the fail-closed
+        // direction for the one that slips through.
+        let Ok(tc) = validate_tc(t.initial_secs, t.increment_secs) else {
+            return RoundDispatch {
+                live: 0,
+                blocked: Some(StatusCode::INTERNAL_SERVER_ERROR),
+            };
+        };
+        // Pairings already resolved in this round, by game or by forfeit. This
+        // is what makes re-dispatch safe (see the doc comment).
+        let resolved: HashSet<(String, String)> = t
+            .games
+            .iter()
+            .filter(|g| g.round == round_idx)
+            .map(|g| (g.white.clone(), g.black.clone()))
+            .chain(
+                t.forfeits
+                    .iter()
+                    .filter(|f| f.round == round_idx)
+                    .map(|f| (f.white.clone(), f.black.clone())),
+            )
+            .collect();
         let ladder = tournament_ladder(t.buy_in.as_deref());
         (
             pairings,
+            resolved,
             tc,
             t.entrant_bots.clone(),
             t.entrant_engines.clone(),
@@ -2445,7 +2589,11 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
 
     let mut created: Vec<TourneyGame> = Vec::new();
     let mut forfeits: Vec<(String, String, Option<Color>)> = Vec::new();
+    let mut blocked: Option<StatusCode> = None;
     for (white, black) in pairings {
+        if resolved.contains(&(white.clone(), black.clone())) {
+            continue; // already played or forfeited in this round
+        }
         let mut claimed: Vec<String> = Vec::new();
         let wd = make_seat(&white, &mut claimed);
         let bd = make_seat(&black, &mut claimed);
@@ -2476,11 +2624,26 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
                         white_token: resp.white_token,
                         black_token: resp.black_token,
                     }),
-                    // start_game aborted (an agent vanished after claim): neither
-                    // side got to play → score it a draw; release our claims.
-                    Err(_) => {
+                    // The agent vanished between the claim and the dispatch:
+                    // neither side got to play → score it a draw (start_game has
+                    // already aborted the game and refunded any escrow).
+                    Err(StatusCode::FAILED_DEPENDENCY) => {
                         release(&claimed);
                         forfeits.push((white, black, None));
+                    }
+                    // Anything else is the SERVER declining, not the pairing
+                    // failing: the maintenance drain, the room ceiling, a failed
+                    // persist, a failed escrow open. Scoring these as draws
+                    // invents a result nobody played — and because an all-forfeit
+                    // round makes `dispatch_from_current` advance, one drained
+                    // round used to cascade through the entire remaining
+                    // schedule and settle a real USDC pool on phantom results,
+                    // permanently (`AlreadySettled`). Stop the round instead and
+                    // leave every unplayed pairing unscored.
+                    Err(e) => {
+                        release(&claimed);
+                        blocked = Some(e);
+                        break;
                     }
                 }
             }
@@ -2523,21 +2686,39 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
             t.games.extend(created.iter().cloned());
         }
     }
-    {
-        // Count only games still unresolved — a game that already finished
-        // removed itself from game_to_tournament. Snapshot that map first (its
-        // own lock, released) to preserve record_outcome's lock order.
+    let live = {
+        // Every unresolved game of this round, not just the ones created by this
+        // call: a re-dispatch (see the doc comment) leaves earlier games of the
+        // same round still in flight, and counting only the new ones would let
+        // the round "finish" while they were still being played.
+        //
+        // A game that already finished removed itself from game_to_tournament,
+        // so that map is the liveness check. Take the candidate ids under the
+        // tournaments lock, release it, then consult the map — never nested, to
+        // preserve record_outcome's lock order.
+        let candidates: Vec<GameId> = state
+            .0
+            .lobby
+            .tournaments
+            .lock()
+            .get(&tid)
+            .map(|t| {
+                t.games
+                    .iter()
+                    .filter(|g| g.round == round_idx && g.result.is_none())
+                    .map(|g| g.game_id)
+                    .collect()
+            })
+            .unwrap_or_default();
         let live = {
             let map = state.0.lobby.game_to_tournament.lock();
-            created
-                .iter()
-                .filter(|g| map.contains_key(&g.game_id))
-                .count()
+            candidates.iter().filter(|id| map.contains_key(id)).count()
         };
         if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
             t.round_remaining = live;
         }
-    }
+        live
+    };
     if let Some(db) = &state.0.db {
         for g in &created {
             let _ = db
@@ -2545,14 +2726,14 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
                 .await;
         }
     }
-    created.len()
+    RoundDispatch { live, blocked }
 }
 
 /// Settle a finished tournament: rank all entrants, compute a top-heavy payout
 /// split of the pool, and (for a buy-in tournament) distribute onchain.
 async fn settle_tournament(state: &AppState, tid: Uuid) {
     // Snapshot terms + final standings (all entrants, including 0-score).
-    let (buy_in, standings) = {
+    let (buy_in, payout, standings) = {
         let tourneys = state.0.lobby.tournaments.lock();
         let Some(t) = tourneys.get(&tid) else {
             return;
@@ -2563,12 +2744,12 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
             .into_iter()
             .map(|(p, score)| (p.to_string(), score))
             .collect();
-        (t.buy_in.clone(), s)
+        (t.buy_in.clone(), t.payout.clone(), s)
     };
     tracing::info!(tournament = %tid, ?standings, "tournament complete — final standings");
 
     if let Some(buy_in_str) = buy_in {
-        if let Err(e) = distribute_pool(state, tid, &buy_in_str, &standings).await {
+        if let Err(e) = distribute_pool(state, tid, &buy_in_str, &standings, &payout).await {
             tracing::error!(tournament = %tid, "tournament settlement failed: {e:#}");
             // Leave status 'complete' so it can be inspected — but nothing
             // automatically retries this (the schedule is exhausted, so no
@@ -2664,9 +2845,32 @@ pub async fn recover_tournaments(state: &AppState) {
                 let age = Duration::from_secs(r.age_secs.max(0) as u64).min(TOURNEY_TTL);
                 let created_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
                 let players: Vec<String> = serde_json::from_value(r.players).unwrap_or_default();
+                // The prize structure has to come back exactly, or the field is
+                // paid a table it never agreed to — silently, since the money
+                // still moves and the standings still look right. A row whose
+                // payout won't parse is skipped rather than defaulted when
+                // there is money on it; a casual one can safely take the default.
+                let payout: Option<PayoutSpec> = serde_json::from_value(r.payout.clone())
+                    .ok()
+                    .filter(|p: &PayoutSpec| p.validate().is_ok());
+                let payout = match (payout, r.buy_in.is_some()) {
+                    (Some(p), _) => p,
+                    (None, false) => PayoutSpec::default(),
+                    (None, true) => {
+                        tracing::error!(
+                            tournament = %r.id,
+                            payout = %r.payout,
+                            "skipping rehydration: buy-in tournament has an unreadable payout \
+                             structure, and paying the default would not be what its entrants \
+                             agreed to (they refund via claimRefund)"
+                        );
+                        continue;
+                    }
+                };
                 ts.entry(r.id).or_insert_with(|| Tournament {
                     name: r.name,
                     buy_in: r.buy_in,
+                    payout,
                     organizer: r.organizer,
                     initial_secs: r.initial_secs.max(0) as u64,
                     increment_secs: r.increment_secs.max(0) as u64,
@@ -2726,26 +2930,72 @@ pub async fn recover_tournaments(state: &AppState) {
     }
 }
 
-/// Top-heavy payout weights (basis points) by field size.
-fn payout_weights(n: usize) -> Vec<u128> {
-    match n {
-        0 => vec![],
-        1 => vec![10_000],
-        2 => vec![7_000, 3_000],
-        _ => {
-            let mut w = vec![6_500, 2_500, 1_000];
-            w.resize(n, 0);
-            w
+/// The default structure when a creator doesn't specify one: top-heavy 65/25/10.
+const DEFAULT_PAYOUT_BPS: [u16; 3] = [6_500, 2_500, 1_000];
+
+/// How a tournament divides its pool: basis points per finishing place, best
+/// first. Chosen by the creator, fixed at creation, and persisted — a structure
+/// that didn't survive a restart would pay a field something other than what it
+/// was promised, silently, since the money still moves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayoutSpec {
+    pub bps: Vec<u16>,
+}
+
+impl Default for PayoutSpec {
+    fn default() -> Self {
+        Self {
+            bps: DEFAULT_PAYOUT_BPS.to_vec(),
         }
+    }
+}
+
+impl PayoutSpec {
+    /// Reject a structure that can't be paid out, at CREATE time — a field that
+    /// only discovers its prize table is unpayable at settlement has already
+    /// locked its buy-ins.
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.bps.is_empty() {
+            return Err("payout structure names no places");
+        }
+        if self.bps.len() > MAX_TOURNAMENT_PLAYERS {
+            return Err("payout structure names more places than a field can hold");
+        }
+        if !self.bps.windows(2).all(|w| w[0] >= w[1]) {
+            return Err("payout structure must not pay a lower place more than a higher one");
+        }
+        // Exactly, not at most. Tournaments distribute their whole pool today
+        // (the contract rakes `pool - sum(payouts)`), so accepting a short sum
+        // would silently convert a creator's arithmetic slip into house revenue.
+        // A platform rake, if we ever want one, should be an explicit parameter.
+        if self.bps.iter().map(|b| *b as u32).sum::<u32>() != 10_000 {
+            return Err("payout structure must sum to exactly 10000 bps");
+        }
+        Ok(())
+    }
+
+    /// The structure's weights resolved for a field of `n`, best first.
+    ///
+    /// A field SMALLER than the structure (a 50/30/20 event two people turn up
+    /// for) orphans the tail. Callers divide by the returned weights' own total
+    /// rather than by 10_000, which redistributes that orphaned weight across
+    /// the places that do exist, in proportion — dropping it instead would leave
+    /// the pool short and hand the difference to the contract's rake, i.e. pay
+    /// the house for a thin field. A field LARGER than the structure gets
+    /// zeros, which is what a top-heavy structure is for.
+    fn weights_for(&self, n: usize) -> Vec<u128> {
+        let mut w: Vec<u128> = self.bps.iter().take(n).map(|b| *b as u128).collect();
+        w.resize(n, 0);
+        w
     }
 }
 
 /// How a finished field's pool is divided, in standings order.
 ///
-/// Positions are worth `payout_weights` (65/25/10 for a field of 3+), and any
-/// rounding remainder goes to the top so the whole pool is distributed — the
-/// contract rakes `pool - sum(payouts)` to the fee recipient, so this MUST sum
-/// to exactly `pool`.
+/// Positions are worth what the tournament's `PayoutSpec` says (65/25/10 unless
+/// the creator chose otherwise), and any rounding remainder goes to the top so
+/// the whole pool is distributed — the contract rakes `pool - sum(payouts)` to
+/// the fee recipient, so this MUST sum to exactly `pool`.
 ///
 /// Tied brackets then share what their positions are collectively worth.
 /// Position alone used to decide the money, and position among equal scores is
@@ -2754,7 +3004,11 @@ fn payout_weights(n: usize) -> Vec<u128> {
 /// first. That is not a tiebreak, it is a prize for being early, worth more
 /// than winning a game; and join order is something an entrant controls, so it
 /// was a free and repeatable edge.
-fn payout_split(pool: u128, standings: &[(String, f64)]) -> anyhow::Result<Vec<u128>> {
+fn payout_split(
+    pool: u128,
+    standings: &[(String, f64)],
+    spec: &PayoutSpec,
+) -> anyhow::Result<Vec<u128>> {
     // Tied brackets are found by scanning for CONTIGUOUS equal scores, which is
     // only correct on ranked input: given [2.0, 1.0, 2.0] the two leaders would
     // be treated as separate brackets and paid 65% and 10%. The sole caller
@@ -2775,14 +3029,25 @@ fn payout_split(pool: u128, standings: &[(String, f64)]) -> anyhow::Result<Vec<u
         ));
     }
     let n = standings.len();
-    let weights = payout_weights(n);
+    let weights = spec.weights_for(n);
+    // Divide by the resolved weights' OWN total, not by 10_000: that is what
+    // renormalizes a structure naming more places than the field has, so the
+    // whole pool still reaches players (see `weights_for`). With a full-size
+    // field the total is 10_000 and this is the plain percentage split.
+    let total_w: u128 = weights.iter().sum();
+    if total_w == 0 {
+        // Unreachable via `validate` (weights are non-increasing and sum to
+        // 10_000, so the first place is always worth something) — but this
+        // divides, and a money path does not get to assume.
+        return Err(anyhow::anyhow!("payout structure pays nobody"));
+    }
     let mut by_rank = vec![0u128; n];
     let mut assigned = 0u128;
     for i in 0..n {
         by_rank[i] = pool
             .checked_mul(weights[i])
             .ok_or_else(|| anyhow::anyhow!("payout overflow"))?
-            / 10_000;
+            / total_w;
         assigned += by_rank[i];
     }
     if n > 0 {
@@ -2825,6 +3090,7 @@ async fn distribute_pool(
     tid: Uuid,
     buy_in_str: &str,
     standings: &[(String, f64)],
+    spec: &PayoutSpec,
 ) -> anyhow::Result<()> {
     let n = standings.len();
     // try_from, not `to::<u128>()`: this string can come back from Postgres via
@@ -2836,11 +3102,27 @@ async fn distribute_pool(
             .map_err(|_| anyhow::anyhow!("bad buy-in"))?,
     )
     .map_err(|_| anyhow::anyhow!("buy-in overflows u128"))?;
-    let pool = buy_in
-        .checked_mul(n as u128)
-        .ok_or_else(|| anyhow::anyhow!("pool overflow"))?;
 
-    let by_rank = payout_split(pool, standings)?;
+    // Read the pool from the chain rather than deriving it from the entrant
+    // count — see `tournament_pool`. A failed read is retriable, so fail rather
+    // than fall back to a derived figure that could exceed the real pool and
+    // revert the settlement (or undershoot it and rake the difference). Only a
+    // non-onchain sink (tests, the log sink) derives.
+    let pool = if state.0.settlement.is_onchain() {
+        let onchain = state
+            .0
+            .settlement
+            .tournament_pool(tid)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("could not read the onchain tournament pool"))?;
+        u128::try_from(onchain).map_err(|_| anyhow::anyhow!("pool overflows u128"))?
+    } else {
+        buy_in
+            .checked_mul(n as u128)
+            .ok_or_else(|| anyhow::anyhow!("pool overflow"))?
+    };
+
+    let by_rank = payout_split(pool, standings, spec)?;
 
     // `standings` and `by_rank` are the same order, so read across by index —
     // a name-keyed map would silently pay one of them nothing if two entrants
@@ -3697,6 +3979,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -3743,7 +4026,7 @@ mod tests {
             .iter()
             .map(|s| (s.player.clone(), s.score))
             .collect();
-        let amounts = payout_split(30_000_000, &field).expect("split");
+        let amounts = payout_split(30_000_000, &field, &PayoutSpec::default()).expect("split");
         assert_eq!(
             amounts[0], amounts[1],
             "a shared place must mean a shared prize"
@@ -3764,14 +4047,19 @@ mod tests {
         );
     }
 
-    /// Drive the REAL `payout_split` from a list of scores.
-    fn payouts_for(scores: &[f64], buy_in: u128) -> Vec<u128> {
+    /// Drive the REAL `payout_split` from a list of scores, under `spec`.
+    fn payouts_with(scores: &[f64], buy_in: u128, spec: &PayoutSpec) -> Vec<u128> {
         let standings: Vec<(String, f64)> = scores
             .iter()
             .enumerate()
             .map(|(i, s)| (format!("p{i}"), *s))
             .collect();
-        payout_split(buy_in * scores.len() as u128, &standings).expect("split")
+        payout_split(buy_in * scores.len() as u128, &standings, spec).expect("split")
+    }
+
+    /// …under the default 65/25/10.
+    fn payouts_for(scores: &[f64], buy_in: u128) -> Vec<u128> {
+        payouts_with(scores, buy_in, &PayoutSpec::default())
     }
 
     #[test]
@@ -3814,6 +4102,236 @@ mod tests {
     }
 
     #[test]
+    fn a_creator_defined_structure_replaces_the_default() {
+        const USDC: u128 = 1_000_000;
+        let field = [3.0, 2.0, 1.0, 0.0];
+
+        // The default is unchanged for anyone who doesn't ask.
+        assert_eq!(
+            payouts_for(&field, 10 * USDC),
+            vec![26 * USDC, 10 * USDC, 4 * USDC, 0]
+        );
+
+        let wta = PayoutSpec { bps: vec![10_000] };
+        assert_eq!(
+            payouts_with(&field, 10 * USDC, &wta),
+            vec![40 * USDC, 0, 0, 0],
+            "winner takes all"
+        );
+
+        let flat = PayoutSpec {
+            bps: vec![2_500; 4],
+        };
+        assert_eq!(
+            payouts_with(&field, 10 * USDC, &flat),
+            vec![10 * USDC; 4],
+            "a flat field returns every buy-in"
+        );
+
+        let split = PayoutSpec {
+            bps: vec![5_000, 3_000, 2_000],
+        };
+        let p = payouts_with(&field, 10 * USDC, &split);
+        assert_eq!(p, vec![20 * USDC, 12 * USDC, 8 * USDC, 0]);
+        assert_eq!(p.iter().sum::<u128>(), 40 * USDC, "the whole pool, always");
+    }
+
+    #[test]
+    fn a_structure_wider_than_the_field_still_pays_the_whole_pool() {
+        const USDC: u128 = 1_000_000;
+        // A 50/30/20 event only two entrants turn up for. Third place's 20% is
+        // redistributed across the places that exist, in proportion (5:3) —
+        // dropping it would leave the pool a fifth short, and the contract
+        // rakes `pool - sum(payouts)` straight to the fee recipient. A thin
+        // field must not quietly become house revenue.
+        let spec = PayoutSpec {
+            bps: vec![5_000, 3_000, 2_000],
+        };
+        let p = payouts_with(&[1.0, 0.0], 10 * USDC, &spec);
+        assert_eq!(p, vec![12_500_000, 7_500_000], "5/8 and 3/8 of the pool");
+        assert_eq!(p.iter().sum::<u128>(), 20 * USDC, "no rake on a thin field");
+
+        // And the pool still lands exactly, whatever the structure or field.
+        for n in 1..=8usize {
+            for bps in [
+                vec![10_000],
+                vec![5_000, 3_000, 2_000],
+                vec![2_500; 4],
+                PayoutSpec::default().bps,
+            ] {
+                let spec = PayoutSpec { bps };
+                spec.validate().expect("fixture is valid");
+                let scores: Vec<f64> = (0..n).map(|i| (n - i) as f64 * 0.5).collect();
+                let buy_in = 3 * USDC + 7; // divides badly on purpose
+                let p = payouts_with(&scores, buy_in, &spec);
+                assert_eq!(
+                    p.iter().sum::<u128>(),
+                    buy_in * n as u128,
+                    "n={n} spec={:?}: whole pool distributed",
+                    spec.bps
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unpayable_payout_structures_are_rejected() {
+        assert!(PayoutSpec::default().validate().is_ok());
+        assert!(PayoutSpec { bps: vec![10_000] }.validate().is_ok());
+        assert!(PayoutSpec {
+            bps: vec![2_500; 4]
+        }
+        .validate()
+        .is_ok());
+        assert!(
+            PayoutSpec {
+                bps: vec![10_000, 0]
+            }
+            .validate()
+            .is_ok(),
+            "an explicit zero tail is a structure, not an error"
+        );
+
+        assert!(
+            PayoutSpec { bps: vec![] }.validate().is_err(),
+            "pays nobody"
+        );
+        assert!(
+            PayoutSpec {
+                bps: vec![5_000, 3_000]
+            }
+            .validate()
+            .is_err(),
+            "sums to 8000 — the missing fifth would be raked to the house, silently"
+        );
+        assert!(
+            PayoutSpec {
+                bps: vec![6_000, 5_000]
+            }
+            .validate()
+            .is_err(),
+            "sums past the pool"
+        );
+        assert!(
+            PayoutSpec {
+                bps: vec![3_000, 7_000]
+            }
+            .validate()
+            .is_err(),
+            "second place paid more than first is a typo, not a design"
+        );
+        assert!(
+            PayoutSpec {
+                bps: vec![1; MAX_TOURNAMENT_PLAYERS + 1]
+            }
+            .validate()
+            .is_err(),
+            "more places than a field can hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn tourney_create_rejects_an_unpayable_structure() {
+        // Rejected at CREATE, before a buy-in tournament opens its onchain pool
+        // — a structure that only failed at settlement would already have
+        // locked every entrant's money behind a 24h claimRefund.
+        let (state, _c, _r) = test_state();
+        let bad = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: Some(PayoutSpec {
+                    bps: vec![5_000, 3_000],
+                }),
+            }),
+        )
+        .await;
+        assert!(matches!(bad, Err(StatusCode::BAD_REQUEST)));
+        assert!(
+            state.0.lobby.tournaments.lock().is_empty(),
+            "nothing was created"
+        );
+    }
+
+    #[test]
+    fn a_payout_structure_survives_the_durable_round_trip() {
+        // Same reasoning as `bot_entrants_survive_the_durable_round_trip`, but
+        // this one is worse when it breaks: a tournament rehydrated with the
+        // default structure pays its field a table it never agreed to, and
+        // nothing looks wrong — the standings are right and the money moves.
+        let spec = PayoutSpec {
+            bps: vec![5_000, 3_000, 2_000],
+        };
+        let v = serde_json::to_value(&spec).expect("serialize");
+        assert_eq!(
+            v,
+            json!({ "bps": [5000, 3000, 2000] }),
+            "the shape migration 0017 stores"
+        );
+        assert_eq!(
+            serde_json::from_value::<PayoutSpec>(v).expect("deserialize"),
+            spec
+        );
+
+        // The migration's DEFAULT reproduces the previously hardcoded split, so
+        // rows written before the column existed settle exactly as they would
+        // have (bar the heads-up case, which was special-cased at 70/30).
+        assert_eq!(
+            serde_json::from_value::<PayoutSpec>(json!({ "bps": [6500, 2500, 1000] })).unwrap(),
+            PayoutSpec::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_prize_table_a_player_sees_is_the_one_that_pays() {
+        // The view must not compute prizes its own way: a table that disagrees
+        // with settlement is worse than no table, because entrants join on the
+        // strength of it.
+        const USDC: u128 = 1_000_000;
+        let (state, _c, _r) = test_state();
+        let tid = started_tournament(&state, 4).await;
+        let spec = PayoutSpec {
+            bps: vec![5_000, 3_000, 2_000],
+        };
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            let t = ts.get_mut(&tid).unwrap();
+            t.buy_in = Some((10 * USDC).to_string());
+            t.payout = spec.clone();
+            for (i, s) in [3.0, 2.0, 1.0, 0.0].iter().enumerate() {
+                t.scores.insert(format!("p{i}"), *s);
+            }
+        }
+
+        let view = tourney_get(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("view")
+            .0;
+        assert_eq!(view.payout, spec, "the structure is published");
+        assert_eq!(view.prizes.len(), view.standings.len());
+
+        // Exactly what settlement would compute over the same standings.
+        let ranked: Vec<(String, f64)> = view
+            .standings
+            .iter()
+            .map(|s| (s.player.clone(), s.score))
+            .collect();
+        let settled = payout_split(40 * USDC, &ranked, &spec).expect("split");
+        assert_eq!(
+            view.prizes,
+            settled
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<String>>()
+        );
+        assert_eq!(settled.iter().sum::<u128>(), 40 * USDC);
+    }
+
+    #[test]
     fn payout_split_rejects_unranked_standings() {
         // The bracket scan is contiguous, so unranked input would pay the two
         // leaders here 65% and 10% instead of splitting 75% between them.
@@ -3824,7 +4342,8 @@ mod tests {
             .enumerate()
             .map(|(i, s)| (format!("p{i}"), *s))
             .collect();
-        let err = payout_split(30_000_000, &unranked).expect_err("must refuse to pay");
+        let err = payout_split(30_000_000, &unranked, &PayoutSpec::default())
+            .expect_err("must refuse to pay");
         assert!(err.to_string().contains("ranked order"), "got: {err}");
         // The sole real caller's input is accepted, so this can't fire in
         // normal operation.
@@ -3834,7 +4353,8 @@ mod tests {
                 ("a".to_string(), 2.0),
                 ("b".to_string(), 2.0),
                 ("c".to_string(), 1.0),
-            ]
+            ],
+            &PayoutSpec::default(),
         )
         .is_ok());
     }
@@ -3930,6 +4450,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4064,6 +4585,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4180,6 +4702,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4277,6 +4800,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4389,6 +4913,146 @@ mod tests {
         );
     }
 
+    /// Create a casual tournament with `n` browser entrants and start it.
+    async fn started_tournament(state: &AppState, n: usize) -> Uuid {
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        for i in 0..n {
+            let _ = tourney_join(
+                State(state.clone()),
+                Path(tid),
+                HeaderMap::new(),
+                Json(JoinReq {
+                    player: Some(format!("p{i}")),
+                    seat: None,
+                    uci_options: None,
+                    engine: None,
+                }),
+            )
+            .await
+            .expect("join");
+        }
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("start");
+        tid
+    }
+
+    #[tokio::test]
+    async fn a_drained_server_pauses_a_tournament_instead_of_scoring_phantom_draws() {
+        // `dispatch_round` used to treat EVERY start_game error as "neither side
+        // got to play → draw". But start_game also refuses while the maintenance
+        // drain is on, and when the global room ceiling is hit. So draining
+        // before a deploy — the documented safe procedure — scored every
+        // remaining pairing 0.5/0.5, and because an all-forfeit round makes
+        // `dispatch_from_current` advance, it cascaded through the whole
+        // remaining schedule, marked the tournament complete, and settled a real
+        // USDC pool on results nobody played. Permanently: the contract's
+        // `AlreadySettled` makes it unrepeatable.
+        let (state, _c, _r) = test_state();
+        let tid = started_tournament(&state, 4).await;
+
+        // Round 0 dispatched normally: 4 entrants = 2 games per round.
+        {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).unwrap();
+            assert_eq!(t.games.len(), 2, "round 0 dispatched");
+            assert_eq!(t.rounds.len(), 3);
+        }
+
+        // Round 0 resolves, and the operator drains for a deploy in the gap.
+        {
+            let mut ts = state.0.lobby.tournaments.lock();
+            let t = ts.get_mut(&tid).unwrap();
+            for g in t.games.iter_mut() {
+                g.result = Some(Some(Color::White));
+            }
+            t.current_round = 1;
+        }
+        state
+            .0
+            .maintenance
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // This is what results_task calls when a round finishes.
+        dispatch_from_current(&state, tid).await;
+
+        {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).unwrap();
+            assert_eq!(t.status, "paused", "parked, not advanced");
+            assert!(
+                t.forfeits.is_empty(),
+                "a drained server must not invent forfeits: {:?}",
+                t.forfeits.len()
+            );
+            assert!(
+                t.scores.is_empty(),
+                "nothing unplayed may score: {:?}",
+                t.scores
+            );
+            assert_eq!(t.current_round, 1, "the schedule did not walk past round 1");
+            assert_eq!(t.games.len(), 2, "no games beyond round 0 were created");
+        }
+
+        // Resume once the drain lifts: same schedule, same position, and the
+        // round that never dispatched now does.
+        state
+            .0
+            .maintenance
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("resume");
+        {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).unwrap();
+            assert_eq!(t.status, "running");
+            assert_eq!(t.current_round, 1, "resume does not replay played rounds");
+            assert_eq!(t.rounds.len(), 3, "the schedule was not rebuilt");
+            assert_eq!(t.games.len(), 4, "round 1's two games were dispatched");
+            assert_eq!(t.games.iter().filter(|g| g.round == 1).count(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn re_dispatching_a_round_does_not_double_create_its_games() {
+        // Resume calls `dispatch_round` on a round that may already be half
+        // dispatched, so it has to be idempotent per pairing — otherwise a
+        // resumed round runs each surviving pairing twice, and both games score.
+        let (state, _c, _r) = test_state();
+        let tid = started_tournament(&state, 4).await;
+
+        let before = {
+            let ts = state.0.lobby.tournaments.lock();
+            ts.get(&tid).unwrap().games.len()
+        };
+        assert_eq!(before, 2);
+
+        let d = dispatch_round(&state, tid, 0).await;
+        assert!(d.blocked.is_none());
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).unwrap();
+        assert_eq!(t.games.len(), 2, "the same pairings were not re-created");
+        assert_eq!(
+            t.round_remaining, 2,
+            "round_remaining counts the round's live games, not just new ones"
+        );
+    }
+
     #[tokio::test]
     async fn casual_tournament_view_serves_standings_and_forfeits() {
         // Standings were computed for the settlement log and never exposed, so
@@ -4406,6 +5070,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4508,6 +5173,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4563,6 +5229,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await
@@ -4609,6 +5276,7 @@ mod tests {
                 buy_in: None,
                 initial_secs: 60,
                 increment_secs: 1,
+                payout: None,
             }),
         )
         .await

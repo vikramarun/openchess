@@ -147,6 +147,9 @@ pub struct OpenTournamentRow {
     /// Signed-in wallet per casual entrant (name -> wallet), so games
     /// dispatched after a restart stay attributed (migration 0016).
     pub entrant_wallets: serde_json::Value,
+    /// Creator-defined prize structure, `{"bps":[…]}` (migration 0017). Must be
+    /// restored, or a rehydrated tournament silently pays a different table.
+    pub payout: serde_json::Value,
     /// How long ago the tournament was created, so the caller can restore its
     /// TTL clock instead of restarting it on every deploy. Computed by the
     /// database — the server has no chrono of its own.
@@ -509,12 +512,17 @@ impl Db {
         players: &serde_json::Value,
         bots: &serde_json::Value,
         entrant_wallets: &serde_json::Value,
+        payout: &serde_json::Value,
     ) -> Result<()> {
+        // `payout` is deliberately absent from the DO UPDATE set: the prize
+        // structure is decided once, at creation, and entrants join on the
+        // strength of it. Re-writing it on every join would let a later bug (or
+        // a lost in-memory value) rewrite the terms a field already accepted.
         sqlx::query(
             r#"INSERT INTO tournaments
                  (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
-                  entrant_wallets)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                  entrant_wallets, payout)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
                  players=EXCLUDED.players, bots=EXCLUDED.bots,
                  entrant_wallets=EXCLUDED.entrant_wallets"#,
@@ -529,6 +537,7 @@ impl Db {
         .bind(players)
         .bind(bots)
         .bind(entrant_wallets)
+        .bind(payout)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -543,7 +552,7 @@ impl Db {
     pub async fn open_tournaments(&self, limit: i64) -> Result<Vec<OpenTournamentRow>> {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
-                      players, bots, entrant_wallets,
+                      players, bots, entrant_wallets, payout,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,
@@ -638,8 +647,12 @@ impl Db {
 
     /// Tournaments that may need recovery after a restart (status='running').
     pub async fn recoverable_tournaments(&self) -> Result<Vec<TournamentRow>> {
+        // `paused` counts too: a tournament the server parked mid-round (a
+        // maintenance drain, the room ceiling) still has in-flight rooms that a
+        // restart destroys, so it is recoverable in exactly the same sense —
+        // i.e. it is not, and its entrants refund.
         let rows = sqlx::query_as::<_, TournamentRow>(
-            "SELECT id, buy_in, players FROM tournaments WHERE status='running'",
+            "SELECT id, buy_in, players FROM tournaments WHERE status IN ('running','paused')",
         )
         .fetch_all(&self.pool)
         .await?;

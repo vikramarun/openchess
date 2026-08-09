@@ -249,6 +249,20 @@ pub trait SettlementSink: Send + Sync {
         false
     }
 
+    /// The tournament's current onchain pool, in token base units.
+    ///
+    /// The authority on what may be paid out. Deriving it as `buy_in ×
+    /// entrants` assumes every entry landed and that nothing else can add to
+    /// the pool — the first is untrue if an `enterTournament` silently failed,
+    /// and the second stops being true the moment sponsorship exists. Paying
+    /// out more than the pool reverts the whole settlement; paying out less
+    /// hands the difference to the fee recipient as rake.
+    ///
+    /// `None` off-chain, or if the view call fails.
+    async fn tournament_pool(&self, _tid: Uuid) -> Option<U256> {
+        None
+    }
+
     // -- verifiable results ------------------------------------------------
 
     /// Sign a result commitment (the game's `result_hash`) so clients can
@@ -492,6 +506,17 @@ impl SettlementSink for OnchainSettlement {
         match self.contract().tournaments(tidb).call().await {
             Ok(t) => t.settled,
             Err(_) => false,
+        }
+    }
+
+    async fn tournament_pool(&self, tid: Uuid) -> Option<U256> {
+        let tidb = game_id_to_bytes32(tid);
+        match self.contract().tournaments(tidb).call().await {
+            Ok(t) => Some(t.pool),
+            Err(e) => {
+                tracing::warn!(%tid, "tournament pool read failed: {e:#}");
+                None
+            }
         }
     }
 
