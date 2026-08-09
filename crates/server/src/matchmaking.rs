@@ -511,7 +511,12 @@ async fn park_accept(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let acceptor_bot = is_bot_seat(&req.seat);
-    let acceptor_wallet = state.authed_wallet(&headers);
+    // Strict, like posting an offer: a stale bearer must 401 rather than seat a
+    // signed-in player anonymously. Anonymity here doesn't just lose the game
+    // from their history — it also fails the same-wallet check below open, so a
+    // poster could accept their own offer. Read before the offer is claimed, so
+    // a rejected join doesn't consume it.
+    let acceptor_wallet = state.authed_wallet_strict(&headers)?;
 
     // Claim the offer (open -> matching), capturing its terms.
     let claim = {
@@ -526,6 +531,9 @@ async fn park_accept(
             SeatMeta {
                 name: offer.poster_name.clone(),
                 engine: offer.poster_engine.clone(),
+                // Casual offers may be anonymous; when the poster signed in,
+                // this is what puts the finished game in their history.
+                wallet: offer.poster_addr.clone(),
             },
             offer.poster_seat_bot,
             offer.poster_uci_options.clone(),
@@ -654,6 +662,7 @@ async fn park_accept(
             .as_deref()
             .and_then(sanitize_label)
             .or_else(|| acceptor_agent_meta.as_ref().map(|m| m.engine.clone())),
+        wallet: acceptor_wallet.clone(),
     };
 
     // start_game creates the room, locks escrow, and DISPATCHES bot seats —
@@ -818,20 +827,19 @@ async fn queue_join(
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     let bot = is_bot_seat(&req.seat);
     // Wagered tiers AND bot seats require auth; the seat (and the agent it
-    // dispatches to) is always the authed wallet's. Casual browser seats need none.
-    let addr = if req.stake.is_some() || bot {
-        Some(
-            state
-                .authed_wallet(&headers)
-                .ok_or(StatusCode::UNAUTHORIZED)?,
-        )
-    } else {
-        None
+    // dispatches to) is always the authed wallet's. A casual browser seat plays
+    // fine without one — but take it when it's offered, since a seat with no
+    // recorded wallet is a game that never reaches the player's history.
+    let addr = match state.authed_wallet_strict(&headers)? {
+        Some(w) => Some(w),
+        None if req.stake.is_some() || bot => return Err(StatusCode::UNAUTHORIZED),
+        None => None,
     };
 
     let mut my_meta = SeatMeta {
         name: req.name.as_deref().and_then(sanitize_label),
         engine: req.engine.as_deref().and_then(sanitize_label),
+        wallet: addr.clone(),
     };
     if bot {
         // The bot must be online to queue as it; default its identity from the
@@ -2138,6 +2146,12 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
         // A bot entrant's engine comes from its agent registration; a browser
         // entrant declares its own at join time.
         engine: engines.get(p).cloned(),
+        // A browser entrant IS its wallet; a bot entrant is a registered name,
+        // so its games belong to the wallet that registered the agent.
+        wallet: match bots.get(p) {
+            Some(be) => Some(be.wallet.clone()),
+            None => (p.starts_with("0x") && p.len() == 42).then(|| p.to_string()),
+        },
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
     // A claimed wallet is pushed onto `claimed` for rollback.
@@ -2951,6 +2965,92 @@ mod tests {
         assert_eq!(tr.status, "matched");
         assert!(tr.token.is_some(), "a browser seat gets a launch token");
         assert_eq!(tr.seat.as_deref(), Some("browser"));
+    }
+
+    /// Two signed-in players, no stake anywhere: both wallets must reach the
+    /// game. They are what `create_game` writes to `games.white_wallet` /
+    /// `black_wallet`, and a game with neither is a game that never appears in
+    /// either player's history, record or rating. The live snapshot is the only
+    /// place to observe it without a DB, and it is written from the same array.
+    #[tokio::test]
+    async fn a_casual_park_game_keeps_both_players_wallets() {
+        let (state, _c, _r) = test_state();
+        let poster = "0xaa11111111111111111111111111111111111111";
+        let acceptor = "0xbb22222222222222222222222222222222222222";
+        let pt = state.0.auth.mint_session(poster);
+        let at = state.0.auth.mint_session(acceptor);
+
+        let offer = park_create(
+            State(state.clone()),
+            bearer(&pt),
+            Json(ParkCreateReq {
+                stake: None, // <- casual
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("offer posted")
+        .0;
+
+        let joined = park_accept(
+            State(state.clone()),
+            Path(offer.offer_id),
+            bearer(&at),
+            None,
+        )
+        .await
+        .expect("offer accepted")
+        .0;
+
+        let live = state.0.live_games.lock();
+        let g = live.get(&joined.game_id).expect("game exists");
+        assert_eq!(g.white.as_deref(), Some(poster), "poster takes white");
+        assert_eq!(g.black.as_deref(), Some(acceptor), "acceptor takes black");
+        assert_eq!(g.stake, None, "and none of this needed a stake");
+    }
+
+    /// The other half of the same invariant: a stale bearer must not quietly
+    /// seat a signed-in player as a stranger.
+    #[tokio::test]
+    async fn a_dead_session_is_rejected_rather_than_seated_anonymously() {
+        let (state, _c, _r) = test_state();
+        let pt = state.0.auth.mint_session("0xaa11111111111111111111111111111111111111");
+        let offer = park_create(
+            State(state.clone()),
+            bearer(&pt),
+            Json(ParkCreateReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("offer posted")
+        .0;
+
+        let err = park_accept(
+            State(state.clone()),
+            Path(offer.offer_id),
+            bearer("not-a-live-session"),
+            None,
+        )
+        .await
+        .err();
+        assert_eq!(err, Some(StatusCode::UNAUTHORIZED));
+        // ...and the rejected join must not have consumed the offer.
+        assert_eq!(
+            state.0.lobby.park.lock().get(&offer.offer_id).map(|o| o.status.clone()),
+            Some("open".to_string())
+        );
     }
 
     #[test]

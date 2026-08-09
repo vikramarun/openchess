@@ -214,9 +214,26 @@ wallet.
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match
   guard and the server's same-wallet rejection. `authed_wallet_strict` 401s a
-  present-but-invalid credential; keep it that way, and route new authed web
-  calls through `apps/web/lib/authedFetch.ts` so an expired session self-heals
-  instead of dead-ending.
+  present-but-invalid credential; keep it that way (park accept and the gauntlet
+  queue use it too), and route new authed web calls through
+  `apps/web/lib/authedFetch.ts` so an expired session self-heals instead of
+  dead-ending.
+- **A seat's wallet is the only thing that survives the game.**
+  `games.white_wallet`/`black_wallet` are what `/players/{addr}/games`, the
+  W/L/D record, net USDC and Elo all read — and they used to be written from the
+  *wager*, so an unstaked game recorded NULL seats and disappeared the moment it
+  finished. It failed perfectly silently: the game plays, settles, shows in the
+  lobby, then isn't in anyone's history, and Elo only ever moved on staked
+  games. The seat wallet now rides on `SeatMeta.wallet` and `seat_wallets`
+  (`main.rs`) picks the escrow address when there's a stake, else the
+  authenticated wallet — so **every mode that seats a signed-in player has to
+  fill it in** (park, queue, tournament do). Two riders. The client must *send*
+  the session on casual calls as well, not only staked ones, or the server has
+  no wallet to record. And `update_ratings` skips a game whose two seats are the
+  same wallet: nothing rejects one wallet on both casual seats the way escrow
+  does, and the two Elo writes apply in order, so the winner's would land last
+  and farm rating. Note this fix is not retroactive — games already played with
+  NULL seats can't be attributed, because nothing recorded who sat there.
 
 ## Conventions
 - Money is `rust_decimal` / `U256`, never `f64`. USDC has 6 decimals.

@@ -892,7 +892,7 @@ impl Db {
     }
 
     /// Update Elo ratings for a finished game with two known wallets (no-op for
-    /// casual/anonymous games). K=24.
+    /// anonymous games). K=24.
     pub async fn update_ratings(&self, game_id: Uuid) -> Result<()> {
         let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT white_wallet, black_wallet, result FROM games WHERE id=$1",
@@ -901,8 +901,15 @@ impl Db {
         .fetch_optional(&self.pool)
         .await?;
         let Some((Some(white), Some(black), Some(result))) = row else {
-            return Ok(()); // anonymous/casual game — nothing to rate
+            return Ok(()); // anonymous seat — nothing to rate
         };
+        // Never rate a wallet against itself. A stake makes this impossible
+        // (identical seats are rejected before escrow), but a casual game
+        // carries no such check, and one wallet on both seats would otherwise
+        // farm rating: the two updates apply in order and the second wins.
+        if white.eq_ignore_ascii_case(&black) {
+            return Ok(());
+        }
         let score_white = match result.as_str() {
             "white" => 1.0_f64,
             "black" => 0.0,
@@ -1106,6 +1113,93 @@ mod tests {
         let ai = board.iter().position(|r| r.wallet.to_lowercase() == alice.to_lowercase());
         let bi = board.iter().position(|r| r.wallet.to_lowercase() == bob.to_lowercase());
         assert!(ai < bi, "higher rating ranks first");
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn an_unstaked_game_shows_up_in_both_players_history() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // A casual game: no wager, no escrow addresses — only the two wallets
+        // that sat down. That is exactly the row the server used to write with
+        // NULL wallets, which made a played game invisible everywhere below.
+        let tag = Uuid::new_v4().simple().to_string();
+        let alice = format!("0xA_{tag}"); // mixed case: every read folds to lower()
+        let bob = format!("0xb_{tag}");
+        let id = Uuid::new_v4();
+        db.create_game(
+            id,
+            "park",
+            Some(&alice),
+            Some(&bob),
+            Tc { initial_ms: 60000, increment_ms: 1000 },
+            None, // <- the point: no wager
+            [None, None],
+        )
+        .await?;
+        db.set_game_active(id).await?;
+        db.append_move(id, 1, "e2e4", "e4", 60000, 60000).await?;
+        db.append_move(id, 2, "e7e5", "e5", 60000, 60000).await?;
+        db.finish_and_enqueue(id, "white", "checkmate", "hash", None, "1. e4 e5", None, false)
+            .await?;
+        db.update_ratings(id).await?;
+
+        let mine = db.player_games(&alice.to_lowercase(), 50).await?;
+        let row = mine.iter().find(|g| g.id == id).expect("in alice's history");
+        assert_eq!(row.result.as_deref(), Some("white"));
+        assert_eq!(row.stake, None, "casual game, no stake");
+        assert_eq!(row.moves, 2);
+        assert!(
+            db.player_games(&bob, 50).await?.iter().any(|g| g.id == id),
+            "and in bob's"
+        );
+
+        // The same row is what the record and the rating read.
+        let stats = db.player_stats(&alice).await?;
+        assert_eq!((stats.games, stats.wins, stats.losses), (1, 1, 0));
+        assert!(db.player_rating(&alice).await? > 1500.0, "a win moves Elo");
+        assert!(db.player_rating(&bob).await? < 1500.0);
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn one_wallet_on_both_seats_is_not_rated() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // Nothing stops one signed-in wallet from taking both casual seats (a
+        // stake would be rejected before escrow, but there is no stake here).
+        // Rating it would let anyone farm Elo: the two updates apply in order
+        // and the winner's write lands last.
+        let wallet = format!("0xS_{}", Uuid::new_v4().simple());
+        let id = Uuid::new_v4();
+        db.create_game(
+            id,
+            "park",
+            Some(&wallet),
+            Some(&wallet),
+            Tc { initial_ms: 60000, increment_ms: 1000 },
+            None,
+            [None, None],
+        )
+        .await?;
+        db.set_game_active(id).await?;
+        db.finish_and_enqueue(id, "white", "checkmate", "hash", None, "1. e4 e5", None, false)
+            .await?;
+        db.update_ratings(id).await?;
+
+        assert_eq!(db.player_rating(&wallet).await?, 1500.0, "unrated self-play");
         Ok(())
     }
 }
