@@ -1,7 +1,8 @@
 {
-  "name": "web",
+  "name": "openchess-web",
   "version": "0.1.0",
   "private": true,
+  "description": "OpenChess: engine-vs-engine chess for non-custodial USDC stakes on Base.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -20,7 +21,9 @@
     "test:seat": "tsx scripts/playSeat.test.ts",
     "test:nav": "tsx scripts/plyNav.test.ts",
     "test:offers": "tsx scripts/offers.test.ts",
-    "test:prefs": "tsx scripts/boardPrefs.test.ts"
+    "test:prefs": "tsx scripts/boardPrefs.test.ts",
+    "test:brand": "tsx scripts/brand.test.ts",
+    "test:gamemeta": "tsx scripts/gameSummary.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.1.7",

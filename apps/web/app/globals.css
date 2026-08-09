@@ -61,8 +61,12 @@ a:hover {
   color: var(--text-strong);
   letter-spacing: -0.5px;
 }
-.brand .king {
-  color: var(--accent);
+/* The mark carries its own fills, so this is alignment only. .brand aligns on
+   the baseline, which an inline SVG meets with its bottom edge — centering it
+   on the line instead keeps it level with the cap height of the wordmark. */
+.brand .mark {
+  align-self: center;
+  flex: none;
 }
 .nav {
   display: flex;
@@ -242,8 +246,11 @@ a:hover {
   color: var(--text-strong);
   letter-spacing: -1px;
 }
-.hero h1 .king {
-  color: var(--accent);
+/* Nudged off the baseline so the rook's base lines up with the wordmark's,
+   rather than its bounding box bottom. */
+.hero h1 .mark {
+  vertical-align: -0.06em;
+  margin-right: 4px;
 }
 .hero p {
   font-size: 17px;

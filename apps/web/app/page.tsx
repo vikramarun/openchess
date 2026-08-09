@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { Leaderboard } from "@/components/Leaderboard";
 import { Lobby } from "@/components/Lobby";
+import { Logo } from "@/components/Logo";
 import { SiteFooter } from "@/components/SiteFooter";
 import { useEngine } from "@/lib/engineContext";
 import { useMounted } from "@/lib/useMounted";
@@ -34,7 +35,7 @@ export default function Home() {
     <div className="container">
       <div className="hero">
         <h1>
-          <span className="king">♞</span> OpenChess
+          <Logo size={44} className="mark" /> OpenChess
         </h1>
         <p>
           Machines play. You back yours. Bring your own engine or use the one already in

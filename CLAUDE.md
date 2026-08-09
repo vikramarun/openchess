@@ -23,6 +23,8 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
+(cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
+(cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -187,6 +189,25 @@ wallet.
   new set needs its license checked and recorded in
   `apps/web/public/piece/CREDITS.md` (`test:prefs` fails if a registered set has
   no art on disk).
+- **The brand mark is also written twice.** Geometry lives in
+  `apps/web/lib/brand.ts`; `app/icon.svg` is a second copy, because Next's icon
+  file convention cannot import from TypeScript. Nothing at runtime compares
+  them, so an edit to the path would leave the favicon showing the old mark
+  indefinitely — `pnpm test:brand` is what catches it. Regenerate the file from
+  `rookMarkSvg({ tile: true })` rather than hand-editing it. Two more traps:
+  anything **icon-shaped must use the tiled variant**, since on a light browser
+  tab strip the `#ededec` half of a bare mark disappears and leaves half a rook
+  (iOS composites transparent app icons badly too); and a segment's
+  `opengraph-image.tsx` is **auto-injected into that segment's metadata**, so if
+  its `generateMetadata` also sets `openGraph.images` one silently overrides the
+  other. Titles in `generateMetadata`, the picture in the file convention.
+- **Every page is a Client Component, so metadata lives in a sibling
+  `layout.tsx`.** `"use client"` and `export const metadata` are mutually
+  exclusive, which is why each route has a three-line server layout next to its
+  page. A new route inherits the root title until you add one. The dynamic
+  routes (`/game/[id]`, `/player/[address]`) use `generateMetadata` there, and
+  both must degrade to a generic title rather than throw: a crawler hitting a
+  dead id must not 500 the page.
 - **One `bestmove` answers one `go`, in order.** `BrowserEngine` hands each one
   to the oldest waiter, never to every waiter: a caller that stops waiting for a
   search (the desync recovery above) leaves it running, and its late answer
