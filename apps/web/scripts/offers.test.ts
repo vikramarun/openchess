@@ -2,6 +2,7 @@
 // in a screenshot and expensive: merging two *anonymous* posters would send a
 // joiner to a stranger's board, and failing to merge the house bot's identical
 // seats brings back the duplicate-row noise the grouping exists to remove.
+import { SESSION_EXPIRED } from "../lib/authedFetch";
 import {
   acceptFromGroup,
   groupOffers,
@@ -232,11 +233,24 @@ async function main() {
       "That challenger's bot went offline — the offer is gone.",
     ],
   );
-    check(
-      "an unexpected status still surfaces its code",
-      joinErrorMessage(418, { botPlays: false }),
-      "Couldn't join (418).",
-    );
+  // A dead session must not surface as a bare code: every deploy voids them,
+  // authedFetch has already cleared the token by the time we get here, and this
+  // string is what points at the sign-in button that just reappeared.
+  check(
+    "an expired session says so, in the same words as every other caller",
+    joinErrorMessage(401, { botPlays: false }),
+    SESSION_EXPIRED,
+  );
+  check(
+    "an expired session reads the same whoever is seated",
+    joinErrorMessage(401, { botPlays: true }),
+    joinErrorMessage(401, { botPlays: false }),
+  );
+  check(
+    "an unexpected status still surfaces its code",
+    joinErrorMessage(418, { botPlays: false }),
+    "Couldn't join (418).",
+  );
 
   console.log(failed === 0 ? "\nall offer-grouping tests passed" : `\n${failed} FAILED`);
   process.exit(failed === 0 ? 0 : 1);

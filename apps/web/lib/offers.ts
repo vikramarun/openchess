@@ -9,6 +9,8 @@
 // The group also carries every offer id behind the row, so a click that loses
 // the race for the first seat can take the next one instead of erroring.
 
+import { SESSION_EXPIRED } from "./authedFetch";
+
 export type OfferLike = {
   offer_id: string;
   poster_addr: string | null;
@@ -106,9 +108,18 @@ export async function acceptFromGroup(
  *  and the client cannot tell them apart — so when we are seating our own bot,
  *  the message has to admit both possibilities. Claiming "someone took it" to
  *  someone whose own bot is simply mid-game sends them hunting for a race that
- *  never happened. */
+ *  never happened.
+ *
+ *  401 shares `SESSION_EXPIRED` with every other authed caller rather than
+ *  falling through to the bare status code. Sessions live in the server's
+ *  process memory, so every deploy voids them while the browser still holds the
+ *  token — and by the time this runs `authedFetch` has already dropped the dead
+ *  credential and brought the sign-in button back, so this string is the only
+ *  thing left to say why the click did nothing. */
 export function joinErrorMessage(status: number, opts: { botPlays: boolean }): string {
   switch (status) {
+    case 401:
+      return SESSION_EXPIRED;
     case 503:
       return "The server is in maintenance — no new games can be started right now.";
     case 502:
