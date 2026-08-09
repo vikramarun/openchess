@@ -18,6 +18,15 @@ use protocol::{Color, GameEndReason, GameResult, ServerMessage, TimeControl};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, Instant};
 
+/// How long both seats have to send `Ready` before the room gives up and the
+/// game is voided. Measured from room creation, NOT from when a client
+/// connects — a client that boots slowly has already spent part of it.
+///
+/// Reported to clients in `Welcome.start_deadline_ms` so a UI that gates
+/// `Ready` behind a human can show a deadline that is actually true rather
+/// than a second copy of this number that drifts.
+pub const START_WINDOW: Duration = Duration::from_secs(60);
+
 /// On-chain seats for a wagered game (used to settle the result).
 #[derive(Clone, Copy)]
 pub struct StakeInfo {
@@ -58,6 +67,8 @@ pub struct Snapshot {
     pub start_fen: String,
     pub moves_uci: Vec<String>,
     pub clock: protocol::Clock,
+    /// Milliseconds left in `START_WINDOW`; `None` once the game has begun.
+    pub start_deadline_ms: Option<u64>,
 }
 
 pub struct RoomHandle {
@@ -141,6 +152,13 @@ impl Room {
         self.base.elapsed().as_millis() as u64
     }
 
+    /// Milliseconds left before an unstarted room is reaped. Saturates at 0
+    /// rather than wrapping, so a room already past the window reports "none
+    /// left" instead of ~584 million years.
+    fn start_deadline_ms(&self) -> u64 {
+        START_WINDOW.saturating_sub(self.base.elapsed()).as_millis() as u64
+    }
+
     async fn send_to(&self, color: Color, msg: ServerMessage) {
         let out = match color {
             Color::White => &self.white_out,
@@ -186,7 +204,7 @@ impl Room {
             // showed up (or both are refunded if nobody did) instead of sitting
             // locked behind the contract's 24h `claimTimeout` — tells that
             // player they won, and keeps mode standings progressing.
-            if !self.started && self.base.elapsed() > Duration::from_secs(60) {
+            if !self.started && self.base.elapsed() > START_WINDOW {
                 let winner = reap_forfeit_winner(
                     self.white_occupied,
                     self.wready,
@@ -306,6 +324,7 @@ impl Room {
                         start_fen: g.start_fen().to_string(),
                         moves_uci: g.moves_uci().to_vec(),
                         clock: g.clock(self.now_ms()),
+                        start_deadline_ms: None,
                     },
                     None => Snapshot {
                         started: false,
@@ -316,6 +335,7 @@ impl Room {
                             black_ms: self.tc.initial_ms,
                             increment_ms: self.tc.increment_ms,
                         },
+                        start_deadline_ms: Some(self.start_deadline_ms()),
                     },
                 };
                 let _ = resp.send(snap);

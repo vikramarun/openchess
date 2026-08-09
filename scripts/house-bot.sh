@@ -44,16 +44,30 @@ MOVE_BUDGET="${MOVE_BUDGET:-80}"
 MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
 BOOK_MAX_PLY="${BOOK_MAX_PLY:-16}"
 
-# Opening book. `${BOOK-unset}` (no colon) distinguishes "not set" from
+# Opening book. `${BOOK+set}` (no colon) distinguishes "not set" from
 # "deliberately empty", so BOOK= disables the book instead of silently falling
 # back to the default path.
+#
+# Auto-detection FAILS rather than shrugging when it finds nothing. Playing on
+# without a book is the exact regression this shipped to fix (every opening
+# move becomes a full search), and it would be invisible in production: the
+# bot would look healthy and just quietly burn its clock again. A broken
+# Dockerfile COPY or a renamed asset has to be loud. Opting out stays possible,
+# it just has to be deliberate: BOOK=.
+BOOK_CANDIDATES=(
+  /usr/local/share/openchess/house-book.bin
+  "$(dirname "$0")/../assets/house-book.bin"
+)
 if [[ -z "${BOOK+set}" ]]; then
-  for candidate in \
-    /usr/local/share/openchess/house-book.bin \
-    "$(dirname "$0")/../assets/house-book.bin"
-  do
+  for candidate in "${BOOK_CANDIDATES[@]}"; do
     [[ -f "$candidate" ]] && { BOOK="$candidate"; break; }
   done
+  if [[ -z "${BOOK:-}" ]]; then
+    echo "No opening book found. Looked in:" >&2
+    printf '  %s\n' "${BOOK_CANDIDATES[@]}" >&2
+    echo "Generate it with 'cargo run -p book-gen -- assets/house-book.bin', or set BOOK= to play without one." >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "${OPENCHESS_WALLET_KEY:-}" ]]; then

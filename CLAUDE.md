@@ -15,6 +15,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd contracts && forge test)       # Foundry — 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
+(cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -99,7 +100,12 @@ wallet.
   stake refunded), while a seat that is *gone* hands the opponent a forfeit win
   and the whole stake (`room.rs reap_forfeit_winner`). So the decline path holds
   the socket open and waits out the reap — closing it would confiscate the
-  stake of the player who chose not to play.
+  stake of the player who chose not to play. `pnpm test:seat` pins this; a
+  `ws.close()` added to that path fails it and nothing else.
+  The prompt's countdown comes from `Welcome.start_deadline_ms` (server-side
+  `room::START_WINDOW`), never a client constant: the window starts at room
+  creation, so a client that spent 30s downloading the engine has already
+  burned half of it and a local countdown would promise time that is gone.
 - **A UCI engine will spend a fifth of a rapid clock on move 1.** Sudden-death
   time management lets one unstable root eat several times the target, and the
   start position is the most unstable root there is: measured against the real

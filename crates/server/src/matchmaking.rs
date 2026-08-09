@@ -738,8 +738,12 @@ async fn park_get(
                     .then(|| "white".into())
                     .filter(|_| authorized),
                 seat: Some(if o.poster_seat_bot { "bot" } else { "browser" }.into()),
-                // Same gate as the token: a stranger polling the id learns
-                // nothing about who is playing.
+                // Same gate as the token above, which for a CASUAL offer means
+                // "anyone holding the offer id". That is deliberate, not
+                // inherited: the id is an unguessable UUID handed only to the
+                // poster, and the value behind it is a display name its owner
+                // chose to publish in a public lobby (it is already in
+                // GET /park/offers). A wagered offer stays wallet-gated.
                 opponent: o.opponent.clone().filter(|_| authorized),
             })
         }

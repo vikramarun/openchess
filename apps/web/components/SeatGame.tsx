@@ -63,7 +63,7 @@ export function SeatGame({
   // resolver lives in a ref (settling a promise isn't render-safe state) while
   // the flag that shows the dialog is ordinary state.
   const confirmResolve = useRef<((ok: boolean) => void) | null>(null);
-  const [prompting, setPrompting] = useState(false);
+  const [prompting, setPrompting] = useState<{ deadlineMs: number | null } | null>(null);
   const [awaitingOpponent, setAwaitingOpponent] = useState(false);
   const [declined, setDeclined] = useState(false);
   const onResultRef = useRef(onResult);
@@ -73,7 +73,7 @@ export function SeatGame({
   const settleConfirm = useCallback((ok: boolean) => {
     confirmResolve.current?.(ok);
     confirmResolve.current = null;
-    setPrompting(false);
+    setPrompting(null);
   }, []);
 
   useEffect(() => {
@@ -127,10 +127,10 @@ export function SeatGame({
           // opted out, so auto-accept costs nothing on the hot path.
           confirmStart:
             confirmStakes && !autoAcceptEnabled()
-              ? () =>
+              ? (deadlineMs) =>
                   new Promise<boolean>((resolve) => {
                     confirmResolve.current = resolve;
-                    setPrompting(true);
+                    setPrompting({ deadlineMs });
                   })
               : undefined,
         },
@@ -210,16 +210,21 @@ export function SeatGame({
   const oppCaptured = color === "white" ? mat.blackCaptured : mat.whiteCaptured;
   const myEdge = color === "white" ? mat.advantage : -mat.advantage;
 
-  const acceptConfirm = (autoFuture: boolean) => {
-    if (autoFuture) setAutoAccept(true);
-    settleConfirm(true);
-    setAwaitingOpponent(true);
-  };
-  const declineConfirm = () => {
+  // Memoised: StakeConfirm's auto-decline effect lists onDecline as a
+  // dependency, and a fresh identity each render would re-run it every render.
+  const acceptConfirm = useCallback(
+    (autoFuture: boolean) => {
+      if (autoFuture) setAutoAccept(true);
+      settleConfirm(true);
+      setAwaitingOpponent(true);
+    },
+    [settleConfirm],
+  );
+  const declineConfirm = useCallback(() => {
     settleConfirm(false);
     setAwaitingOpponent(false);
     setDeclined(true);
-  };
+  }, [settleConfirm]);
 
   return (
     <div className="game-wrap">
@@ -230,6 +235,7 @@ export function SeatGame({
           stake={stake}
           initialSecs={initialSecs}
           incrementSecs={incrementSecs}
+          deadlineMs={prompting?.deadlineMs ?? null}
           waiting={awaitingOpponent}
           onAccept={acceptConfirm}
           onDecline={declineConfirm}

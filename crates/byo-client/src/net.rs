@@ -64,13 +64,21 @@ pub const DEFAULT_MOVE_OVERHEAD_MS: u64 = 250;
 /// The `movetime` ceiling to attach to a `go`, given the policy and how much
 /// clock this side actually has left. `None` means "no ceiling".
 ///
+/// `remaining_ms` is itself an `Option` because our colour is only known after
+/// `GameStart`. "Unknown" must not collapse to "zero left": that would floor
+/// every search at 50ms and blunder the game away. An unknown clock gets the
+/// flat ceiling and lets the engine's own manager do the rest.
+///
 /// The cap is also floored so a bot in deep time trouble is never told to
 /// search for ~0ms: the engine's own manager already handles that case, and
 /// forcing a 1ms search would throw the game away rather than lose on time.
-fn move_cap_ms(policy: &TimePolicy, remaining_ms: u64) -> Option<u64> {
+fn move_cap_ms(policy: &TimePolicy, remaining_ms: Option<u64>) -> Option<u64> {
     const FLOOR_MS: u64 = 50;
     let max = policy.max_move_ms?;
-    let usable = remaining_ms.saturating_sub(policy.move_overhead_ms);
+    let Some(remaining) = remaining_ms else {
+        return Some(max);
+    };
+    let usable = remaining.saturating_sub(policy.move_overhead_ms);
     Some(max.min(usable).max(FLOOR_MS))
 }
 
@@ -175,11 +183,13 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                 ..
             } => {
                 let inc = clock.increment_ms;
-                let my_clock = match my_color {
-                    Some(Color::White) => clock.white_ms,
-                    Some(Color::Black) => clock.black_ms,
-                    None => 0,
-                };
+                // `None` until GameStart names our colour. Kept as an Option
+                // all the way into the budget: a missing colour is not a
+                // zeroed clock (see `move_cap_ms`).
+                let my_clock = my_color.map(|c| match c {
+                    Color::White => clock.white_ms,
+                    Color::Black => clock.black_ms,
+                });
                 // Try the opening book first; fall back to the engine.
                 let book_move = opts.book.as_ref().and_then(|b| {
                     position_from(&moves_uci).and_then(|pos| b.pick(&pos, moves_uci.len() as u32))
@@ -210,7 +220,9 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                         game_id,
                         ply,
                         uci_move,
-                        client_clock_ms: my_clock,
+                        // Informational only (the server ignores it and keeps
+                        // its own authoritative clock), so 0 is fine here.
+                        client_clock_ms: my_clock.unwrap_or(0),
                         sig: None,
                     },
                 )
@@ -272,21 +284,21 @@ mod tests {
     fn no_cap_unless_one_was_asked_for() {
         // The default must not change how anyone's existing engine plays —
         // only the opt-in ceiling does.
-        assert_eq!(move_cap_ms(&TimePolicy::default(), 180_000), None);
+        assert_eq!(move_cap_ms(&TimePolicy::default(), Some(180_000)), None);
     }
 
     #[test]
     fn caps_the_opening_search() {
         // The case this exists for: Stockfish would otherwise spend ~62s on
         // move 1 of a 10+0 game.
-        assert_eq!(move_cap_ms(&capped(7_500), 600_000), Some(7_500));
+        assert_eq!(move_cap_ms(&capped(7_500), Some(600_000)), Some(7_500));
     }
 
     #[test]
     fn never_budgets_time_the_clock_does_not_have() {
         // 2s left, 250ms of it owed to the network: search at most 1.75s, not
         // the 5s ceiling.
-        assert_eq!(move_cap_ms(&capped(5_000), 2_000), Some(1_750));
+        assert_eq!(move_cap_ms(&capped(5_000), Some(2_000)), Some(1_750));
     }
 
     #[test]
@@ -295,7 +307,17 @@ mod tests {
         // engine to search for ~0ms throws the game away; losing on time was
         // already the likely outcome, so leave it a usable sliver and let the
         // engine's own manager decide.
-        assert_eq!(move_cap_ms(&capped(5_000), 100), Some(50));
-        assert_eq!(move_cap_ms(&capped(5_000), 0), Some(50));
+        assert_eq!(move_cap_ms(&capped(5_000), Some(100)), Some(50));
+        assert_eq!(move_cap_ms(&capped(5_000), Some(0)), Some(50));
+    }
+
+    #[test]
+    fn an_unknown_clock_is_not_an_empty_clock() {
+        // Our colour is unknown until GameStart. If that collapsed to "0ms
+        // left" the search would be floored at 50ms and the bot would blunder
+        // the game away — a silent failure, since nothing else reads the
+        // colour on this path. Fall back to the flat ceiling instead.
+        assert_eq!(move_cap_ms(&capped(5_000), None), Some(5_000));
+        assert_eq!(move_cap_ms(&TimePolicy::default(), None), None);
     }
 }

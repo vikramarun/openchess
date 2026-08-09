@@ -14,6 +14,11 @@
 //! A move's weight is the number of lines running through it, so the pick is
 //! weighted toward the mainline while still varying. Add lines to make a
 //! variation more likely; the weights re-derive themselves.
+//!
+//! Lines may run deeper than the reader's `--book-max-ply` (16 by default, i.e.
+//! the first eight moves a side); entries past it are simply never reached.
+//! Keeping a couple of extra plies costs 16 bytes each and means raising the
+//! limit needs no regeneration.
 
 /// `(name, SAN mainline)`. The name is only for generator output and errors.
 pub const LINES: &[(&str, &str)] = &[

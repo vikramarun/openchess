@@ -299,6 +299,8 @@ export function Lobby() {
   return (
     <>
       {/* Play: pick a time control */}
+      {/* `.quick-play` is a legacy class name — it styles THIS lobby card, not
+          the /play page that used to share the name (now "Test Engine"). */}
       <div className="quick-play" style={{ marginBottom: 16 }}>
         {pending ? (
           <div>
