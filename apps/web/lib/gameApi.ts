@@ -27,7 +27,7 @@ export type GameDetail = {
   increment_secs: number;
   finished_at: string | null;
   /** Self-declared engines, [white, black]. Null for games recorded before
-   *  migration 0012 and for seats that declared none. Unverified by design. */
+   *  migration 0013 and for seats that declared none. Unverified by design. */
   white_engine: string | null;
   black_engine: string | null;
   moves: GameMove[];

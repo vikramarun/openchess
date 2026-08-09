@@ -152,7 +152,7 @@ pub struct GameDetailRow {
     pub time_increment_ms: i64,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Self-declared engines, [white, black]. Null for games recorded before
-    /// migration 0012, and for seats that declared none.
+    /// migration 0013, and for seats that declared none.
     pub white_engine: Option<String>,
     pub black_engine: Option<String>,
 }
@@ -892,7 +892,7 @@ mod tests {
             .await?;
 
         // Engines must survive to the public detail view — the whole point of
-        // migration 0012 is that a finished game can say what played it.
+        // migration 0013 is that a finished game can say what played it.
         let detail = db.game_detail(id).await?.expect("detail exists");
         assert_eq!(detail.white_engine.as_deref(), Some("Stockfish 18 · Sharp"));
         assert_eq!(detail.black_engine, None);

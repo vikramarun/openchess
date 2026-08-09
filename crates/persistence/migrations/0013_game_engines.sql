@@ -1,5 +1,10 @@
 -- Record which engine played each seat.
 --
+-- Numbered 0013, not 0012: sqlx keys migrations by VERSION, so two files both
+-- numbered 0012 collide on _sqlx_migrations_pkey and the server fails to
+-- migrate at boot. Git shows no conflict for it — the filenames differ — so
+-- check the highest existing number when adding one.
+--
 -- The self-declared engine string already existed, but only in memory: it rode
 -- along on the in-process `live_games` map and in WS frames, so it vanished the
 -- moment a game finished. A finished game's replay had no way to show what
