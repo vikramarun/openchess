@@ -13,6 +13,7 @@ import {
   bucketOf,
   gamesQuery,
   hasBuckets,
+  pageKey,
   pickStats,
   winRate,
   type Bucket,
@@ -48,9 +49,16 @@ export function ProfileStats({ address, editable }: { address: string; editable?
   const me = address.toLowerCase();
   const [p, setP] = useState<Profile | null>(null);
   const [bucket, setBucket] = useState<Bucket>("all");
-  // Keyed by bucket: each one is its own server page (the 50-row limit applies
-  // after the filter), so they can't be derived from one another.
-  const [games, setGames] = useState<Partial<Record<Bucket, GameItem[]>>>({});
+  // Fetched pages, keyed by WALLET AND ladder — each ladder is its own server
+  // page (the 50-row limit applies after the filter), so they can't be derived
+  // from one another, and the wallet has to be in the key because it can change
+  // under a mounted component: `/profile` passes it as a prop from the
+  // connected account, so switching wallets changes it with no navigation at
+  // all. Keyed on the ladder alone, the "already fetched" check below would
+  // then skip the refetch and leave the previous wallet's games on screen,
+  // under a header that had already updated to the new one.
+  const [games, setGames] = useState<Record<string, GameItem[]>>({});
+  const page = pageKey(me, bucket);
   const [err, setErr] = useState<string | null>(null);
   // Bumped after a photo change to refetch the profile: the new
   // `avatar_updated_at` is what busts the cached image URL.
@@ -84,14 +92,14 @@ export function ProfileStats({ address, editable }: { address: string; editable?
   useEffect(() => {
     let live = true;
     if (!ADDR_RE.test(me)) return;
-    if (games[bucket]) return; // already fetched this ladder
+    if (games[page]) return; // already fetched this wallet's ladder
     (async () => {
       try {
         const seg = encodeURIComponent(me);
         const gr = await fetch(`${SERVER_HTTP}/players/${seg}/games${gamesQuery(bucket)}`).then(
           (r) => r.json(),
         );
-        if (live) setGames((g) => ({ ...g, [bucket]: Array.isArray(gr) ? gr : [] }));
+        if (live) setGames((g) => ({ ...g, [page]: Array.isArray(gr) ? gr : [] }));
       } catch {
         if (live) setErr("Couldn’t load the profile. Is the server running?");
       }
@@ -100,10 +108,10 @@ export function ProfileStats({ address, editable }: { address: string; editable?
       live = false;
     };
     // No `reload`: changing your photo doesn't change 50 games of history.
-  }, [me, bucket, games]);
+  }, [me, bucket, page, games]);
 
   const stats = pickStats(p, bucket);
-  const rows = games[bucket];
+  const rows = games[page];
   const netClass = Number(stats.net) > 0 ? "pos" : Number(stats.net) < 0 ? "neg" : "";
   const photo = avatarUrl(me, p?.avatar_updated_at);
   // Free games stake nothing, so a Net USDC tile on the casual view is a

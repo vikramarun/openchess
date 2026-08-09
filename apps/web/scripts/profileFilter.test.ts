@@ -8,6 +8,7 @@ import {
   bucketOf,
   gamesQuery,
   hasBuckets,
+  pageKey,
   pickStats,
   winRate,
   type GameItem,
@@ -95,6 +96,14 @@ check("legacy sends no casual Elo, so the tile is hidden", legacy.casual_rating,
 // --- win rate ---
 check("win rate rounds", winRate(bucket({ games: 3, wins: 2 })), 67);
 check("no games is 0%, not NaN", winRate(bucket({ games: 0, wins: 0 })), 0);
+
+// --- the page cache key: a wallet change must never hit another's cache ---
+// /profile passes the address as a prop from the connected account, so it can
+// change with no navigation and no remount. A key without the wallet in it
+// would leave the previous wallet's games under the new wallet's header.
+check("wallet is part of the key", pageKey("0xa", "all") !== pageKey("0xb", "all"), true);
+check("ladder is part of the key", pageKey("0xa", "casual") !== pageKey("0xa", "ranked"), true);
+check("same wallet and ladder reuse one page", pageKey("0xa", "ranked"), pageKey("0xa", "ranked"));
 
 // --- the history query: never send `?filter=` for All ---
 check("all sends no param", gamesQuery("all"), "");

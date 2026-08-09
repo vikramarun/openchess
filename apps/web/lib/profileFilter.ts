@@ -97,6 +97,16 @@ export function winRate(s: StatBucket): number {
   return s.games > 0 ? Math.round((s.wins / s.games) * 100) : 0;
 }
 
+/** Cache key for one fetched page of history.
+ *
+ *  The wallet belongs in it as much as the ladder does. `/profile` passes the
+ *  address as a prop from the connected account, so it can change while the
+ *  component stays mounted — a key that omitted it would make an
+ *  already-fetched check pass for a wallet whose games were never fetched. */
+export function pageKey(address: string, bucket: Bucket): string {
+  return `${address}|${bucket}`;
+}
+
 /** Query string for the history fetch. Empty for "all" so a server that
  *  predates the parameter is never sent one. */
 export function gamesQuery(bucket: Bucket): string {
