@@ -23,6 +23,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
+(cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
 (cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
@@ -211,6 +212,22 @@ wallet.
   would otherwise resolve the NEXT search too, with a move for the previous
   position. `pnpm test:engine` pins it. Use `stopSearch()` rather than walking
   away, and keep `resync()` (`ucinewgame`) off a worker that is mid-search.
+- **A profile photo is user bytes this server vouches for.** `/players/{addr}/avatar`
+  hands them back with a stored content type, so both the type and the size come
+  from the file's own header, never from the uploader (`sniff_image` in
+  `players.rs`, PNG/JPEG only — nothing else has a dimension parser here).
+  Trusting the declared `Content-Type` would make an SVG stored XSS on the API
+  origin. And a byte cap does **not** bound a decoded image: a 9000×9000 PNG of
+  one flat colour compresses to ~236 KB, fits the 256 KiB limit, and costs every
+  browser that renders that profile ~0.3 GB — an `<img>` decodes at full
+  resolution even inside a 72px box. Hence `AVATAR_MAX_PX`; `players::tests`
+  pins both refusals. Writes are SIWE-bound and throttled **per wallet**
+  (`limits.avatar`), not on the per-IP read budget this router's layer provides.
+  The image response is cacheable, so the client busts it with
+  `?v=<avatar_updated_at>` from `/players/{addr}` — without that a replaced photo
+  keeps serving the old one. `lib/avatar.ts` centre-crops and re-encodes to a
+  256px JPEG before upload (`pnpm test:avatar`), which is what keeps every limit
+  above invisible in normal use.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match

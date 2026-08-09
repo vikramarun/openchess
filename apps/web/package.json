@@ -21,6 +21,7 @@
     "test:nav": "tsx scripts/plyNav.test.ts",
     "test:offers": "tsx scripts/offers.test.ts",
     "test:prefs": "tsx scripts/boardPrefs.test.ts",
+    "test:avatar": "tsx scripts/avatar.test.ts",
     "test:layout": "tsx scripts/layout.test.ts"
   },
   "dependencies": {

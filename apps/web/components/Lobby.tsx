@@ -377,7 +377,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                 <>
                   {" "}
                   Want your own engine to play instead?{" "}
-                  <Link href="/profile">Connect it</Link>.
+                  <Link href="/profile#advanced">Connect it</Link>.
                 </>
               )}
             </div>
