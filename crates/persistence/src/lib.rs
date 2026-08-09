@@ -937,38 +937,15 @@ impl Db {
 mod tests {
     use super::*;
 
-    /// Migrations run **once per process**, not once per test.
-    ///
-    /// These tests run concurrently against one database, and racing
-    /// `migrate()` against itself corrupts `_sqlx_migrations`: the losers fail
-    /// with a duplicate key, or — more confusingly — with "migration N was
-    /// previously applied but has been modified", which reads like someone
-    /// edited a shipped migration rather than like a race. It stayed hidden
-    /// while there were two tests and surfaced in CI the moment there were
-    /// three. Serialise the migration; the tests themselves still run in
-    /// parallel, and each already scopes its rows to a fresh UUID.
-    static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-    /// A migrated connection, or `None` when there's no database configured
-    /// (every test here is skipped rather than failed in that case).
-    async fn test_db() -> Result<Option<Db>> {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return Ok(None);
-        };
-        let db = Db::connect(&url).await?;
-        MIGRATED
-            .get_or_try_init(|| async { db.migrate().await })
-            .await?;
-        Ok(Some(db))
-    }
-
     // Runs only when DATABASE_URL is set (local Postgres).
     #[tokio::test]
     async fn game_lifecycle_roundtrip() -> Result<()> {
-        let Some(db) = test_db().await? else {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
             return Ok(());
         };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
 
         let id = Uuid::new_v4();
         db.create_game(
@@ -996,9 +973,12 @@ mod tests {
     // Runs only when DATABASE_URL is set (local Postgres).
     #[tokio::test]
     async fn avatar_roundtrip() -> Result<()> {
-        let Some(db) = test_db().await? else {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
             return Ok(());
         };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
 
         // Mixed case on purpose: every read path folds through lower(wallet),
         // so a photo set from a checksummed address must be found by the
@@ -1035,9 +1015,12 @@ mod tests {
     // Runs only when DATABASE_URL is set (local Postgres).
     #[tokio::test]
     async fn leaderboard_counts_and_ordering() -> Result<()> {
-        let Some(db) = test_db().await? else {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
             return Ok(());
         };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
 
         // Unique wallets per run so the assertions don't collide with other data.
         let tag = Uuid::new_v4().simple().to_string();
