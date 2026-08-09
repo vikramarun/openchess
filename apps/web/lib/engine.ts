@@ -203,8 +203,15 @@ export class BrowserEngine {
       // search runs. Leaving it attached would feed the caller the NEXT search's
       // scores, which for a seat means a bar describing a position the viewer
       // isn't looking at.
+      //
+      // The fan-out needs the same guard `bestmove` gets, for the same reason:
+      // when a caller walks away from a search the engine is still running, two
+      // searches are outstanding at once, and the scores arriving belong to the
+      // OLDER one. The engine works the queue in order, so a search reports only
+      // while it is at the head of it.
       const infoFn = onInfo
         ? (line: string) => {
+            if (this.bestmoveWaiters[0] !== fn) return;
             const info = parseInfoLine(line);
             if (info) onInfo(info);
           }
