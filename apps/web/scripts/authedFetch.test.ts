@@ -10,16 +10,20 @@
 // Browser globals must exist before the module under test is imported, since it
 // reaches localStorage at call time — hence the dynamic import below.
 const store = new Map<string, string>();
-(globalThis as unknown as { window: unknown }).window = {
-  dispatchEvent: () => true,
-  addEventListener: () => {},
-  removeEventListener: () => {},
-};
-(globalThis as unknown as { localStorage: unknown }).localStorage = {
+const localStorageStub = {
   getItem: (k: string) => store.get(k) ?? null,
   setItem: (k: string, v: string) => void store.set(k, v),
   removeItem: (k: string) => void store.delete(k),
 };
+// On BOTH, as a real browser has it: lib/storage.ts reads `window.localStorage`
+// (it must, to stay SSR-safe), while older call sites used the bare global.
+(globalThis as unknown as { window: unknown }).window = {
+  dispatchEvent: () => true,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  localStorage: localStorageStub,
+};
+(globalThis as unknown as { localStorage: unknown }).localStorage = localStorageStub;
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -42,7 +46,16 @@ function stubFetch(status: number) {
   };
 }
 
+/** Seed a session under the CURRENT key names. */
 const signIn = () => {
+  store.clear();
+  store.set("openchess.token", "tok-123");
+  store.set("openchess.addr", "0xabc");
+};
+
+/** Seed one under the PRE-NAMESPACE names a returning visitor still holds. */
+const signInLegacy = () => {
+  store.clear();
   store.set("chess_token", "tok-123");
   store.set("chess_addr", "0xabc");
 };
@@ -50,12 +63,13 @@ const signIn = () => {
 async function main() {
   // Imported here (not at top level) so the browser globals above exist first.
   const { authedFetch } = await import("../lib/authedFetch");
+  const { authToken, authAddress } = await import("../lib/escrow");
 
   // A rejected session is dropped, so the UI re-renders signed-out.
   signIn();
   stubFetch(401);
   const rejected = await authedFetch("/x");
-  check("401 with a token clears it", store.has("chess_token"), false);
+  check("401 with a token clears it", authToken(), null);
   // The caller still receives the response, or it could not tell the user why
   // the action failed — clearing must not swallow the result.
   check("401 is still returned to the caller", rejected.status, 401);
@@ -65,24 +79,24 @@ async function main() {
   store.clear();
   stubFetch(401);
   await authedFetch("/x");
-  check("401 without a token is a no-op", store.has("chess_token"), false);
+  check("401 without a token is a no-op", authToken(), null);
 
   // A working session must survive. Clearing on any non-OK status would sign
   // people out on ordinary errors — worse than the bug being fixed.
   signIn();
   stubFetch(200);
   await authedFetch("/x");
-  check("200 keeps the session", store.get("chess_token"), "tok-123");
+  check("200 keeps the session", authToken(), "tok-123");
 
   signIn();
   stubFetch(503);
   await authedFetch("/x");
-  check("503 keeps the session", store.get("chess_token"), "tok-123");
+  check("503 keeps the session", authToken(), "tok-123");
 
   signIn();
   stubFetch(403);
   await authedFetch("/x");
-  check("403 keeps the session", store.get("chess_token"), "tok-123");
+  check("403 keeps the session", authToken(), "tok-123");
 
   // The credential actually goes out, or none of the above means anything.
   signIn();
@@ -109,6 +123,37 @@ async function main() {
   check("keeps a plain-object header", seenType, "application/json");
   await authedFetch("/x", { headers: new Headers({ "content-type": "text/plain" }) });
   check("keeps a Headers instance", seenType, "text/plain");
+
+  // --- the pre-namespace key migration ---
+  //
+  // Keys were renamed to `openchess.*`; a returning visitor still holds the old
+  // pair. Reading has to ADOPT it, not ignore it — ignoring would have signed
+  // out every signed-in user the moment this deployed, which is the exact
+  // failure authedFetch itself exists to prevent.
+  signInLegacy();
+  check("a legacy token is adopted, not lost", authToken(), "tok-123");
+  check("…and its wallet with it", authAddress(), "0xabc");
+  check("the legacy name is cleaned up", store.has("chess_token"), false);
+  check("…under the new one", store.get("openchess.token"), "tok-123");
+
+  // A migrated session still rides on the wire and still clears on 401.
+  signInLegacy();
+  stubFetch(200);
+  await authedFetch("/x");
+  check("a migrated session sends its bearer", seenAuth, "Bearer tok-123");
+  signInLegacy();
+  stubFetch(401);
+  await authedFetch("/x");
+  check("a migrated session clears on 401", authToken(), null);
+  check("and leaves no legacy copy to resurrect", store.has("chess_token"), false);
+
+  // A current-name value must win over a stale legacy one rather than being
+  // overwritten by it (a tab that signed in after the rename, then met an old
+  // leftover key).
+  store.clear();
+  store.set("chess_token", "old");
+  store.set("openchess.token", "new");
+  check("the current name wins over a legacy leftover", authToken(), "new");
 
   console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
   process.exit(failed ? 1 : 0);

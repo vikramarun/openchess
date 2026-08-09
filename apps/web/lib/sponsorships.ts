@@ -14,13 +14,13 @@
  *  permissionless and can always be called directly.
  */
 
-const KEY = "openchess.sponsored";
+import { readMigrated, writeKey } from "./storage";
 
 type Store = Record<string, string[]>; // lowercased wallet -> tournament ids
 
 function read(): Store {
   try {
-    const raw = window.localStorage.getItem(KEY);
+    const raw = readMigrated("sponsored");
     const parsed = raw ? JSON.parse(raw) : {};
     return parsed && typeof parsed === "object" ? (parsed as Store) : {};
   } catch {
@@ -48,7 +48,7 @@ export function rememberSponsorship(address: string, tid: string): void {
     const list = Array.isArray(store[key]) ? store[key] : [];
     if (!list.includes(tid)) store[key] = [...list, tid];
     else store[key] = list;
-    window.localStorage.setItem(KEY, JSON.stringify(store));
+    writeKey("sponsored", JSON.stringify(store));
   } catch {
     /* private mode — the reclaim just won't be auto-discovered */
   }

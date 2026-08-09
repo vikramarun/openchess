@@ -347,12 +347,9 @@ function TournamentClient() {
       }
     }
     try {
-      const r = await fetch(`${SERVER_HTTP}/tournaments`, {
+      const r = await authedFetch(`${SERVER_HTTP}/tournaments`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(buyInBase && token ? { authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           name: name.trim(),
           buy_in: buyInBase,
@@ -364,13 +361,27 @@ function TournamentClient() {
       });
       if (!r.ok)
         return setErr(
-          r.status === 503
-            ? MAINTENANCE_MSG
-            : // The server validates the structure too, and it is the authority
-              // — say so rather than blaming the whole form.
-              r.status === 400
-              ? "The server refused those terms. Check the prize structure and entry fee."
-              : `Couldn’t create (${r.status}).`,
+          r.status === 401
+            ? // A gated tournament needs an organizer who can open the gate, so
+              // the server refuses an anonymous one. Otherwise it's a stale
+              // session, which is what SESSION_EXPIRED explains.
+              admission !== "open" && !token
+              ? "Sign in (top right) to create a tournament people have to be let into."
+              : SESSION_EXPIRED
+            : r.status === 402
+              ? // The organizer must be funded before we spend oracle gas on
+                // `openTournament` — at least their own entry, and a deposit of
+                // some kind even when entry is free.
+                buyInBase && buyInBase !== "0"
+                ? "Deposit at least the entry fee before opening a paid tournament — the organizer plays too."
+                : "Deposit to your balance first — opening a prize pool costs us gas, so it needs a funded organizer."
+              : r.status === 503
+                ? MAINTENANCE_MSG
+                : // The server validates the structure too, and it is the
+                  // authority — say so rather than blaming the whole form.
+                  r.status === 400
+                  ? "The server refused those terms. Check the prize structure and entry fee."
+                  : `Couldn’t create (${r.status}).`,
         );
       setName("");
       setBuyIn("");

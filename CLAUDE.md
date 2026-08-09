@@ -31,8 +31,9 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
-(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
+(cd apps/web && pnpm test:layout)  # header stays on screen/under the modal; coords stay on the board
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
+(cd apps/web && pnpm test:csp)     # the CSP origins sign-in depends on
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -137,6 +138,54 @@ wallet.
   page's only heading out of the HTML. `pnpm test:layout` pins the two CSS
   halves (sticky, and ranked under the overlay) by reading `globals.css`; the
   React half — what `inGame` hides — is unpinned, since there's no DOM harness.
+- **Sign-in is Dynamic, and it has four traps.** Dynamic
+  (`@dynamic-labs/*`, `app/providers.tsx`) replaced RainbowKit so email/Google
+  logins provision an embedded MPC wallet. That wallet is an ordinary EOA whose
+  signature is indistinguishable from MetaMask's, which is the whole reason
+  `crates/server/src/auth.rs` needed **no change**: it still `ecrecover`s a
+  65-byte signature. Keep it that way — a smart-contract account would sign via
+  ERC-1271 and 401 there, with no RPC in the auth path to check it against.
+  (1) **The `@dynamic-labs/*` versions must move together.** Dynamic ships
+  `assert-package-version`, which logs a loud error when the packages in the tree
+  disagree, and a split tree also duplicates the logger/message-transport
+  singletons. Only three packages are imported, but `types`, `logger` and
+  `assert-package-version` are *also* direct dependencies — they are transitive
+  and float to whatever is newest otherwise, which resolved a mixed 4.84.0/4.96.0
+  tree. They look removable and are not. `pnpm.overrides` does **not** fix this
+  (these resolve as auto-installed peers), and pnpm settings live in
+  `pnpm-workspace.yaml`, not the package.json `pnpm` field. The SDK also drags
+  in two packages with **build scripts** (`sharp`, `bigint-buffer`), both
+  declined in `allowBuilds` — a dependency that is neither allowed nor refused
+  fails the install outright on pnpm 11 and only warns on pnpm 10, so add every
+  new one there. That version split is why `packageManager` is pinned:
+  CI's `corepack enable` had no version and drifted onto 11 while local stayed
+  on 10, which made the failure invisible locally and fatal in CI, on an install
+  that never reached a test. The pin stays on the **10.x** line on purpose —
+  pnpm 11 imports `node:sqlite` and so needs Node 24, which neither CI (no
+  `setup-node`) nor Vercel pins, so requiring it would trade one unpinned
+  toolchain for another with the deploy in the blast radius. The strictness that
+  costs us is asserted directly in `ci.yml` instead, by grepping the install log
+  — which is only reliable *because* the version is pinned.
+  (2) **A missing `NEXT_PUBLIC_DYNAMIC_ENV_ID` used to white-screen the site.**
+  `DynamicContextProvider` *throws* on an empty environmentId, and the root error
+  boundary turns that into a blank page — so one unset env var took down
+  spectating, replays, profiles and casual play, none of which need a wallet.
+  Hence `lib/dynamicEnv.ts`: the provider is omitted entirely when unconfigured,
+  and `AuthButton`/`WalletMenu` check `dynamicConfigured` before calling any
+  Dynamic hook (the context defaults to `undefined`, so a hook without the
+  provider throws too). Don't collapse that branch back.
+  (3) **Dynamic's asset CDN is a different origin from its API.** The connect
+  modal fetches its wallet list from `dynamic-static-assets.com`, so with only
+  `app.dynamicauth.com` allowlisted the modal opens with **no wallets in it** and
+  nothing else looks wrong. `pnpm test:csp` pins both.
+  (4) **Never take a signer from wagmi while Dynamic is the connector authority.**
+  `lib/useDynamicSigner.ts` builds it from `primaryWallet.getWalletClient()`,
+  because `runSignIn` switches chain and signs immediately, and wagmi's
+  `getConnectorClient` only re-syncs on the connector's own `chainChanged` event
+  — it can throw `Connector not connected` mid-flow. Always pass `account:`
+  explicitly too (WalletConnect + Ledger clients carry several). The same shape
+  exists in `BankrollPanel`/`TournamentClaim`/`GameRefund`, which still use
+  wagmi; that's the fix if it shows up there.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
@@ -221,7 +270,18 @@ wallet.
   **only when it builds the board**, so passing them through `api.set()` silently
   does nothing. Hiding coordinates is done in CSS
   (`.board-wrap[data-coords="off"]`), and only the "every square" layout
-  recreates the instance. And roughly a third of lichess's piece sets are
+  recreates the instance.
+  A third: **the vendored base CSS positions the a-h/1-8 labels in fixed
+  pixels** (`coords.ranks { top: -20px }`, `coords.files { left: 24px }`) —
+  lichess overrides those in its own stylesheet and we vendored only the base,
+  so every label was offset by an amount that meant nothing at our board sizes
+  (on the 380px settings preview the file letters straddled the boundary with
+  the file to their left, `h` hung off the board, and the row sat 4px BELOW the
+  last rank). `board.css` re-anchors both strips to the board in percentages and
+  sizes the text in `cqw` — which is why `.cg-wrap` carries
+  `container-type: inline-size`: without a query container a `cqw` falls back to
+  the VIEWPORT and the labels render ~3x too big. `pnpm test:layout` pins both
+  halves. And roughly a third of lichess's piece sets are
   CC BY-NC-SA or outright non-free; this repo is MIT and settles real money, so a
   new set needs its license checked and recorded in
   `apps/web/public/piece/CREDITS.md` (`test:prefs` fails if a registered set has
@@ -252,10 +312,13 @@ wallet.
   down the tree, so a canonical set in `app/layout.tsx` declares /gauntlet,
   /tournament and the rest duplicates of the homepage and drops them out of the
   index. There is deliberately none at the root; set one per segment if wanted.
-- **Every page is a Client Component, so metadata lives in a sibling
+- **Almost every page is a Client Component, so metadata lives in a sibling
   `layout.tsx`.** `"use client"` and `export const metadata` are mutually
   exclusive, which is why each route has a three-line server layout next to its
-  page. A new route inherits the root title until you add one. The dynamic
+  page. The two exceptions are `/terms` and `/privacy`, which are static prose
+  with no client state: they are Server Components and export their own
+  metadata, so don't "fix" them by adding a layout. A new route inherits the
+  root title until you add one. The dynamic
   routes (`/game/[id]`, `/player/[address]`) use `generateMetadata` there, and
   both must degrade to a generic title rather than throw: a crawler hitting a
   dead id must not 500 the page.
@@ -281,6 +344,16 @@ wallet.
   keeps serving the old one. `lib/avatar.ts` centre-crops and re-encodes to a
   256px JPEG before upload (`pnpm test:avatar`), which is what keeps every limit
   above invisible in normal use.
+- **Every localStorage key lives in `apps/web/lib/storage.ts`.** Four keys
+  predate the `openchess.*` convention (`chess_token`, `chess_addr`,
+  `bot_uci_options`, `browser_bot_config`); `readMigrated` adopts a legacy
+  value on first read and deletes the old name. Do NOT drop that fallback until
+  well past the point where returning visitors could still hold the old pair —
+  removing it silently signs out every signed-in user, which is precisely the
+  failure `authedFetch` exists to prevent (`pnpm test:auth` pins both the
+  adoption and that a current value beats a stale legacy leftover). A test
+  harness stubbing `window` must put `localStorage` on it, not only on
+  `globalThis`: storage.ts reads `window.localStorage` to stay SSR-safe.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match

@@ -1693,6 +1693,32 @@ async fn tourney_create(
         if !state.0.settlement.is_onchain() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
+        // Skin in the game before we spend oracle gas. `open_tournament` is an
+        // oracle-PAID transaction while the organizer locks nothing until
+        // someone joins, and a SIWE session costs nothing to mint — so the
+        // per-wallet cap above doesn't actually bind an attacker, only the
+        // per-IP throttle does. Requiring a funded escrow balance ties the cost
+        // to something that can't be minted: the organizer must at least be
+        // able to pay their own buy-in.
+        //
+        // Fails CLOSED on a real zero balance, OPEN on an RPC error (`None`) —
+        // a flaky node must not lock legitimate organizers out of the feature.
+        //
+        // `max(1)` is what keeps this gate from evaporating on a FREE-entry
+        // tournament. Sponsored events have a zero buy-in, and `balance < 0` is
+        // never true, so the plain comparison would wave every zero-balance
+        // creator straight through to an oracle-paid `openTournament` — exactly
+        // the hole this check was added to close, reopened by a feature that
+        // arrived after it. Requiring any deposit at all still ties the cost to
+        // something that can't be minted for free.
+        let creator_addr = creator
+            .parse::<Address>()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Some(balance) = state.0.settlement.bankroll_of(creator_addr).await {
+            if balance < buy_in.max(U256::from(1)) {
+                return Err(StatusCode::PAYMENT_REQUIRED); // 402
+            }
+        }
         state
             .0
             .settlement
@@ -1812,6 +1838,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
                 serde_json::to_value(&t.players).unwrap_or_else(|_| json!([])),
                 bots_json(&t.entrant_bots),
                 serde_json::to_value(&t.entrant_wallets).unwrap_or_else(|_| json!({})),
+                serde_json::to_value(&t.entrant_engines).unwrap_or_else(|_| json!({})),
                 serde_json::to_value(&t.payout).unwrap_or_else(|_| json!({})),
                 serde_json::to_value(t.admission)
                     .ok()
@@ -1832,6 +1859,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
         players,
         bots,
         wallets,
+        engines,
         payout,
         admission,
         invites,
@@ -1849,6 +1877,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
             &players,
             &bots,
             &wallets,
+            &engines,
             &payout,
             &admission,
             &invites,
@@ -3430,12 +3459,7 @@ pub async fn recover_tournaments(state: &AppState) {
                     round_remaining: 0,
                     forfeits: Vec::new(),
                     entrant_bots: bots_from_json(&r.bots),
-                    // NOT restored: unlike entrant_bots above, declared engines
-                    // are not in the persisted payload, so a tournament that
-                    // survives a restart records no engine on its later games.
-                    // Cosmetic only (the label never gates anything), and the
-                    // fix is to add it to persist_tournament when that matters.
-                    entrant_engines: HashMap::new(),
+                    entrant_engines: serde_json::from_value(r.entrant_engines).unwrap_or_default(),
                     // Restored: attribution is NOT cosmetic — a casual entrant's
                     // games dispatched after a restart still belong to them.
                     entrant_wallets: serde_json::from_value(r.entrant_wallets).unwrap_or_default(),
@@ -3829,7 +3853,48 @@ mod tests {
     // A minimal in-memory AppState (no DB, log-only settlement) for driving the
     // matchmaking handlers directly. The returned receivers are kept alive so the
     // room's cleanup/results senders stay valid for the test's lifetime.
+    /// A sink that claims to settle onchain and reports a fixed bankroll, so
+    /// the buy-in gate can be tested without a chain. `None` models the view
+    /// call failing (an RPC blip), which must fail OPEN.
+    struct BankrollStub(Option<u64>);
+
+    #[async_trait::async_trait]
+    impl ledger::SettlementSink for BankrollStub {
+        async fn open_escrow(
+            &self,
+            _game_id: Uuid,
+            _white: Address,
+            _black: Address,
+            _stake: U256,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn report_result(
+            &self,
+            _game_id: Uuid,
+            _winner: Option<Address>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn is_onchain(&self) -> bool {
+            true
+        }
+        async fn bankroll_of(&self, _who: Address) -> Option<U256> {
+            self.0.map(U256::from)
+        }
+    }
+
     fn test_state() -> (
+        AppState,
+        mpsc::Receiver<GameId>,
+        mpsc::Receiver<crate::GameOutcome>,
+    ) {
+        test_state_with_sink(ledger::from_env())
+    }
+
+    fn test_state_with_sink(
+        settlement: Arc<dyn ledger::SettlementSink>,
+    ) -> (
         AppState,
         mpsc::Receiver<GameId>,
         mpsc::Receiver<crate::GameOutcome>,
@@ -3840,7 +3905,7 @@ mod tests {
             rooms: Mutex::new(HashMap::new()),
             live_games: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
-            settlement: ledger::from_env(),
+            settlement,
             db: None,
             lobby: Lobby::default(),
             auth: crate::auth::Auth::default(),
@@ -6384,6 +6449,115 @@ mod tests {
             join_code(&join("alpha").await),
             StatusCode::CONFLICT,
             "case-insensitive"
+        );
+    }
+
+    /// Opening a buy-in pool spends ORACLE gas while the organizer locks
+    /// nothing until someone joins, and a SIWE session is free to mint — so the
+    /// per-wallet cap doesn't bind an attacker. The gate ties the cost to
+    /// something unmintable: the organizer must be able to cover their own
+    /// buy-in. It must fail closed on a real shortfall and OPEN on an RPC
+    /// error, or one flaky node locks every legitimate organizer out.
+    #[tokio::test]
+    async fn a_buy_in_pool_needs_the_organizer_to_be_funded() {
+        let buy_in = "1000000"; // 1 USDC
+        let create = |state: AppState, token: String| async move {
+            tourney_create(
+                State(state),
+                bearer(&token),
+                Json(TourneyCreateReq {
+                    name: "Paid".into(),
+                    buy_in: Some(buy_in.into()),
+                    initial_secs: 60,
+                    increment_secs: 1,
+                    payout: None,
+                    admission: None,
+                }),
+            )
+            .await
+            .err()
+        };
+        let wallet = "0xaa55555555555555555555555555555555555555";
+
+        // Broke: refused, and no oracle gas was spent.
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(0))));
+        let tok = state.0.auth.mint_session(wallet);
+        assert_eq!(
+            create(state.clone(), tok).await,
+            Some(StatusCode::PAYMENT_REQUIRED)
+        );
+        assert!(
+            state.0.lobby.tournaments.lock().is_empty(),
+            "a refused create leaves no tournament behind"
+        );
+
+        // Funded, but under the buy-in: still refused.
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(999_999))));
+        let tok = state.0.auth.mint_session(wallet);
+        assert_eq!(
+            create(state.clone(), tok).await,
+            Some(StatusCode::PAYMENT_REQUIRED)
+        );
+
+        // Exactly covered: allowed (the organizer can pay their own entry).
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(1_000_000))));
+        let tok = state.0.auth.mint_session(wallet);
+        assert_eq!(create(state.clone(), tok).await, None);
+        assert_eq!(state.0.lobby.tournaments.lock().len(), 1);
+
+        // The view call failed: fail OPEN rather than lock the feature out.
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(None)));
+        let tok = state.0.auth.mint_session(wallet);
+        assert_eq!(create(state.clone(), tok).await, None);
+
+        // And a CASUAL tournament never consults a balance at all.
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(0))));
+        let free = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "Free".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await;
+        assert!(
+            free.is_ok(),
+            "a casual tournament costs no gas and needs no balance"
+        );
+
+        // But a FREE-ENTRY tournament is not casual: `buy_in: "0"` still opens
+        // an oracle-paid onchain pool. `balance < buy_in` is vacuously false at
+        // zero, so without the `max(1)` this gate would wave every unfunded
+        // creator through — the hole it exists to close, reopened by a feature
+        // that landed after it.
+        let sponsored = tourney_create(
+            State(state.clone()),
+            bearer(
+                &state
+                    .0
+                    .auth
+                    .mint_session("0xaa66666666666666666666666666666666666666"),
+            ),
+            Json(TourneyCreateReq {
+                name: "Sponsored".into(),
+                buy_in: Some("0".into()),
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(sponsored, Err(StatusCode::PAYMENT_REQUIRED)),
+            "a zero-balance creator must not get a free oracle transaction, \
+             free entry or not (got {:?})",
+            sponsored.err()
         );
     }
 

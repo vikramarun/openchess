@@ -1,58 +1,37 @@
-import { getDefaultConfig } from "@rainbow-me/rainbowkit";
-import {
-  coinbaseWallet,
-  metaMaskWallet,
-  rabbyWallet,
-  rainbowWallet,
-  safeWallet,
-  walletConnectWallet,
-} from "@rainbow-me/rainbowkit/wallets";
+import { createConfig, http } from "wagmi";
 import { base, baseSepolia } from "wagmi/chains";
 
-// WalletConnect requires a real projectId (from WalletConnect Cloud). Without
-// one, WalletConnect pairing won't work — injected wallets (MetaMask) still do.
-// In production the env var must be set; locally we warn loudly rather than
-// silently shipping a non-functional WC transport.
-const projectId = process.env.NEXT_PUBLIC_WC_PROJECT_ID;
-if (!projectId && typeof window !== "undefined") {
-  // Warn loudly in the browser (don't throw at import — that would break SSR /
-  // static prerender). Injected wallets still work without WalletConnect.
-  // eslint-disable-next-line no-console
-  console.warn(
-    "NEXT_PUBLIC_WC_PROJECT_ID is not set, so WalletConnect pairing will not work. Set it for production.",
-  );
-}
-
-// The connect-modal shortlist. RainbowKit's default "Popular" group is
-// [safe, rainbow, coinbase, metaMask, walletConnect] — Rabby is absent, so a
-// Rabby user saw only an "install a wallet" wall even with the extension
-// already installed. Spelling the group out is the only way to add to it;
-// keep the defaults in their original order and append Rabby.
-const POPULAR_WALLETS = [
-  safeWallet,
-  rainbowWallet,
-  coinbaseWallet,
-  metaMaskWallet,
-  rabbyWallet,
-  walletConnectWallet,
-];
-
-// Built lazily on the client (see providers.tsx) so getDefaultConfig — which
-// eagerly touches browser-only storage (indexedDB) — never runs during SSR /
-// static prerender.
-export function makeWagmiConfig() {
-  return getDefaultConfig({
-    // Shown in the WalletConnect pairing prompt inside the user's wallet app,
-    // so it has to be the product name they see everywhere else.
-    appName: "OpenChess",
-    projectId: projectId || "dev-only-no-walletconnect",
-    // Mainnet only unless a build opts in: a production visitor whose wallet
-    // sits on Base Sepolia should meet the wrong-network guard, not a
-    // first-class chain offer. The manual web check in
-    // scripts/test-sepolia-tournament.sh documents setting the flag.
-    chains:
-      process.env.NEXT_PUBLIC_ENABLE_TESTNET === "1" ? [base, baseSepolia] : [base],
-    wallets: [{ groupName: "Popular", wallets: POPULAR_WALLETS }],
-    ssr: true,
-  });
-}
+// Connectors come from Dynamic, not from here: DynamicWagmiConnector
+// (app/providers.tsx) pushes the connected wallet into wagmi's state, so every
+// existing useAccount/useReadContract/useWriteContract call site keeps working
+// against both external wallets and Dynamic's embedded MPC wallets. This config
+// therefore declares only chains + transports.
+//
+// Two things that will silently break if changed:
+//
+//   * `multiInjectedProviderDiscovery: false` is required. Dynamic implements
+//     EIP-6963 discovery itself, so leaving wagmi's on lists every injected
+//     wallet twice.
+//   * The chain list below and the networks enabled in the Dynamic dashboard are
+//     two separate sources of truth that must agree. Dynamic no longer syncs its
+//     dashboard networks into wagmi, so a chain enabled in only one of the two
+//     produces a wallet that connects but can't transact (or vice versa).
+//
+// The connect-modal wallet shortlist also lives in the dashboard now, rather than
+// in this file. Keep Rabby enabled there: RainbowKit's default group omitted it,
+// and a Rabby user with the extension already installed saw an "install a wallet"
+// wall. Filter/enable wallets by connector KEY, never by name — the name is
+// display text that Dynamic can localise or rename.
+export const wagmiConfig = createConfig({
+  // Mainnet only unless a build opts in: a production visitor whose wallet sits
+  // on Base Sepolia should meet the wrong-network guard, not a first-class chain
+  // offer. The manual web check in scripts/test-sepolia-tournament.sh documents
+  // setting the flag.
+  chains: process.env.NEXT_PUBLIC_ENABLE_TESTNET === "1" ? [base, baseSepolia] : [base],
+  ssr: true,
+  multiInjectedProviderDiscovery: false,
+  transports: {
+    [base.id]: http(),
+    [baseSepolia.id]: http(),
+  },
+});

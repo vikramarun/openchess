@@ -1,5 +1,6 @@
 import { SERVER_HTTP } from "./config";
 import { DEFAULT_PAYOUT, type PayoutSpec } from "./payouts";
+import { KEYS } from "./storage";
 
 /** A pairing in the schedule. `game_id` is null for a forfeit — the pairing was
  *  awarded without a game, so there is no room to spectate. */
@@ -210,7 +211,7 @@ export async function fetchTournaments(): Promise<Tournament[]> {
  *  Keeping it in React state (as this page used to) meant a reload turned an
  *  entrant into a stranger: no Start button, no games, no way back into an
  *  event they had already joined. */
-const IDENTITY_KEY = "openchess.tournamentIdentity";
+const IDENTITY_KEY = KEYS.tournamentIdentity;
 
 type Identities = Record<string, string>;
 

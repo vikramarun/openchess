@@ -147,6 +147,8 @@ pub struct OpenTournamentRow {
     /// Signed-in wallet per casual entrant (name -> wallet), so games
     /// dispatched after a restart stay attributed (migration 0016).
     pub entrant_wallets: serde_json::Value,
+    /// Self-declared engine per entrant (migration 0017), display only.
+    pub entrant_engines: serde_json::Value,
     /// Creator-defined prize structure, `{"bps":[…]}` (migration 0019). Must be
     /// restored, or a rehydrated tournament silently pays a different table.
     pub payout: serde_json::Value,
@@ -517,6 +519,7 @@ impl Db {
         players: &serde_json::Value,
         bots: &serde_json::Value,
         entrant_wallets: &serde_json::Value,
+        entrant_engines: &serde_json::Value,
         payout: &serde_json::Value,
         admission: &str,
         invites: &serde_json::Value,
@@ -529,11 +532,12 @@ impl Db {
         sqlx::query(
             r#"INSERT INTO tournaments
                  (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
-                  entrant_wallets, payout, admission, invites, approvals)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                  entrant_wallets, entrant_engines, payout, admission, invites, approvals)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
                  players=EXCLUDED.players, bots=EXCLUDED.bots,
                  entrant_wallets=EXCLUDED.entrant_wallets,
+                 entrant_engines=EXCLUDED.entrant_engines,
                  -- These DO change after creation (codes get minted and spent,
                  -- requests get decided), unlike `payout` and `admission`, which
                  -- are the terms a field joined on and stay as first written.
@@ -549,6 +553,7 @@ impl Db {
         .bind(players)
         .bind(bots)
         .bind(entrant_wallets)
+        .bind(entrant_engines)
         .bind(payout)
         .bind(admission)
         .bind(invites)
@@ -567,8 +572,8 @@ impl Db {
     pub async fn open_tournaments(&self, limit: i64) -> Result<Vec<OpenTournamentRow>> {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
-                      players, bots, entrant_wallets, payout,
-                      admission, invites, approvals,
+                      players, bots, entrant_wallets, entrant_engines,
+                      payout, admission, invites, approvals,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,

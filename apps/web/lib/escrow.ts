@@ -5,6 +5,7 @@
 import { formatUnits, parseUnits } from "viem";
 
 import { SERVER_HTTP } from "./config";
+import { clearKey, readMigrated, writeKey } from "./storage";
 
 export const USDC_DECIMALS = 6;
 
@@ -90,30 +91,28 @@ function notifyAuthChanged() {
 
 /** The stored SIWE session token (set by the sign-in flow). */
 export function authToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("chess_token");
+  return readMigrated("token");
 }
 
 /** The wallet address the stored session was issued for (lowercased), or null. */
 export function authAddress(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("chess_addr");
+  return readMigrated("addr");
 }
 
 /** Persist a SIWE session bound to the wallet it was issued for, and notify
  *  subscribers. */
 export function setAuth(token: string, address: string) {
   if (typeof window === "undefined") return;
-  localStorage.setItem("chess_token", token);
-  localStorage.setItem("chess_addr", address.toLowerCase());
+  writeKey("token", token);
+  writeKey("addr", address.toLowerCase());
   notifyAuthChanged();
 }
 
 /** Drop the stored SIWE session (on disconnect or account switch). */
 export function clearAuth() {
   if (typeof window === "undefined") return;
-  localStorage.removeItem("chess_token");
-  localStorage.removeItem("chess_addr");
+  clearKey("token");
+  clearKey("addr");
   notifyAuthChanged();
 }
 
