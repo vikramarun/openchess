@@ -55,6 +55,40 @@ check(
   groupOffers([offer({ offer_id: "a" }), offer({ offer_id: "b", poster_addr: "0xdead" })]).length,
   2,
 );
+// One wallet can stand two offers claiming DIFFERENT engines — a bot seat takes
+// its engine from the agent registration, a browser seat declares its own.
+// Merging them would show one row's engine and seat you at the other's board.
+check(
+  "same wallet, different declared engine stays separate",
+  groupOffers([
+    offer({ offer_id: "a", poster_engine: "Stockfish 17.1" }),
+    offer({ offer_id: "b", poster_engine: "Stockfish 16 WASM" }),
+  ]).length,
+  2,
+);
+check(
+  "same wallet, different declared name stays separate",
+  groupOffers([
+    offer({ offer_id: "a", poster_name: "House Bot" }),
+    offer({ offer_id: "b", poster_name: "Test Bot" }),
+  ]).length,
+  2,
+);
+check(
+  "a declared engine never merges with an undeclared one",
+  groupOffers([offer({ offer_id: "a" }), offer({ offer_id: "b", poster_engine: null })]).length,
+  2,
+);
+// The key is JSON-encoded, so a separator inside a user-supplied label cannot
+// forge a different offer's key.
+check(
+  "a label containing the separator can't collide",
+  groupOffers([
+    offer({ offer_id: "a", poster_name: "a", poster_engine: "b|c" }),
+    offer({ offer_id: "b", poster_name: "a|b", poster_engine: "c" }),
+  ]).length,
+  2,
+);
 // The dangerous one: anonymous casual posters share a null wallet (and may
 // share a declared name), but they are different people at different boards.
 check(

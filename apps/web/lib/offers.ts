@@ -30,15 +30,30 @@ export type OfferGroup<T extends OfferLike> = {
  *  on anonymous casual offers, where two unrelated humans can easily share a
  *  declared name (or none at all) and merging them would hand a joiner a seat
  *  at somebody else's board. Anonymous offers key on their own id, so they
- *  always stand alone. */
+ *  always stand alone.
+ *
+ *  The declared name and engine are part of the key, not just the terms: one
+ *  wallet can stand two offers that differ in what they claim to run — a bot
+ *  seat takes its engine from the agent's registration while a browser seat
+ *  declares `browserEngineLabel()`, and a rename between posts does it too.
+ *  Merging those would show one row's engine and seat you at the other's
+ *  board, which is a misrepresented opponent rather than a cosmetic slip once
+ *  a stake is involved. (The house bot's seats share a NAME and engine, so
+ *  they still collapse.)
+ *
+ *  JSON-encoded rather than joined on a separator: these are user-supplied
+ *  labels, and a separator inside one must not be able to forge another
+ *  offer's key. */
 function mergeKey(o: OfferLike): string {
   if (!o.poster_addr) return `id:${o.offer_id}`;
-  return [
+  return JSON.stringify([
     o.poster_addr.toLowerCase(),
-    o.stake ?? "free",
+    o.poster_name,
+    o.poster_engine,
+    o.stake,
     o.initial_secs,
     o.increment_secs,
-  ].join("|");
+  ]);
 }
 
 /** Collapse identical offers from the same wallet, preserving first-seen order. */

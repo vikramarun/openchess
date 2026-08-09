@@ -247,6 +247,12 @@ export function Lobby() {
       // per concurrent autopilot). Losing the race for the first — 404 gone,
       // 409 already matching — is not a failure while another is free, so walk
       // the group before reporting anything.
+      //
+      // 409 has to stay in the retry set even though the server overloads it
+      // (see the error text below): a just-accepted offer keeps its row in the
+      // park with status "matching"/"matched" and is only *removed* on cancel,
+      // TTL sweep, or a poster bot going offline. So the exact race this walk
+      // exists for answers 409, and narrowing to 404 would silently defeat it.
       let r: Response | null = null;
       for (const id of group.ids) {
         r = await authedFetch(`${SERVER_HTTP}/park/offers/${id}/accept`, {
@@ -270,7 +276,15 @@ export function Lobby() {
                 : r.status === 410
                   ? "That challenger's bot went offline — the offer is gone."
                   : r.status === 404 || r.status === 409
-                    ? "Someone just took that challenge — the lobby will refresh."
+                    ? // 409 is three different things: the offer is no longer
+                      // open, the POSTER's bot is busy, or OUR bot is busy
+                      // (matchmaking.rs park_accept). Only the first is a lost
+                      // race, so name the seat we can actually check — telling
+                      // someone their own mid-game bot means "someone took it"
+                      // sends them looking for a race that never happened.
+                      botPlays
+                      ? "Couldn't join — your bot may already be in a game, or the seat was just taken."
+                      : "Someone just took that challenge — the lobby will refresh."
                     : `Couldn't join (${r.status}).`,
         );
       const j = await r.json();
