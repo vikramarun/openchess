@@ -146,8 +146,14 @@ export class BrowserEngine {
     return this.ready;
   }
 
-  /** Set the position and `go …`, resolving with the engine's bestmove. */
-  private async go(movesUci: string[], goCmd: string): Promise<string> {
+  /** Set the position and `go …`, resolving with the engine's bestmove.
+   *
+   *  `hardStopMs` sends `stop` after a wall-clock deadline, for commands that
+   *  don't self-terminate. `go nodes N` is the case that needs it: it is
+   *  hardware-independent by design, which also means a slow device would
+   *  happily search past its flag. With the wall it gets a shallower search
+   *  instead — degradation, not a lost game. */
+  private async go(movesUci: string[], goCmd: string, hardStopMs?: number): Promise<string> {
     await this.ready;
     const pos = movesUci.length
       ? `position startpos moves ${movesUci.join(" ")}`
@@ -158,6 +164,10 @@ export class BrowserEngine {
         cleanup();
         reject(new Error("bestmove timeout"));
       }, 120000);
+      const wall =
+        hardStopMs !== undefined && hardStopMs > 0
+          ? setTimeout(() => this.send("stop"), hardStopMs)
+          : null;
       const fn = (line: string) => {
         const m = line.match(/^bestmove\s+(\S+)/);
         if (m) {
@@ -167,12 +177,22 @@ export class BrowserEngine {
         }
       };
       const cleanup = () => {
+        if (wall) clearTimeout(wall);
         this.listeners = this.listeners.filter((l) => l !== fn);
       };
       this.listeners.push(fn);
     });
     this.send(goCmd);
     return result;
+  }
+
+  /** Best move (UCI) for a caller-built `go` command — the seam the time
+   *  policy drives (lib/timePolicy.ts builds the command, this runs it). */
+  async bestMoveWithPlan(
+    movesUci: string[],
+    plan: { cmd: string; hardStopMs?: number },
+  ): Promise<string> {
+    return this.go(movesUci, plan.cmd, plan.hardStopMs);
   }
 
   /** Best move (UCI) for the given move history under a fixed think time. */

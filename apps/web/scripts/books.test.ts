@@ -22,6 +22,7 @@ import {
 } from "../lib/books";
 import { bookChildren, bookMainline, positionAfter } from "../lib/bookTree";
 import { browserEngineLabel, parseBrowserBotConfig } from "../lib/browserBot";
+import { DEFAULT_TIME_POLICY } from "../lib/timePolicy";
 import {
   decodeMove,
   entriesFor,
@@ -333,6 +334,7 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   check("v1 config keeps its name", v1.name, "My Bot");
   check("v1 config keeps bookMaxPly", v1.bookMaxPly, 12);
   check("v1 config gains a default repertoire", v1.repertoire, DEFAULT_REPERTOIRE);
+  check("v1 config gains a default time policy", v1.time, DEFAULT_TIME_POLICY);
 
   check("garbage config falls back cleanly", parseBrowserBotConfig(null).name, "");
   check("a long name is truncated", parseBrowserBotConfig({ name: "x".repeat(200) }).name.length, 48);
@@ -345,18 +347,18 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   // The declared label names the repertoire, and must survive the server's
   // 48-char sanitize_label cap.
   const sharp = PRESETS.find((p) => p.id === "sharp")!;
-  const label = browserEngineLabel({ name: "", bookMaxPly: 16, repertoire: normalizeRepertoire(sharp.rep) });
+  const label = browserEngineLabel({ name: "", bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: normalizeRepertoire(sharp.rep) });
   check("label names the style", label, "Stockfish 18 · Sharp");
   check("label fits the 48-char cap", label.length <= 48, true);
   check(
     "no repertoire keeps the plain label",
-    browserEngineLabel({ name: "", bookMaxPly: 16, repertoire: DEFAULT_REPERTOIRE }),
+    browserEngineLabel({ name: "", bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: DEFAULT_REPERTOIRE }),
     "Stockfish 18 (browser)",
   );
   const mixed = normalizeRepertoire({ white: "w-sharp", vsE4: "b-e4-solid", vsD4: "b-d4-solid", vsOther: "b-other-solid" });
   check(
     "a mixed repertoire names both styles",
-    browserEngineLabel({ name: "", bookMaxPly: 16, repertoire: mixed }),
+    browserEngineLabel({ name: "", bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: mixed }),
     "Stockfish 18 · Sharp/Solid",
   );
 }

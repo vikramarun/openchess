@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { RepertoirePicker } from "@/components/RepertoirePicker";
+import { TimeControls } from "@/components/TimeControls";
 import {
   clearUserBook,
   DEFAULT_CONFIG,
@@ -88,6 +89,19 @@ export function BrowserBotPanel({ onNameChange }: { onNameChange?: (name: string
           <RepertoirePicker
             repertoire={cfg.repertoire}
             onChange={(patch) => update({ repertoire: { ...cfg.repertoire, ...patch } })}
+          />
+        </div>
+
+        {/* Time is the other free lever: highly visible, almost no Elo cost. */}
+        <div>
+          <b style={{ color: "var(--text-strong)", fontSize: 14 }}>Thinking time</b>
+          <div className="muted" style={{ fontSize: 13, margin: "2px 0 10px" }}>
+            How your bot spends its clock. A bot that answers instantly is obvious to anyone
+            watching, and it barely costs any strength.
+          </div>
+          <TimeControls
+            time={cfg.time}
+            onChange={(patch) => update({ time: { ...cfg.time, ...patch } })}
           />
         </div>
 

@@ -14,6 +14,7 @@ import {
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
+import { budgetMs, goCommand } from "./timePolicy";
 
 export type PlayHandlers = {
   onEvent?: (msg: any) => void;
@@ -75,6 +76,11 @@ export function playSeat(
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
+  // The server stamps `deadline_server_ms` in ITS clock, so we need the offset
+  // to use it. `welcome` carries `server_time_ms` for exactly this. Estimated
+  // once and ignoring one-way latency, which is fine because the deadline is
+  // only ever used as an upper bound with OVERHEAD_MS subtracted.
+  let serverOffsetMs = 0;
   const send = (msg: Record<string, unknown>) => {
     seq += 1;
     ws.send(JSON.stringify({ v: 1, seq, ts_ms: 0, ...msg }));
@@ -105,6 +111,7 @@ export function playSeat(
       }
       switch (m.type) {
         case "welcome":
+          if (typeof m.server_time_ms === "number") serverOffsetMs = m.server_time_ms - Date.now();
           send({ type: "ready", game_id: gameId });
           break;
         case "your_turn": {
@@ -113,20 +120,26 @@ export function playSeat(
             // Opening book first: play known lines instantly instead of burning
             // clock on move 1. Falls through to the engine once out of book.
             const booked = legalBookMove(history);
-            // Play to the authoritative clock when the server provides one, so
-            // the time control is real (the engine self-allocates and can
-            // flag). Fall back to a fixed think time if no clock is present.
+            // Otherwise the configured time policy decides how to spend the
+            // clock. Default is `engine`, which reproduces the previous
+            // `go wtime/btime` command byte for byte.
             const c = m.clock;
-            const uci =
-              booked ??
-              (c
-                ? await engine.bestMoveWithClock(
-                    history,
-                    c.white_ms,
-                    c.black_ms,
-                    c.increment_ms ?? 0,
-                  )
-                : await engine.bestMove(history, movetimeMs));
+            const ourMs = history.length % 2 === 0 ? c?.white_ms : c?.black_ms;
+            const deadlineInMs =
+              typeof m.deadline_server_ms === "number"
+                ? m.deadline_server_ms - serverOffsetMs - Date.now()
+                : undefined;
+            const policy = getBrowserBotConfig().time;
+            const budget = budgetMs(policy, {
+              remainingMs: ourMs ?? movetimeMs * 20,
+              incrementMs: c?.increment_ms ?? 0,
+              deadlineInMs,
+            });
+            const plan = goCommand(policy, {
+              clock: c ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 } : null,
+              budgetMs: budget,
+            });
+            const uci = booked ?? (await engine.bestMoveWithPlan(history, plan));
             if (cancelled()) {
               ws.close();
               return;

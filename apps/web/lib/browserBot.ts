@@ -17,6 +17,7 @@ import {
   type Repertoire,
 } from "./books";
 import { parseBook, pickBookMove, type BookEntry } from "./polyglot";
+import { DEFAULT_TIME_POLICY, normalizeTimePolicy, timePolicyLabel, type TimePolicy } from "./timePolicy";
 
 export type BrowserBotConfig = {
   /** Display name shown to opponents; "" = default. */
@@ -25,12 +26,15 @@ export type BrowserBotConfig = {
   bookMaxPly: number;
   /** Which built-in opening books this bot plays, per colour/reply slot. */
   repertoire: Repertoire;
+  /** How it spends its clock. */
+  time: TimePolicy;
 };
 
 export const DEFAULT_CONFIG: BrowserBotConfig = {
   name: "",
   bookMaxPly: 16,
   repertoire: DEFAULT_REPERTOIRE,
+  time: DEFAULT_TIME_POLICY,
 };
 
 const CONFIG_KEY = "browser_bot_config";
@@ -50,6 +54,7 @@ export function parseBrowserBotConfig(raw: unknown): BrowserBotConfig {
     name: typeof r.name === "string" ? r.name.slice(0, 48) : "",
     bookMaxPly: clampInt(r.bookMaxPly, 0, 60, DEFAULT_CONFIG.bookMaxPly),
     repertoire: normalizeRepertoire(r.repertoire),
+    time: normalizeTimePolicy(r.time),
   };
 }
 
@@ -79,8 +84,8 @@ export function saveBrowserBotConfig(cfg: Partial<BrowserBotConfig>) {
  *  the lobby shows what a bot actually opens with. The server caps declared
  *  labels at 48 chars, so keep this short. */
 export function browserEngineLabel(cfg: BrowserBotConfig = getBrowserBotConfig()): string {
-  const rep = repertoireLabel(cfg.repertoire);
-  return rep ? `Stockfish 18 · ${rep}`.slice(0, 48) : "Stockfish 18 (browser)";
+  const parts = [repertoireLabel(cfg.repertoire), timePolicyLabel(cfg.time)].filter(Boolean);
+  return parts.length ? `Stockfish 18 · ${parts.join(" · ")}`.slice(0, 48) : "Stockfish 18 (browser)";
 }
 
 // ---------------------------------------------------------------------------
