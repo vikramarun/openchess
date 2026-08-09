@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
@@ -157,6 +157,13 @@ function TournamentClient() {
   }, [tourneys]);
 
   const openT = useMemo(() => tourneys.find((t) => t.id === openTid) ?? null, [tourneys, openTid]);
+  // Games whose board we actually sat at. A finished game's room is gone —
+  // `ws_handler` drops the socket the moment `room_channels` misses — so
+  // mounting SeatGame fresh on one just fast-fails to "disconnected" behind an
+  // empty board. Keeping a board we're ALREADY sitting at is different: it has
+  // the position and the result banner, which is the whole point of not
+  // unmounting the instant your game resolves.
+  const seated = useRef<Set<string>>(new Set());
 
   // My game in the round currently being played, if any. Deliberately still
   // returns it once it has FINISHED: the round doesn't advance until every
@@ -192,6 +199,11 @@ function TournamentClient() {
     );
     if (next) setOpenTid(next.id);
   }, [tourneys, openTid, isEntrant, liveGame, leftRound]);
+
+  useEffect(() => {
+    const g = openT ? liveGame(openT) : undefined;
+    if (g?.game_id) seated.current.add(g.game_id);
+  }, [openT, liveGame]);
 
   // Keep my seat tokens in sync while a tournament is open. Retries so a blip
   // can't strand the player on "taking your seat…", and re-runs each round.
@@ -400,7 +412,7 @@ function TournamentClient() {
                 rel="noreferrer"
                 style={{ display: "inline-block", marginTop: 8 }}
               >
-                Watch live ↗
+                {current.result ? "Review the game ↗" : "Watch live ↗"}
               </a>
             )}
             <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
@@ -409,7 +421,13 @@ function TournamentClient() {
           </div>
         )}
 
-        {entrant && current && seat && seat.seat !== "bot" && seat.token && current.game_id && (
+        {entrant &&
+          current &&
+          seat &&
+          seat.seat !== "bot" &&
+          seat.token &&
+          current.game_id &&
+          (!current.result || seated.current.has(current.game_id)) && (
           <div style={{ marginBottom: 16 }}>
             <SeatGame
               key={current.game_id}
@@ -424,11 +442,41 @@ function TournamentClient() {
           </div>
         )}
 
+        {/* The exact complement of the board branch above for a finished game:
+            shown whenever we can't (or shouldn't) mount a live board for it —
+            including the moment after `back()` drops our tokens and we return
+            before the round has advanced. */}
+        {entrant &&
+          current?.result &&
+          current.game_id &&
+          seat?.seat !== "bot" &&
+          !(seat && seat.token && seated.current.has(current.game_id)) && (
+          <div className="panel" style={{ marginBottom: 16, textAlign: "center" }}>
+            <b style={{ color: "var(--text-strong)" }}>
+              Round {current.round + 1}:{" "}
+              {current.result === "draw"
+                ? "drawn"
+                : sameEntrant(
+                      current.result === "white" ? current.white : current.black,
+                      identityIn(openT),
+                    )
+                  ? "you won"
+                  : "you lost"}
+            </b>
+            <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+              Waiting for the rest of the field before the next round.{" "}
+              <a href={`/game/${current.game_id}`} target="_blank" rel="noreferrer">
+                Review the game ↗
+              </a>
+            </div>
+          </div>
+        )}
+
         {/* Anything that isn't "bot seat" or "browser seat with a token" lands
             here — a seat still loading, or the shouldn't-happen case of a
             browser seat the server handed no token. Better a stated wait than a
             blank page while the round's clock runs. */}
-        {entrant && current && !(seat?.seat === "bot") && !(seat && seat.token) && (
+        {entrant && current && !current.result && !(seat?.seat === "bot") && !(seat && seat.token) && (
           <div className="panel" style={{ marginBottom: 16 }}>
             <span className="muted">Taking your seat…</span>
           </div>
