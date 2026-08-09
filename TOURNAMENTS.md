@@ -154,7 +154,15 @@ pays. A prize table computed a second way in the UI will drift.
 
 ---
 
-## Part 2 — sponsorship (contract v2)
+## Part 2 — sponsorship (contract v2) — **CONTRACT WRITTEN, NOT DEPLOYED**
+
+The contract half is implemented and tested in
+[ChessEscrow.sol](contracts/src/ChessEscrow.sol): buy-in may be zero,
+`sponsorTournament`, `refundSponsorship`, the `claimRefund` zero-buy-in guard,
+and a solvency invariant that now actually covers pools. **Nothing is deployed**
+— see the warning at the top of [DEPLOYMENTS.md](DEPLOYMENTS.md). Still to do:
+the server side (`ledger` sponsorship reads, free-entry entry-skip, the
+three-kind tournament model), the web sponsor flow, and the audit + migration.
 
 ### Contract changes
 

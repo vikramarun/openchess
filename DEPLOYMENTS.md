@@ -1,5 +1,23 @@
 # Deployments
 
+> ## ⚠️ `contracts/src/ChessEscrow.sol` at HEAD is NOT what is deployed.
+>
+> HEAD carries **v2 work in progress**: tournament sponsorship
+> (`sponsorTournament`, `refundSponsorship`, `sponsorship`), a buy-in that may
+> be zero so entry can be free, and a `claimRefund` guard for that case. None of
+> it is on Base. The mainnet address below still runs **v1** and is unaffected.
+>
+> v2 is not deployable as it stands. It needs, in order: an independent audit
+> (this adds new money paths to an already-unaudited contract), a fresh deploy +
+> Basescan verification, and a **bankroll migration** — balances live inside the
+> escrow, so users must withdraw from v1 and deposit into v2. Keep v1 live until
+> its in-flight games and tournaments have settled, and point the server at v2
+> only for new ones.
+>
+> To read the deployed source: `git log -- contracts/src/ChessEscrow.sol` and
+> check out the revision before the sponsorship commit, or diff against the
+> verified source on Basescan.
+
 ## Base mainnet (chain 8453), 2026-07-10
 
 **`ChessEscrow`**: [`0x7Cc1dD4F12BBfb40fCA6eC2334a27c646FCf923D`](https://basescan.org/address/0x7cc1dd4f12bbfb40fca6ec2334a27c646fcf923d)
