@@ -135,6 +135,10 @@ run_tc() {
   # Empty BOOK means "no book"; --book with an empty value would be an error.
   local book_args=()
   [[ -n "${BOOK:-}" ]] && book_args=(--book "$BOOK" --book-max-ply "$BOOK_MAX_PLY")
+  # Expanded below as ${book_args[@]+"${book_args[@]}"}: bash 3.2 (still the
+  # /bin/bash on macOS) treats "${empty[@]}" as an unset variable under `set -u`
+  # and aborts. Only the BOOK= opt-out path hits it — i.e. the path least likely
+  # to be exercised before someone relies on it.
   while true; do
     # The client's own output already names the game/opponent; the autopilot
     # retries transient errors internally, so an exit here is unusual.
@@ -145,7 +149,7 @@ run_tc() {
       --uci-option "Skill Level=$SKILL" \
       --max-move-ms "$max_move_ms" \
       --move-overhead-ms "$MOVE_OVERHEAD_MS" \
-      "${book_args[@]}" \
+      ${book_args[@]+"${book_args[@]}"} \
       --initial-secs "$initial" --increment-secs "$increment" || true
     echo "[${initial}+${increment}] autopilot exited; restarting in ${delay}s"
     sleep "$delay"

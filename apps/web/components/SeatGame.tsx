@@ -63,7 +63,13 @@ export function SeatGame({
   // resolver lives in a ref (settling a promise isn't render-safe state) while
   // the flag that shows the dialog is ordinary state.
   const confirmResolve = useRef<((ok: boolean) => void) | null>(null);
-  const [prompting, setPrompting] = useState<{ deadlineMs: number | null } | null>(null);
+  const [prompting, setPrompting] = useState(false);
+  // Kept OUT of `prompting` on purpose. Accepting clears `prompting` but the
+  // dialog stays up as "waiting for them", and the countdown must keep running
+  // against the same server deadline. Folding the two together resets the
+  // countdown to the client-side fallback at the moment of accepting — which
+  // is the lying-countdown bug this deadline exists to prevent.
+  const [promptDeadlineMs, setPromptDeadlineMs] = useState<number | null>(null);
   const [awaitingOpponent, setAwaitingOpponent] = useState(false);
   const [declined, setDeclined] = useState(false);
   const onResultRef = useRef(onResult);
@@ -73,7 +79,7 @@ export function SeatGame({
   const settleConfirm = useCallback((ok: boolean) => {
     confirmResolve.current?.(ok);
     confirmResolve.current = null;
-    setPrompting(null);
+    setPrompting(false);
   }, []);
 
   useEffect(() => {
@@ -130,7 +136,8 @@ export function SeatGame({
               ? (deadlineMs) =>
                   new Promise<boolean>((resolve) => {
                     confirmResolve.current = resolve;
-                    setPrompting({ deadlineMs });
+                    setPromptDeadlineMs(deadlineMs);
+                    setPrompting(true);
                   })
               : undefined,
         },
@@ -235,7 +242,7 @@ export function SeatGame({
           stake={stake}
           initialSecs={initialSecs}
           incrementSecs={incrementSecs}
-          deadlineMs={prompting?.deadlineMs ?? null}
+          deadlineMs={promptDeadlineMs}
           waiting={awaitingOpponent}
           onAccept={acceptConfirm}
           onDecline={declineConfirm}
