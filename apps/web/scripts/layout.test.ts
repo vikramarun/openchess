@@ -223,6 +223,39 @@ check(
   "no env(safe-area-inset-bottom) padding on .tabbar",
 );
 
+// --- the coin sits on the squares, not on the board row ---
+// `.demo-board` wraps `.board-row`, whose first child is the eval bar, so
+// anything centring inside it lands half a bar to the left of the board's real
+// middle — which is exactly what the homepage coin did. `.demo-scrim` corrects
+// it with `padding-left: var(--eval-col)`, and --eval-col is a DERIVED number:
+// the bar's own width plus the row's gap. Nothing at runtime recomputes it, so
+// widening the eval bar silently pushes the coin back off centre. Same shape as
+// the --tabbar-h pair above, and the same reason to pin it.
+const evalBar = ruleBody(".eval-bar");
+const boardRow = ruleBody(".board-row");
+const px = (v: string | null) => (v && /^-?\d+(\.\d+)?px$/.test(v) ? parseFloat(v) : NaN);
+const evalW = px(decl(evalBar, "width"));
+const rowGap = px(decl(boardRow, "gap"));
+const evalColRaw = css.slice(0, css.indexOf("}")).match(/--eval-col:\s*([^;]+);/)?.[1]?.trim() ?? null;
+const evalCol = px(evalColRaw);
+
+check(".eval-bar and .board-row rules exist", evalBar !== null && boardRow !== null);
+check(
+  ":root declares --eval-col in px",
+  Number.isFinite(evalCol),
+  `--eval-col is ${evalColRaw ?? "unset"}`,
+);
+check(
+  "--eval-col is the eval bar plus the row's gap",
+  Number.isFinite(evalW) && Number.isFinite(rowGap) && evalCol === evalW + rowGap,
+  `--eval-col ${evalCol} vs .eval-bar width ${evalW} + .board-row gap ${rowGap}`,
+);
+check(
+  ".demo-scrim centres its contents on the squares",
+  /padding-left:\s*var\(--eval-col\)/.test(ruleBody(".demo-scrim") ?? ""),
+  "the coin would sit half an eval bar left of the board's middle",
+);
+
 // The clearance itself lives on <body> INSIDE the ≤720px query — indented, so
 // `ruleBody` cannot see it by design. Match the query's text directly.
 const mobile = css.slice(css.indexOf("@media (max-width: 720px)"));
