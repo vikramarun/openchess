@@ -13,6 +13,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { path: "/tournament", priority: 0.8 },
     { path: "/play", priority: 0.6 },
     { path: "/connect", priority: 0.5 },
+    { path: "/terms", priority: 0.3 },
+    { path: "/privacy", priority: 0.3 },
   ];
   return routes.map(({ path, priority }) => ({
     url: `${SITE_URL}${path}`,

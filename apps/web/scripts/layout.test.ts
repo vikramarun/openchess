@@ -26,10 +26,10 @@ import { join } from "node:path";
 // Comments stripped up front: `ruleBody` ends a block at the first `}`, and
 // `decl` would otherwise read a property named inside a comment as a real
 // declaration (`min-width: 0` is documented one line above itself below).
-const css = readFileSync(join(__dirname, "..", "app", "globals.css"), "utf8").replace(
-  /\/\*[\s\S]*?\*\//g,
-  "",
-);
+const read = (file: string) =>
+  readFileSync(join(__dirname, "..", "app", file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const css = read("globals.css");
+const boardCss = read("board.css");
 
 let failed = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -45,12 +45,12 @@ function check(name: string, ok: boolean, detail = "") {
  *  `.site-header` added later would win in a browser and be invisible here.
  *  Fine for an invariant whose whole point is one declaration in one place —
  *  but it is the assumption to revisit if this file ever grows a second one. */
-function ruleBody(selector: string): string | null {
-  const i = css.indexOf(`\n${selector} {`);
+function ruleBody(selector: string, source: string = css): string | null {
+  const i = source.indexOf(`\n${selector} {`);
   if (i === -1) return null;
-  const start = css.indexOf("{", i);
-  const end = css.indexOf("}", start);
-  return end === -1 ? null : css.slice(start + 1, end);
+  const start = source.indexOf("{", i);
+  const end = source.indexOf("}", start);
+  return end === -1 ? null : source.slice(start + 1, end);
 }
 
 function decl(body: string | null, prop: string): string | null {
@@ -118,6 +118,51 @@ check(
   "a control cannot outgrow its container",
   decl(field, "max-width") === "100%",
   `max-width is ${decl(field, "max-width") ?? "unset"}`,
+);
+
+// --- half four: the board's coordinates stay on the board ---
+// chessground's vendored base CSS positions the inside labels with FIXED PIXEL
+// offsets (`coords.ranks { top: -20px }`, `coords.files { left: 24px }`) that
+// only line up at one board size — at 380px the file strip was most of a square
+// too far right, `h` hung off the edge, and the whole row sat below the last
+// rank. app/board.css re-anchors both strips to the board itself, and the two
+// declarations below are what that rests on. Both fail SILENTLY if dropped: a
+// `left` reverting to the vendored 24px looks like a rendering quirk rather
+// than a missing rule.
+const ranks = ruleBody(".cg-wrap coords.ranks", boardCss);
+const fileStrip = ruleBody(".cg-wrap coords.files", boardCss);
+const wrap = ruleBody(".cg-wrap", boardCss);
+
+check("board.css overrides the rank strip", ranks !== null);
+check("board.css overrides the file strip", fileStrip !== null);
+check(
+  "the rank strip starts at the top of the board",
+  decl(ranks, "top") === "0",
+  `top is ${decl(ranks, "top") ?? "unset"}`,
+);
+check(
+  "the file strip starts at the left edge",
+  decl(fileStrip, "left") === "0",
+  `left is ${decl(fileStrip, "left") ?? "unset"}`,
+);
+check(
+  "the file strip sits ON the last rank, not below it",
+  decl(fileStrip, "bottom") === "0",
+  `bottom is ${decl(fileStrip, "bottom") ?? "unset"}`,
+);
+// The label size is `clamp(9px, …cqw, …)`, and a cqw with no query container
+// resolves against the VIEWPORT — which silently renders ~27px coordinates on
+// a 380px board rather than ~9px. The containment is the whole load-bearing
+// half of that rule.
+check(
+  ".cg-wrap is a query container for the label size",
+  decl(wrap, "container-type") === "inline-size",
+  `container-type is ${decl(wrap, "container-type") ?? "unset"}`,
+);
+check(
+  "the label size is board-relative",
+  /font-size:[^;]*cqw/.test(ruleBody(".cg-wrap coords", boardCss) ?? ""),
+  "no cqw font-size on .cg-wrap coords",
 );
 
 process.exit(failed === 0 ? 0 : 1);
