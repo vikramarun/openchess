@@ -43,11 +43,14 @@ a:hover {
 }
 
 /* ---------- header ---------- */
-/* Sticky, because the game view is far taller than a viewport: the result
-   banner and "Back to lobby" sit ~1000px down, so by the time a finished game
-   is readable the top nav has scrolled away and the only reachable link on
-   screen is the one inside the board sidebar. Below `.modal-overlay`'s z-index
-   (50) on purpose — a modal must still cover the header. */
+/* Sticky, because a game view is far taller than a viewport: "Back to lobby"
+   sits ~1000px down on a page that still carries a lobby's worth of content
+   above the board, so by the time a finished game is readable the top nav has
+   scrolled away and the only reachable link on screen is the one inside the
+   board sidebar. The homepage now stands that content down while you play
+   (app/page.tsx), but the spectator, gauntlet and tournament views have no
+   such thing — this is what covers them. Below `.modal-overlay`'s z-index (50)
+   on purpose: a modal must still cover the header. */
 .site-header {
   position: sticky;
   top: 0;

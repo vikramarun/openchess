@@ -14,9 +14,10 @@ export default function Home() {
   const mounted = useMounted();
   // The lobby swaps itself for a board when you're in a game. The pitch above
   // it is ~440px of hero + engine banner, which pushed your own board off the
-  // bottom of the fold and the result banner ~1000px down the page — the same
-  // height that put the top nav out of reach. Stand it down while you play;
-  // it's still in the server render, and it comes back when you do.
+  // bottom of the fold, the result banner to ~525px and "Back to lobby" to
+  // ~1000px — the same height that put the top nav out of reach. Stand it down
+  // while you play; it's still in the server render, and it comes back when
+  // you do.
   const [inGame, setInGame] = useState(false);
   // Stable identity: Lobby reports through this from an effect, and a fresh
   // callback each render would re-run it every render.
