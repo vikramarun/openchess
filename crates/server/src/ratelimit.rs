@@ -163,6 +163,14 @@ pub struct RateLimits {
     /// Public read endpoints (`/players/*`, `/leaderboard`) — cheap per hit but
     /// the leaderboard query is heavy, so bound the rate an IP can trigger it.
     pub reads: TokenBucket,
+    /// Profile-photo writes (`POST`/`DELETE /profile/avatar`). Its own bucket,
+    /// and the one keyed by **wallet** rather than IP: the route is
+    /// authenticated and writes exactly one row, so the wallet is the thing
+    /// actually being spent, and a shared office IP shouldn't run out of photo
+    /// changes because a colleague uploaded one. Separate from `create` on
+    /// purpose — sharing it would mean changing your photo eats the budget you
+    /// need to start a game.
+    pub avatar: TokenBucket,
     /// Concurrent `/ws/agent` (bot control) sockets.
     pub agent_conns: ConnGate,
     /// Concurrent `/ws/game` (player + spectator) sockets.
@@ -212,6 +220,13 @@ impl RateLimits {
             reads: TokenBucket::new(
                 env_parse("RL_READS_BURST", 60),
                 env_parse("RL_READS_PER_SEC", 5.0),
+            ),
+            // Deliberately tight: settling on a photo is a handful of tries,
+            // not a stream, and every accepted one rewrites a row with up to
+            // 256 KiB of bytes attached.
+            avatar: TokenBucket::new(
+                env_parse("RL_AVATAR_BURST", 12),
+                env_parse("RL_AVATAR_PER_SEC", 0.1),
             ),
             agent_conns: ConnGate::new(
                 env_parse("RL_AGENT_CONNS_MAX", 512),
@@ -269,6 +284,7 @@ impl RateLimits {
         self.create.sweep();
         self.ws.sweep();
         self.reads.sweep();
+        self.avatar.sweep();
     }
 }
 

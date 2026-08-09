@@ -24,7 +24,9 @@
     "test:offers": "tsx scripts/offers.test.ts",
     "test:prefs": "tsx scripts/boardPrefs.test.ts",
     "test:brand": "tsx scripts/brand.test.ts",
-    "test:gamemeta": "tsx scripts/gameSummary.test.ts"
+    "test:gamemeta": "tsx scripts/gameSummary.test.ts",
+    "test:avatar": "tsx scripts/avatar.test.ts",
+    "test:layout": "tsx scripts/layout.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.1.7",

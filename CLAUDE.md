@@ -25,6 +25,8 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
+(cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
+(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -101,6 +103,23 @@ wallet.
   per-entry-point, not global middleware.
 - **`pnpm build` clobbers the `next dev` cache** (→ `/_next/static` 404s). If the
   dev preview breaks after a build: `rm -rf apps/web/.next` and restart it.
+- **The site header is sticky on purpose, and its `z-index` must stay under 50.**
+  A game view is several viewports tall: the result banner used to land ~525px
+  down and "Back to lobby" ~1000px down, so a static header was already ~640px
+  above the screen by the time a finished game was readable — the top nav became
+  unclickable and the sidebar button was the only way out. That shipped. The
+  `z-index: 40` is the other half: `.modal-overlay` (StakeConfirm, the
+  time-control picker) is 50 and MUST keep covering the header, so raising the
+  header above it turns the pre-game confirm into a dialog you can click behind.
+  The homepage also stands its hero + engine banner down while a board is
+  mounted (`Lobby`'s `onActiveChange` → `page.tsx`), which is what actually
+  brings the result banner back above the fold (235px, from 525px); sticky is
+  the backstop, and the only half that covers the pages with no lobby to stand
+  down (`/game/[id]`, gauntlet, tournament). Keep the hero in the SERVER render —
+  `Lobby` is client-only, so moving the `<h1>` inside it drops the landing
+  page's only heading out of the HTML. `pnpm test:layout` pins the two CSS
+  halves (sticky, and ranked under the overlay) by reading `globals.css`; the
+  React half — what `inGame` hides — is unpinned, since there's no DOM harness.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
@@ -229,6 +248,22 @@ wallet.
   would otherwise resolve the NEXT search too, with a move for the previous
   position. `pnpm test:engine` pins it. Use `stopSearch()` rather than walking
   away, and keep `resync()` (`ucinewgame`) off a worker that is mid-search.
+- **A profile photo is user bytes this server vouches for.** `/players/{addr}/avatar`
+  hands them back with a stored content type, so both the type and the size come
+  from the file's own header, never from the uploader (`sniff_image` in
+  `players.rs`, PNG/JPEG only — nothing else has a dimension parser here).
+  Trusting the declared `Content-Type` would make an SVG stored XSS on the API
+  origin. And a byte cap does **not** bound a decoded image: a 9000×9000 PNG of
+  one flat colour compresses to ~236 KB, fits the 256 KiB limit, and costs every
+  browser that renders that profile ~0.3 GB — an `<img>` decodes at full
+  resolution even inside a 72px box. Hence `AVATAR_MAX_PX`; `players::tests`
+  pins both refusals. Writes are SIWE-bound and throttled **per wallet**
+  (`limits.avatar`), not on the per-IP read budget this router's layer provides.
+  The image response is cacheable, so the client busts it with
+  `?v=<avatar_updated_at>` from `/players/{addr}` — without that a replaced photo
+  keeps serving the old one. `lib/avatar.ts` centre-crops and re-encodes to a
+  256px JPEG before upload (`pnpm test:avatar`), which is what keeps every limit
+  above invisible in normal use.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match

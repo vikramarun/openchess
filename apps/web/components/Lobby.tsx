@@ -75,8 +75,15 @@ const seatLabel = (name: string | null, addr: string | null, fallback: string) =
   name ?? shortAddress(addr, fallback);
 
 /** The casual-first play lobby: pick a time control to play instantly or open a
- *  challenge (your engine vs theirs), watch games in progress, or stake USDC. */
-export function Lobby() {
+ *  challenge (your engine vs theirs), watch games in progress, or stake USDC.
+ *
+ *  `onActiveChange` reports whether a board is currently mounted here, so the
+ *  page can drop the marketing header while you're playing. It's a callback
+ *  rather than the page owning the state because the hero has to stay in the
+ *  SERVER render — this component is client-only (`useMounted` in page.tsx),
+ *  and moving the <h1> inside it would take the landing page's only heading
+ *  out of the HTML. */
+export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) => void }) {
   const router = useRouter();
   const { address } = useAccount();
   const token = useAuthToken();
@@ -94,6 +101,10 @@ export function Lobby() {
 
   const bot = useBotStatus(token);
   const botPlays = bot.online && useBot;
+
+  useEffect(() => {
+    onActiveChange?.(!!active);
+  }, [active, onActiveChange]);
 
   // Poll open challenges + live games while in the lobby.
   useEffect(() => {
@@ -366,7 +377,7 @@ export function Lobby() {
                 <>
                   {" "}
                   Want your own engine to play instead?{" "}
-                  <Link href="/profile">Connect it</Link>.
+                  <Link href="/profile#advanced">Connect it</Link>.
                 </>
               )}
             </div>
