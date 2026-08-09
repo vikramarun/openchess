@@ -24,8 +24,11 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    sans-serif;
+  /* --font-sans is Noto Sans, self-hosted by next/font (see app/layout.tsx).
+     The system stack behind it is the swap fallback, and what renders if the
+     font ever fails to load. */
+  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
   font-size: 15px;
   line-height: 1.5;
 }
@@ -42,8 +45,33 @@ a:hover {
   color: var(--muted);
 }
 
+/* Reachable by a screen reader, absent on screen. For a heading that only
+   exists to give the document an outline — see the in-game <h1> in page.tsx. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* ---------- header ---------- */
+/* Sticky, because a game view is far taller than a viewport: "Back to lobby"
+   sits ~1000px down on a page that still carries a lobby's worth of content
+   above the board, so by the time a finished game is readable the top nav has
+   scrolled away and the only reachable link on screen is the one inside the
+   board sidebar. The homepage now stands that content down while you play
+   (app/page.tsx), but the spectator, gauntlet and tournament views have no
+   such thing — this is what covers them. Below `.modal-overlay`'s z-index (50)
+   on purpose: a modal must still cover the header. */
 .site-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
   display: flex;
   align-items: center;
   gap: 28px;
@@ -61,8 +89,12 @@ a:hover {
   color: var(--text-strong);
   letter-spacing: -0.5px;
 }
-.brand .king {
-  color: var(--accent);
+/* The mark carries its own fills, so this is alignment only. .brand aligns on
+   the baseline, which an inline SVG meets with its bottom edge — centering it
+   on the line instead keeps it level with the cap height of the wordmark. */
+.brand .mark {
+  align-self: center;
+  flex: none;
 }
 .nav {
   display: flex;
@@ -242,8 +274,11 @@ a:hover {
   color: var(--text-strong);
   letter-spacing: -1px;
 }
-.hero h1 .king {
-  color: var(--accent);
+/* Nudged off the baseline so the rook's base lines up with the wordmark's,
+   rather than its bounding box bottom. */
+.hero h1 .mark {
+  vertical-align: -0.06em;
+  margin-right: 4px;
 }
 .hero p {
   font-size: 17px;
@@ -1687,11 +1722,39 @@ select:focus-visible,
     gap: 12px 18px;
     padding: 10px 16px;
   }
+  /* One scrollable row, not a wrapped block: the header is sticky, so every
+     line it wraps onto is a line permanently off the top of a phone screen
+     (wrapping cost 167px of an 812px viewport).
+     The padding/negative-margin pair widens the SCROLL BOX without changing the
+     header's height: `overflow-x` forces `overflow-y` to `auto` (a scrolling
+     axis can't pair with `visible`), and the row is exactly one link tall, so
+     without it the 2px focus ring at 2px offset is clipped away.
+     The mask fades whatever reaches the right edge, so a nav that runs past the
+     viewport (Profile is 77px out at 375px wide) reads as cut off rather than
+     absent. It costs nothing when the row fits — it only ever fades empty
+     space to the right of the last link — and it lifts while the row has focus,
+     because tabbing to the last link scrolls it flush against that edge and
+     fading the element you just focused is the one thing it must not do. */
   .nav {
     order: 3;
     flex-basis: 100%;
     gap: 16px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 6px 0;
+    margin: -6px 0;
+    scrollbar-width: none;
+  }
+  .nav:not(:focus-within) {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+  .nav a {
+    white-space: nowrap;
   }
   .header-actions {
     margin-left: auto;

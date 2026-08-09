@@ -23,11 +23,16 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
+(cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
+(cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
+(cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
+(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
+(cd apps/web && pnpm gen:icon)     # regenerate app/icon.svg from lib/brand.ts
 ```
 - Contract ABIs are **vendored** in `crates/ledger/abi/`, so `cargo build` does
   **not** need a prior `forge build`. Re-vendor after editing the contract
@@ -35,7 +40,18 @@ cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
 - chessground's CSS is **vendored** in `apps/web/app/chessground.base.css` (its
   npm `exports` map makes the published assets unimportable). Re-vendor on a
   bump; the command is in that file's header. Don't re-add the old jsDelivr
-  `<link>`s, since `style-src` no longer allows that origin.
+  `<link>`s, since `style-src` no longer allows that origin. Overrides belong in
+  `app/board.css`, never in the vendored file — a re-vendor replaces it
+  wholesale and silently drops the edit (that is where the coords'
+  `font-family` override lives, since chessground hardcodes `sans-serif`).
+- The UI font is **Noto Sans, self-hosted by `next/font`** (`app/layout.tsx`
+  defines `--font-sans`; `globals.css` is the only place that applies it).
+  next/font fetches it at build time and serves it from our own origin, so
+  `font-src 'self'` needs no new entry — don't replace it with a `<link>` to
+  Google Fonts. Note what the fallback means: `globals.css` *named* Noto Sans
+  from the start but nothing ever loaded it, so every visitor quietly got
+  SF Pro or Segoe UI instead. If `--font-sans` stops resolving, that is the
+  silent failure you are back to.
 - Deploy the server with **`./scripts/deploy-server.sh`**, never a bare
   `fly deploy` (it re-adds Fly's HA machine, which breaks this single-node app).
 
@@ -100,6 +116,23 @@ wallet.
   per-entry-point, not global middleware.
 - **`pnpm build` clobbers the `next dev` cache** (→ `/_next/static` 404s). If the
   dev preview breaks after a build: `rm -rf apps/web/.next` and restart it.
+- **The site header is sticky on purpose, and its `z-index` must stay under 50.**
+  A game view is several viewports tall: the result banner used to land ~525px
+  down and "Back to lobby" ~1000px down, so a static header was already ~640px
+  above the screen by the time a finished game was readable — the top nav became
+  unclickable and the sidebar button was the only way out. That shipped. The
+  `z-index: 40` is the other half: `.modal-overlay` (StakeConfirm, the
+  time-control picker) is 50 and MUST keep covering the header, so raising the
+  header above it turns the pre-game confirm into a dialog you can click behind.
+  The homepage also stands its hero + engine banner down while a board is
+  mounted (`Lobby`'s `onActiveChange` → `page.tsx`), which is what actually
+  brings the result banner back above the fold (235px, from 525px); sticky is
+  the backstop, and the only half that covers the pages with no lobby to stand
+  down (`/game/[id]`, gauntlet, tournament). Keep the hero in the SERVER render —
+  `Lobby` is client-only, so moving the `<h1>` inside it drops the landing
+  page's only heading out of the HTML. `pnpm test:layout` pins the two CSS
+  halves (sticky, and ranked under the overlay) by reading `globals.css`; the
+  React half — what `inGame` hides — is unpinned, since there's no DOM harness.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
@@ -189,6 +222,39 @@ wallet.
   new set needs its license checked and recorded in
   `apps/web/public/piece/CREDITS.md` (`test:prefs` fails if a registered set has
   no art on disk).
+- **The brand mark is also written twice.** Geometry lives in
+  `apps/web/lib/brand.ts`; `app/icon.svg` is a second copy, because Next's icon
+  file convention cannot import from TypeScript. Nothing at runtime compares
+  them, so an edit to the path would leave the favicon showing the old mark
+  indefinitely — `pnpm test:brand` is what catches it. Run **`pnpm gen:icon`**
+  after any change to the geometry; never hand-edit the file. Two more traps:
+  anything **icon-shaped must use the tiled variant**, since on a light browser
+  tab strip the `#ededec` half of a bare mark disappears and leaves half a rook
+  (iOS composites transparent app icons badly too); and a segment's
+  `opengraph-image.tsx` is **auto-injected into that segment's metadata**, so if
+  its `generateMetadata` also sets `openGraph.images` one silently overrides the
+  other. Titles in `generateMetadata`, the picture in the file convention.
+- **An OG card must draw the mark as inline `<svg>`, never an `<img>` data
+  URI.** `next/og` rasterizes through resvg, and the resvg in a **production**
+  bundle does not decode a nested SVG image: it drops it and still returns 200,
+  so the card renders wordmark-only and every shared link quietly loses its
+  logo. `next dev` uses a different resvg that decodes it fine, so this passes
+  locally and breaks only once deployed — it shipped that way once already.
+  Encoding is irrelevant (base64 and percent-encoded give byte-identical,
+  markless output). `pnpm test:brand` greps `lib/ogCard.tsx` and
+  `app/apple-icon.tsx` for the inline form. The general lesson: **verify a
+  generated image against `next build && next start`, never the dev server.**
+- **A root `alternates.canonical` is inherited by every route.** Metadata merges
+  down the tree, so a canonical set in `app/layout.tsx` declares /gauntlet,
+  /tournament and the rest duplicates of the homepage and drops them out of the
+  index. There is deliberately none at the root; set one per segment if wanted.
+- **Every page is a Client Component, so metadata lives in a sibling
+  `layout.tsx`.** `"use client"` and `export const metadata` are mutually
+  exclusive, which is why each route has a three-line server layout next to its
+  page. A new route inherits the root title until you add one. The dynamic
+  routes (`/game/[id]`, `/player/[address]`) use `generateMetadata` there, and
+  both must degrade to a generic title rather than throw: a crawler hitting a
+  dead id must not 500 the page.
 - **One `bestmove` answers one `go`, in order.** `BrowserEngine` hands each one
   to the oldest waiter, never to every waiter: a caller that stops waiting for a
   search (the desync recovery above) leaves it running, and its late answer
@@ -272,6 +338,25 @@ wallet.
   (`app/tournament/page.tsx`, the `leftRound` effect); backing out keeps you out
   of that round only. Anything that reintroduces a "click here to play this
   round" gate re-breaks the mode.
+- **Colour is drawn per game, never handed out by role.** Park and the queue
+  flip a coin (`matchmaking.rs coin_flip`); tournaments alternate on the
+  round-robin's own schedule (`round_robin_rounds`). Role-based colour is the
+  bug this replaced: the poster of an offer took White and the acceptor Black,
+  so a player who only ever joined the house bot's standing offers never once
+  had the first move, in staked games. Two things to keep. The coin is drawn
+  **above `build_wager`**, because that takes `(white, black)` and the EIP-712
+  result the oracle signs is keyed on that pair — flipping any later settles
+  against the wrong seats. And the colour a client is TOLD
+  (`ParkAcceptResp.color`, `park_get`'s `poster_color`, the queue ticket) must
+  be the seat its launch token drives, or the board opens on the opponent's
+  side; `park_colour_is_a_coin_and_matches_the_launch_tokens` pins that. But a
+  client that can't read a colour must still TAKE the seat (`lib/offers.ts
+  seatColor`): by then escrow is locked, and a seat that never attaches reaps
+  as a forfeit that hands the opponent the whole stake, where a board shown the
+  wrong way round is only a reload — `playSeat` drives off the token and the
+  server's frames, never the colour. Every parallel flip (metadata, delivery,
+  tokens, colours, wager wallets) goes through one `seats()` helper, because an
+  inverted swap at any single site fails silently.
 - **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a
   rating moves **only if both sides made ≥1 move** (`ply >= 2`, the `contested`
   guard in `room.rs finish()`). Never ding rating for a game a player didn't

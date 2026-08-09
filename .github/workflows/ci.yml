@@ -99,6 +99,24 @@ jobs:
           # which a screenshot of a settled page would never catch. This runs
           # the script in a sandbox and diffs it against the React path.
           pnpm test:prefs
+          # The mark exists twice — lib/brand.ts and app/icon.svg, because Next's
+          # icon convention cannot import from TypeScript — and nothing at
+          # runtime compares them, so the favicon can silently stop matching the
+          # header. This also pins the OG cards to drawing the mark inline:
+          # resvg in a production bundle drops a nested SVG image and still
+          # returns 200, which the dev server never reproduces.
+          pnpm test:brand
+          # globals.css named "Noto Sans" for the life of the project while
+          # nothing loaded it, so everyone silently got the system font. The
+          # replacement has the same failure shape — globals.css asks for
+          # var(--font-sans), layout.tsx defines it, and if either side goes
+          # away the CSS still parses and still falls back forever.
+          pnpm test:font
+          # What a shared game link says, in a browser tab and in an unfurl.
+          # Also pins the two revalidate literals together: if the title and the
+          # OG image expire on different schedules, a game crawled while live
+          # keeps a scoreless title beside a card that shows the result.
+          pnpm test:gamemeta
           # The server's 256 KiB body cap is only workable because the browser
           # crops and re-encodes to a 256px JPEG first. If that stopped
           # happening, every phone photo would start arriving at full size and
@@ -110,4 +128,11 @@ jobs:
           # The same helpers have to degrade to today's single record against a
           # server that predates the split, which is the normal deploy order.
           pnpm test:profile
+          # A static site header puts the top nav ~640px above the screen by the
+          # time a finished game is readable, so the only clickable link left is
+          # the one in the board sidebar — and a header that outranks
+          # .modal-overlay turns the pre-game stake confirmation into a dialog
+          # you can click behind. Both are one-line CSS regressions that nothing
+          # else here would see.
+          pnpm test:layout
           pnpm build

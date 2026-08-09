@@ -71,6 +71,24 @@ export function groupOffers<T extends OfferLike>(offers: T[]): OfferGroup<T>[] {
   return [...byKey.values()];
 }
 
+/** The side to seat a player on, from whatever the server sent.
+ *
+ *  Colour is drawn per game now (server-side `coin_flip`), so neither posting
+ *  nor accepting implies a side and the value has to come off the wire. But by
+ *  the time either lobby path reads it the GAME ALREADY EXISTS and, if staked,
+ *  escrow is locked — so a missing or unrecognised colour must never stop us
+ *  taking the seat. A seat that never attaches reaps as a forfeit and hands the
+ *  opponent the whole stake (`room.rs reap_forfeit_winner`), whereas a seat
+ *  shown the wrong way round costs a flipped board, a mirrored clock and a
+ *  wrong result banner — all of it recoverable with a reload, none of it the
+ *  game. `playSeat` drives off the token and the server's frames and never
+ *  reads this, so the moves themselves are right either way.
+ *
+ *  Hence: parse it, and fall back to a side rather than to nothing. */
+export function seatColor(color: unknown): "white" | "black" {
+  return color === "black" ? "black" : "white";
+}
+
 /** Statuses meaning "this particular offer id is no longer joinable", so the
  *  next seat in the group is worth trying: 404 (the row is gone) and 409 (it
  *  is no longer `open`).

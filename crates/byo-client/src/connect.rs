@@ -534,7 +534,7 @@ async fn find_and_accept(
     session: &Session,
     engine_name: &str,
     posted: &PostedOffer,
-) -> Result<Option<(String, String, &'static str)>> {
+) -> Result<Option<(String, String, String)>> {
     let offers: Vec<Value> = client
         .get(format!("{http}/park/offers"))
         .send()
@@ -567,7 +567,7 @@ async fn accept_offer(
     opts: &ConnectOpts,
     session: &Session,
     engine_name: &str,
-) -> Result<Option<(String, String, &'static str)>> {
+) -> Result<Option<(String, String, String)>> {
     let resp = auth_rb(
         client.post(format!("{http}/park/offers/{offer_id}/accept")),
         session,
@@ -580,8 +580,14 @@ async fn accept_offer(
         return Ok(None);
     }
     let j: Value = resp.json().await?;
+    // The colour comes from the server, not from the fact that we accepted:
+    // park draws it per game, so an acceptor is no longer always Black.
     match (j["game_id"].as_str(), j["token"].as_str()) {
-        (Some(g), Some(t)) => Ok(Some((g.to_string(), t.to_string(), "black"))),
+        (Some(g), Some(t)) => Ok(Some((
+            g.to_string(),
+            t.to_string(),
+            j["color"].as_str().unwrap_or("?").to_string(),
+        ))),
         _ => Err(anyhow!("malformed accept response")),
     }
 }
@@ -596,7 +602,7 @@ async fn post_and_wait(
     session: &Session,
     engine_name: &str,
     posted: &PostedOffer,
-) -> Result<Option<(String, String, &'static str)>> {
+) -> Result<Option<(String, String, String)>> {
     let resp: Value = auth_rb(client.post(format!("{http}/park/offers")), session)
         .json(&json!({
             "stake": opts.stake,
@@ -643,7 +649,12 @@ async fn post_and_wait(
                     return Err(anyhow!("matched but no token"));
                 };
                 println!("challenge accepted!");
-                return Ok(Some((g.to_string(), t.to_string(), "white")));
+                // Likewise: posting no longer means White.
+                return Ok(Some((
+                    g.to_string(),
+                    t.to_string(),
+                    o["color"].as_str().unwrap_or("?").to_string(),
+                )));
             }
             Some("not_found") => {
                 // Expired (TTL sweep) — repost on the next loop.

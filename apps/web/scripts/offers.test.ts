@@ -8,6 +8,7 @@ import {
   acceptFromGroup,
   groupOffers,
   joinErrorMessage,
+  seatColor,
   type OfferLike,
 } from "../lib/offers";
 
@@ -249,6 +250,21 @@ async function main() {
     joinErrorMessage(418, { botPlays: false }),
     "Couldn’t join (418).",
   );
+
+  // Colour is drawn per game server-side, so it has to be read off the wire.
+  check("the drawn side is what the server said", seatColor("black"), "black");
+  check("…and the other way too", seatColor("white"), "white");
+  // The rest of these are the ones that matter. Both lobby paths call this
+  // AFTER the game exists and escrow is locked, so a junk colour must still
+  // yield a seat: refusing one reaps as a forfeit and hands the opponent the
+  // whole stake, while a board shown the wrong way round is a reload away.
+  for (const junk of [undefined, null, "", "White", "grey", 0, {}]) {
+    check(
+      `a seat is still taken for ${JSON.stringify(junk) ?? "undefined"}`,
+      seatColor(junk),
+      "white",
+    );
+  }
 
   console.log(failed === 0 ? "\nall offer-grouping tests passed" : `\n${failed} FAILED`);
   process.exit(failed === 0 ? 0 : 1);

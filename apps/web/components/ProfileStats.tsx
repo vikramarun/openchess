@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { AvatarEditor } from "@/components/AvatarEditor";
-import { shortAddress } from "@/lib/address";
+import { isAddress, shortAddress } from "@/lib/address";
 import { avatarUrl } from "@/lib/avatar";
 import { SERVER_HTTP } from "@/lib/config";
 import { fmtUsdc, fmtUsdcSigned } from "@/lib/escrow";
@@ -21,7 +21,6 @@ import {
   type Profile,
 } from "@/lib/profileFilter";
 
-const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 function outcome(g: GameItem, me: string): "win" | "loss" | "draw" | "-" {
   if (g.result === "draw") return "draw";
@@ -69,7 +68,7 @@ export function ProfileStats({ address, editable }: { address: string; editable?
     let live = true;
     // Validate the wallet before interpolating it into the API path — a route
     // param is user-controlled, so reject anything that isn't a hex address.
-    if (!ADDR_RE.test(me)) {
+    if (!isAddress(me)) {
       setErr("That isn’t a valid wallet address.");
       return;
     }
@@ -91,7 +90,7 @@ export function ProfileStats({ address, editable }: { address: string; editable?
 
   useEffect(() => {
     let live = true;
-    if (!ADDR_RE.test(me)) return;
+    if (!isAddress(me)) return;
     if (games[page]) return; // already fetched this wallet's ladder
     (async () => {
       try {
