@@ -102,6 +102,18 @@ export function useSpectatorBoard() {
     [],
   );
 
+  /** Clear the board back to the start position. For a caller that starts a NEW
+   *  game on the same mounted view (`/play`): `game_start` resets us anyway, but
+   *  it only arrives once both seats are ready, and until then the finished
+   *  game's final position and result banner would sit there under "creating
+   *  game…". */
+  const reset = useCallback(() => {
+    pos.current = Chess.default();
+    setFrames([START]);
+    setResult(null);
+    setVerified(null);
+  }, []);
+
   const tip = frames[frames.length - 1];
   const moves = useMemo(() => frames.slice(1).map((f) => f.san ?? ""), [frames]);
 
@@ -118,5 +130,6 @@ export function useSpectatorBoard() {
     result,
     verified,
     applyFrame,
+    reset,
   };
 }
