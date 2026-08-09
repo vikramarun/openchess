@@ -14,7 +14,13 @@ import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
-import { acceptFromGroup, groupOffers, joinErrorMessage, type OfferGroup } from "@/lib/offers";
+import {
+  acceptFromGroup,
+  groupOffers,
+  joinErrorMessage,
+  seatColor,
+  type OfferGroup,
+} from "@/lib/offers";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -158,7 +164,9 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
           setActive({
             gameId: j.game_id,
             token: j.token,
-            color: (j.color as "white" | "black") ?? "white",
+            // Posting no longer implies White — read the drawn side off the
+            // wire. Never refuse the seat over it; see `seatColor`.
+            color: seatColor(j.color),
             stake: pending.stakeBase,
             opponent: j.opponent ?? null,
             initialSecs: pending.initialSecs,
@@ -295,7 +303,8 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
       setActive({
         gameId: j.game_id,
         token: j.token,
-        color: (j.color as "white" | "black") ?? "black",
+        // Accepting no longer implies Black, same as the poster's path above.
+        color: seatColor(j.color),
         stake: o.stake,
         opponent: j.opponent ?? { name: seatLabel(o.poster_name, o.poster_addr, "casual") },
         initialSecs: o.initial_secs,

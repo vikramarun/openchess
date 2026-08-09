@@ -69,18 +69,20 @@ print(json.load(urllib.request.urlopen(req))["token"])
 PY
 }
 
-echo "== SIWE sign-in for white & black =="
-WSESS=$(siwe_login $K2 $A2); echo "white session=${WSESS:0:12}..."
-BSESS=$(siwe_login $K3 $A3); echo "black session=${BSESS:0:12}..."
+echo "== SIWE sign-in for the poster & the acceptor =="
+# Colour is drawn per game by the server (matchmaking.rs `coin_flip`), so these
+# are poster/acceptor sessions, not white/black ones.
+WSESS=$(siwe_login $K2 $A2); echo "poster session=${WSESS:0:12}..."
+BSESS=$(siwe_login $K3 $A3); echo "acceptor session=${BSESS:0:12}..."
 
-echo "== white posts a 1 USDC Park offer (authenticated) =="
+echo "== the poster puts up a 1 USDC Park offer (authenticated) =="
 OID=$(curl -s -X POST $H/park/offers -H "authorization: Bearer $WSESS" -H 'content-type: application/json' \
   -d '{"stake":"1000000","initial_secs":3,"increment_secs":0}' | jget "['offer_id']")
 echo "offer=$OID"
-echo "== black accepts (authenticated): seats bound to the two signed-in wallets =="
+echo "== the acceptor takes it (authenticated): seats bound to the two signed-in wallets =="
 ACC=$(curl -s -X POST $H/park/offers/$OID/accept -H "authorization: Bearer $BSESS" -H 'content-type: application/json' -d '{}')
 GID=$(echo "$ACC" | jget "['game_id']"); BT=$(echo "$ACC" | jget "['token']")
-# Only the authenticated poster can retrieve the white launch token.
+# Only the authenticated poster can retrieve their own launch token.
 WT=$(curl -s $H/park/offers/$OID -H "authorization: Bearer $WSESS" | jget "['token']")
 echo "game=$GID"
 bankrolls "after open (stakes locked)"

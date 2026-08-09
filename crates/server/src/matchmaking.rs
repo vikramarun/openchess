@@ -261,6 +261,41 @@ fn claim_agent_seat(
 // Seat dispatch itself lives in `AppState::start_game` (a `SeatDelivery` per
 // seat), so every mode shares one claim/dispatch/rollback implementation.
 
+/// One fair coin per pairing, deciding which of the two seats gets White.
+///
+/// Park and the queue used to hand colour out by ROLE — the poster of an offer
+/// took White and whoever accepted it took Black, and in the queue the player
+/// already waiting took White. That is a standing first-move advantage for one
+/// side of every repeated matchup: the house bot stands the open offers, so a
+/// player who only ever joined them never once had the first move, and the
+/// same seat carried the advantage in every staked game between them.
+///
+/// Draw it BEFORE the wager is built. `build_wager` takes (white, black) and
+/// the EIP-712 result the oracle signs is keyed on that pair, so a flip applied
+/// any later than the wager would settle the game against the wrong seats.
+/// Tournaments do not use this — a round-robin alternates colours on a schedule
+/// instead (`round_robin_rounds`), which is stronger than a coin per pairing.
+fn coin_flip() -> bool {
+    rand::random()
+}
+
+/// Order a pair into the `[white, black]` layout every seat-indexed array uses,
+/// given whether `a` won the coin.
+///
+/// Everything about a pairing is carried in parallel — seat metadata, delivery,
+/// launch tokens, the colour each client is told, and the wallets the wager is
+/// built from — and ALL of it has to flip together. Hand-writing the swap at
+/// each site is how one of them ends up inverted, which does not fail loudly:
+/// it seats a player on the wrong side, or opens escrow against the wrong two
+/// wallets. So the flip lives here, once, and every site calls it.
+fn seats<T>(a_is_white: bool, a: T, b: T) -> [T; 2] {
+    if a_is_white {
+        [a, b]
+    } else {
+        [b, a]
+    }
+}
+
 // --------------------------------------------------------------------------
 // Park / Patzer
 // --------------------------------------------------------------------------
@@ -279,6 +314,10 @@ struct ParkOffer {
     status: String, // open | matching | matched
     game_id: Option<GameId>,
     poster_token: Option<String>,
+    /// Which colour the poster drew, recorded at match time (`coin_flip`).
+    /// `None` until then — a poster polling an unmatched offer has no colour
+    /// yet, and must not be told one, since posting no longer implies White.
+    poster_color: Option<String>,
     /// Who took the offer, recorded at match time. The acceptor learns the
     /// poster's identity from the offer row, but the poster only ever learns
     /// theirs from `GameStart` — which the server withholds until BOTH seats
@@ -394,6 +433,7 @@ async fn park_create(
                 status: "open".into(),
                 game_id: None,
                 poster_token: None,
+                poster_color: None,
                 cancel_key: cancel_key.clone(),
                 owner_key,
                 opponent: None,
@@ -573,6 +613,10 @@ async fn park_accept(
         }
     }
 
+    // Who gets White. Drawn here, above the wager, so the escrow and the
+    // signed result are keyed on the seats actually played (see `coin_flip`).
+    let poster_white = coin_flip();
+
     // Build the wager from authenticated wallets (poster + acceptor).
     let wager = if let Some(stake) = &stake {
         let acceptor = match &acceptor_wallet {
@@ -587,7 +631,8 @@ async fn park_accept(
             unclaim();
             return Err(StatusCode::BAD_REQUEST); // no self-play wagers
         }
-        match build_wager(&poster, &acceptor, stake) {
+        let [white, black] = seats(poster_white, &poster, &acceptor);
+        match build_wager(white, black, stake) {
             Ok(w) => Some(w),
             Err(e) => {
                 unclaim();
@@ -659,17 +704,9 @@ async fn park_accept(
     // start_game creates the room, locks escrow, and DISPATCHES bot seats —
     // and aborts the game (escrow refunded) if an agent vanished, returning
     // Err. On any Err the claims are released and the offer reopens.
-    let meta = [poster_meta, acceptor_meta];
-    let resp = match state
-        .start_game(
-            tc,
-            "park",
-            wager,
-            meta,
-            [poster_delivery, acceptor_delivery],
-        )
-        .await
-    {
+    let meta = seats(poster_white, poster_meta, acceptor_meta);
+    let delivery = seats(poster_white, poster_delivery, acceptor_delivery);
+    let resp = match state.start_game(tc, "park", wager, meta, delivery).await {
         Ok(r) => r,
         Err(e) => {
             release(&claimed);
@@ -678,22 +715,28 @@ async fn park_accept(
         }
     };
 
+    // Unpack the [white, black] response back into poster/acceptor terms. Same
+    // helper, read in reverse: `seats` is its own inverse, so the unpacking
+    // cannot drift from the packing above.
+    let [poster_idx, acceptor_idx] = seats(poster_white, 0, 1);
+    let [poster_token, acceptor_token] = seats(poster_white, resp.white_token, resp.black_token);
+    let [poster_color, acceptor_color] = seats(poster_white, "white", "black");
+
     if let Some(offer) = state.0.lobby.park.lock().get_mut(&id) {
         offer.status = "matched".into();
         offer.game_id = Some(resp.game_id);
         // A bot-held seat's token stays server-side — the agent has it.
-        offer.poster_token = (!poster_bot).then(|| resp.white_token.clone());
-        // The acceptor always takes black, so index 1 is who the poster drew.
-        offer.opponent = Some(resp.players[1].clone());
+        offer.poster_token = (!poster_bot).then(|| poster_token.clone());
+        offer.poster_color = Some(poster_color.into());
+        offer.opponent = Some(resp.players[acceptor_idx].clone());
     }
     Ok(Json(ParkAcceptResp {
         game_id: resp.game_id,
-        token: (!acceptor_bot).then_some(resp.black_token),
-        color: "black".into(),
+        token: (!acceptor_bot).then_some(acceptor_token),
+        color: acceptor_color.into(),
         seat: if acceptor_bot { "bot" } else { "browser" }.into(),
         spectate_path: resp.spectate_path,
-        // The poster always takes white, so index 0 is who the acceptor drew.
-        opponent: resp.players[0].clone(),
+        opponent: resp.players[poster_idx].clone(),
     }))
 }
 
@@ -739,9 +782,11 @@ async fn park_get(
                 } else {
                     None
                 },
-                color: (o.poster_token.is_some() || o.poster_seat_bot)
-                    .then(|| "white".into())
-                    .filter(|_| authorized),
+                // The colour the coin actually gave the poster, not a constant:
+                // this is the ONLY place a browser poster learns which side it
+                // is playing before `GameStart`, and the seat it opens the
+                // board on has to be the seat its launch token drives.
+                color: o.poster_color.clone().filter(|_| authorized),
                 seat: Some(if o.poster_seat_bot { "bot" } else { "browser" }.into()),
                 // Same gate as the token above, which for a CASUAL offer means
                 // "anyone holding the offer id". That is deliberate, not
@@ -909,7 +954,10 @@ async fn queue_join(
         return Ok(Json(QueueResp { ticket_id: my_id }));
     };
 
-    // Paired: opponent = white, me = black.
+    // Paired. Who gets White is a coin, not "whoever waited longer" — a bot
+    // parked in the queue used to take White against every arrival it ever
+    // matched (see `coin_flip`).
+    let opp_white = coin_flip();
     let (opp_addr, opp_meta, opp_session, opp_bot, opp_uci) = state
         .0
         .lobby
@@ -979,7 +1027,9 @@ async fn queue_join(
     }
 
     let wager = if let Some(stake) = req.stake.clone() {
-        let white = match opp_addr.clone() {
+        // Recovery below is keyed on WHOSE wallet is missing, not on colour, so
+        // these stay opponent/me and only the `build_wager` order flips.
+        let opp_wallet = match opp_addr.clone() {
             Some(w) => w,
             // Wagered pairing but the opponent has no wallet (shouldn't happen —
             // staked tickets are authed): keep me waiting, drop the bad opponent.
@@ -989,14 +1039,15 @@ async fn queue_join(
                 return Ok(Json(QueueResp { ticket_id: my_id }));
             }
         };
-        let black = match addr.clone() {
+        let my_wallet = match addr.clone() {
             Some(b) => b,
             None => return Err(requeue_opp_then_fail(StatusCode::UNAUTHORIZED)),
         };
-        if white.eq_ignore_ascii_case(&black) {
+        if opp_wallet.eq_ignore_ascii_case(&my_wallet) {
             return Err(requeue_opp_then_fail(StatusCode::BAD_REQUEST));
         }
-        match build_wager(&white, &black, &stake) {
+        let [white, black] = seats(opp_white, &opp_wallet, &my_wallet);
+        match build_wager(white, black, &stake) {
             Ok(w) => Some(w),
             Err(e) => return Err(requeue_opp_then_fail(e)),
         }
@@ -1007,7 +1058,7 @@ async fn queue_join(
     // Claim both bots BEFORE creating the game, so we never open a game (or an
     // escrow) whose engine can't show up.
     let mut claimed: Vec<String> = Vec::new();
-    let white_delivery = if opp_bot {
+    let opp_delivery = if opp_bot {
         let w = opp_addr.clone().unwrap_or_default();
         match claim_agent_seat(&state.0.agents, w, opp_uci, &mut claimed) {
             Ok(d) => d,
@@ -1022,7 +1073,7 @@ async fn queue_join(
     } else {
         SeatDelivery::Browser
     };
-    let black_delivery = if bot {
+    let my_delivery = if bot {
         let w = addr.clone().unwrap_or_default();
         match claim_agent_seat(&state.0.agents, w, my_uci, &mut claimed) {
             Ok(d) => d,
@@ -1042,10 +1093,9 @@ async fn queue_join(
     // start_game creates the room, locks escrow, and DISPATCHES bot seats — and
     // aborts (escrow refunded) if an agent vanished, returning Err. On any Err
     // the claims are released and both players are put back.
-    let resp = match state
-        .start_game(tc, "gauntlet", wager, [opp_meta, my_meta], [white_delivery, black_delivery])
-        .await
-    {
+    let meta = seats(opp_white, opp_meta, my_meta);
+    let delivery = seats(opp_white, opp_delivery, my_delivery);
+    let resp = match state.start_game(tc, "gauntlet", wager, meta, delivery).await {
         Ok(r) => r,
         Err(e) => {
             release(&claimed);
@@ -1053,13 +1103,16 @@ async fn queue_join(
         }
     };
 
-    // Attribute the game's result to any gauntlet sessions involved.
+    // Attribute the game's result to any gauntlet sessions involved. The colour
+    // here is what the session's seat actually plays — standings are scored
+    // against it, so a stale constant would credit the wrong side's result.
+    let [opp_color, my_color] = seats(opp_white, Color::White, Color::Black);
     let mut links = Vec::new();
     if let Some(sid) = opp_session {
-        links.push((sid, Color::White));
+        links.push((sid, opp_color));
     }
     if let Some(sid) = req.session_id {
-        links.push((sid, Color::Black));
+        links.push((sid, my_color));
     }
     if !links.is_empty() {
         state.0.lobby.game_to_gauntlet.lock().insert(resp.game_id, links);
@@ -1067,18 +1120,20 @@ async fn queue_join(
 
     // Mark both tickets matched. A bot-held seat's token stays server-side (the
     // agent has it); the browser spectates.
+    let [opp_token, my_token] = seats(opp_white, resp.white_token, resp.black_token);
+    let [opp_side, my_side] = seats(opp_white, "white", "black");
     let mut tickets = state.0.lobby.tickets.lock();
     if let Some(t) = tickets.get_mut(&opp_id) {
         t.status = "matched".into();
         t.game_id = Some(resp.game_id);
-        t.token = (!opp_bot).then(|| resp.white_token.clone());
-        t.color = Some("white".into());
+        t.token = (!opp_bot).then_some(opp_token);
+        t.color = Some(opp_side.into());
     }
     if let Some(t) = tickets.get_mut(&my_id) {
         t.status = "matched".into();
         t.game_id = Some(resp.game_id);
-        t.token = (!bot).then_some(resp.black_token);
-        t.color = Some("black".into());
+        t.token = (!bot).then_some(my_token);
+        t.color = Some(my_side.into());
     }
     drop(tickets);
 
@@ -2751,13 +2806,15 @@ mod tests {
             .await
             .expect("B join");
 
+        // Which colour each drew is a coin (`coin_flip`), so assert only that
+        // both got A seat.
         assert!(
             matches!(rx_a.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
-            "A (white) got its seat"
+            "A got its seat"
         );
         assert!(
             matches!(rx_b.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
-            "B (black) got its seat"
+            "B got its seat"
         );
 
         // B's ticket is matched, holds NO launch token (its bot has it), seat=bot.
@@ -2769,6 +2826,181 @@ mod tests {
         // Both agents are now busy (claimed + bound to the game).
         assert!(state.0.agents.claim(wa).is_err(), "A busy");
         assert!(state.0.agents.claim(wb).is_err(), "B busy");
+    }
+
+    #[test]
+    fn the_coin_orders_the_wager_too() {
+        // The colour↔token invariant is covered end-to-end below, but only for
+        // CASUAL games: a staked `start_game` needs a DB, so the handler tests
+        // can't reach `build_wager`. That call is the one place a wrong flip
+        // costs money rather than a flipped board — it opens escrow, and the
+        // oracle signs the EIP-712 result against exactly these two addresses.
+        // So pin the ordering at the seam both handlers share.
+        let poster = "0xaa00000000000000000000000000000000000001";
+        let acceptor = "0xbb00000000000000000000000000000000000002";
+
+        let [white, black] = seats(true, poster, acceptor);
+        let w = build_wager(white, black, "1000000").expect("wager");
+        assert_eq!(w.white, poster.parse::<Address>().unwrap());
+        assert_eq!(w.black, acceptor.parse::<Address>().unwrap());
+
+        // The losing side of the coin: escrow must follow, not stay put.
+        let [white, black] = seats(false, poster, acceptor);
+        let w = build_wager(white, black, "1000000").expect("wager");
+        assert_eq!(
+            w.white,
+            acceptor.parse::<Address>().unwrap(),
+            "escrow must be keyed on the seat actually played"
+        );
+        assert_eq!(w.black, poster.parse::<Address>().unwrap());
+    }
+
+    #[test]
+    fn seats_is_its_own_inverse() {
+        // Packing into [white, black] and unpacking back to (a, b) both go
+        // through `seats`, so this is what makes a drift between them
+        // impossible rather than merely unlikely.
+        for coin in [true, false] {
+            let packed = seats(coin, "a", "b");
+            let [a, b] = seats(coin, packed[0], packed[1]);
+            assert_eq!((a, b), ("a", "b"), "round trip at coin={coin}");
+        }
+    }
+
+    /// A header map carrying a distinct client IP, so each iteration of the
+    /// colour tests below draws on its own rate-limit bucket (the per-IP
+    /// `offers`/`create` budgets are far smaller than the sample these need).
+    fn from_ip(n: usize) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("fly-client-ip", format!("10.0.0.{n}").parse().unwrap());
+        h
+    }
+
+    #[tokio::test]
+    async fn park_colour_is_a_coin_and_matches_the_launch_tokens() {
+        // Posting an offer used to mean White every time and accepting one
+        // Black every time, so a player who only joined the house bot's
+        // standing offers never had the first move. Two things to hold:
+        // both colours must occur, and what each side is TOLD must be the seat
+        // its launch token actually drives — a colour that disagreed with the
+        // token would open the board on the wrong side of a staked game.
+        let (state, _c, _r) = test_state();
+        let mut acceptor_whites = 0;
+        const N: usize = 40;
+
+        for i in 0..N {
+            let headers = from_ip(i);
+            let offer_id = park_create(
+                State(state.clone()),
+                headers.clone(),
+                Json(ParkCreateReq {
+                    stake: None,
+                    initial_secs: 60,
+                    increment_secs: 1,
+                    name: None,
+                    engine: None,
+                    seat: None,
+                    uci_options: None,
+                }),
+            )
+            .await
+            .expect("create")
+            .0
+            .offer_id;
+
+            let acc = park_accept(
+                State(state.clone()),
+                Path(offer_id),
+                headers.clone(),
+                Some(Json(ParkAcceptReq::default())),
+            )
+            .await
+            .expect("accept")
+            .0;
+
+            let posted = park_get(State(state.clone()), Path(offer_id), headers).await.0;
+            let poster_color = posted.color.expect("a matched offer reports a colour");
+            assert_ne!(poster_color, acc.color, "the two seats can't share a colour");
+
+            for (token, want) in [
+                (acc.token.expect("acceptor's token"), acc.color.as_str()),
+                (posted.token.expect("poster's token"), poster_color.as_str()),
+            ] {
+                let (game, seat) = state.token_seat(&token).expect("token is registered");
+                assert_eq!(game, acc.game_id);
+                let seat = match seat {
+                    Color::White => "white",
+                    Color::Black => "black",
+                };
+                assert_eq!(seat, want, "the colour reported must be the token's seat");
+            }
+            if acc.color == "white" {
+                acceptor_whites += 1;
+            }
+        }
+
+        // A fair coin over 40 pairings: an all-one-colour run is ~2^-39.
+        assert!(
+            acceptor_whites > 0 && acceptor_whites < N,
+            "colour must vary across games, got {acceptor_whites}/{N} white acceptors"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_colour_is_a_coin() {
+        // Same bug on the queue side: the player already waiting took White
+        // against every arrival, so a bot parked in the queue never played
+        // Black. Both tickets are checked, since they are written separately.
+        let (state, _c, _r) = test_state();
+        let mut first_whites = 0;
+        const N: usize = 40;
+
+        for i in 0..N {
+            let req = || QueueReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                session_id: None,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            };
+            let a = queue_join(State(state.clone()), from_ip(i), Json(req()))
+                .await
+                .expect("A join")
+                .0
+                .ticket_id;
+            let b = queue_join(State(state.clone()), from_ip(i), Json(req()))
+                .await
+                .expect("B join")
+                .0
+                .ticket_id;
+
+            let ta = queue_get(State(state.clone()), Path(a)).await.0;
+            let tb = queue_get(State(state.clone()), Path(b)).await.0;
+            assert_eq!(ta.status, "matched");
+            assert_eq!(tb.status, "matched");
+            let (ca, cb) = (ta.color.expect("A colour"), tb.color.expect("B colour"));
+            assert_ne!(ca, cb, "the two seats can't share a colour");
+
+            for (t, want) in [(ta.token, ca.as_str()), (tb.token, cb.as_str())] {
+                let (_, seat) = state.token_seat(&t.expect("browser seat's token")).unwrap();
+                let seat = match seat {
+                    Color::White => "white",
+                    Color::Black => "black",
+                };
+                assert_eq!(seat, want, "the colour reported must be the token's seat");
+            }
+            if ca == "white" {
+                first_whites += 1;
+            }
+        }
+
+        assert!(
+            first_whites > 0 && first_whites < N,
+            "colour must vary across games, got {first_whites}/{N} white for the waiter"
+        );
     }
 
     /// Insert a fresh running gauntlet session and return its id.
