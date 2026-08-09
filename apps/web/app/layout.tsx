@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Noto_Sans } from "next/font/google";
 
 import "./globals.css";
 // chessground's structural CSS, vendored (its package "exports" map makes the
@@ -18,6 +19,25 @@ import {
   SITE_TITLE,
   SITE_URL,
 } from "@/lib/brand";
+
+// globals.css has named "Noto Sans" as the first family since the UI was
+// written, but nothing ever loaded it — no next/font, no @font-face, no link
+// tag — so every visitor silently fell through to the system stack and the site
+// rendered in SF Pro or Segoe UI depending on their OS. This loads it for real.
+//
+// next/font self-hosts: the file is fetched once at build time and served from
+// our own origin, so there is no runtime request to Google and `font-src 'self'`
+// in next.config.mjs needs no new entry. The variable axis covers 400/600/700/800
+// (every weight globals.css asks for) in one file rather than four.
+//
+// display: "swap" is the deliberate choice for a site that shows a clock: text
+// paints immediately in the fallback and reflows when the font lands, rather
+// than blocking on it.
+const notoSans = Noto_Sans({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-sans",
+});
 
 export const metadata: Metadata = {
   // Required, and not optional in practice: without it every relative OG and
@@ -85,7 +105,11 @@ export default function RootLayout({
     // style attribute on <html> before React hydrates, which the server render
     // has no way to predict. It suppresses one level only, so a real mismatch
     // anywhere inside the page still reports.
-    <html lang="en" suppressHydrationWarning>
+    // The font class only defines --font-sans; globals.css is what applies it,
+    // so the whole cascade (including the vendored chessground CSS) picks it up
+    // from one place. Safe alongside the bootstrap script below, which writes a
+    // style attribute rather than a class.
+    <html lang="en" className={notoSans.variable} suppressHydrationWarning>
       <head>
         {/* Stamps the saved board theme onto <html> before the first paint, so a
             themed board never flashes brown on the way in. Must stay inline and

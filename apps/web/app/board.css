@@ -70,6 +70,15 @@ cg-board square.check {
 /* Selector groups are chessground's; only the colors are ours. The first group
  * is every label sitting on a light square, the second on a dark square. */
 
+/* chessground hardcodes `font-family: sans-serif` on coords, which after the
+ * app started loading Noto Sans left the board's a-h/1-8 as the one text on
+ * screen still in the browser's generic sans. Overridden here rather than in
+ * chessground.base.css because that file is vendored and re-vendored wholesale
+ * on a bump, which would silently drop the edit. */
+.cg-wrap coords {
+  font-family: inherit;
+}
+
 .cg-wrap coords:nth-child(odd) coord:nth-child(even),
 .cg-wrap coords.squares:nth-child(even) coord:nth-child(odd),
 .cg-wrap.orientation-black coords.files:nth-child(even) coord:nth-child(odd),
