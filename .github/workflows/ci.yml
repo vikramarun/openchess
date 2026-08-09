@@ -104,4 +104,11 @@ jobs:
           # happening, every phone photo would start arriving at full size and
           # uploads would 413 — for users only, never in a test.
           pnpm test:avatar
+          # A static site header puts the top nav ~640px above the screen by the
+          # time a finished game is readable, so the only clickable link left is
+          # the one in the board sidebar — and a header that outranks
+          # .modal-overlay turns the pre-game stake confirmation into a dialog
+          # you can click behind. Both are one-line CSS regressions that nothing
+          # else here would see.
+          pnpm test:layout
           pnpm build

@@ -24,6 +24,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
+(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -99,6 +100,23 @@ wallet.
   per-entry-point, not global middleware.
 - **`pnpm build` clobbers the `next dev` cache** (→ `/_next/static` 404s). If the
   dev preview breaks after a build: `rm -rf apps/web/.next` and restart it.
+- **The site header is sticky on purpose, and its `z-index` must stay under 50.**
+  A game view is several viewports tall: the result banner used to land ~525px
+  down and "Back to lobby" ~1000px down, so a static header was already ~640px
+  above the screen by the time a finished game was readable — the top nav became
+  unclickable and the sidebar button was the only way out. That shipped. The
+  `z-index: 40` is the other half: `.modal-overlay` (StakeConfirm, the
+  time-control picker) is 50 and MUST keep covering the header, so raising the
+  header above it turns the pre-game confirm into a dialog you can click behind.
+  The homepage also stands its hero + engine banner down while a board is
+  mounted (`Lobby`'s `onActiveChange` → `page.tsx`), which is what actually
+  brings the result banner back above the fold (235px, from 525px); sticky is
+  the backstop, and the only half that covers the pages with no lobby to stand
+  down (`/game/[id]`, gauntlet, tournament). Keep the hero in the SERVER render —
+  `Lobby` is client-only, so moving the `<h1>` inside it drops the landing
+  page's only heading out of the HTML. `pnpm test:layout` pins the two CSS
+  halves (sticky, and ranked under the overlay) by reading `globals.css`; the
+  React half — what `inGame` hides — is unpinned, since there's no DOM harness.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
