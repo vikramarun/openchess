@@ -1,24 +1,43 @@
 # Deployments
 
-> ## ⚠️ `contracts/src/ChessEscrow.sol` at HEAD is NOT what is deployed.
->
-> HEAD carries **v2 work in progress**: tournament sponsorship
-> (`sponsorTournament`, `refundSponsorship`, `sponsorship`), a buy-in that may
-> be zero so entry can be free, and a `claimRefund` guard for that case. None of
-> it is on Base. The mainnet address below still runs **v1** and is unaffected.
->
-> v2 is not deployable as it stands. It needs, in order: an independent audit
-> (this adds new money paths to an already-unaudited contract), a fresh deploy +
-> Basescan verification, and a **bankroll migration** — balances live inside the
-> escrow, so users must withdraw from v1 and deposit into v2. Keep v1 live until
-> its in-flight games and tournaments have settled, and point the server at v2
-> only for new ones.
->
-> To read the deployed source: `git log -- contracts/src/ChessEscrow.sol` and
-> check out the revision before the sponsorship commit, or diff against the
-> verified source on Basescan.
+## Base mainnet (chain 8453) — **v2, live**
 
-## Base mainnet (chain 8453), 2026-07-10
+**`ChessEscrow` v2**: [`0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68`](https://basescan.org/address/0x7a536bef5cd9694acaed7bc5fe65e463db5d4d68)
+
+Adds tournament sponsorship (`sponsorTournament`, `refundSponsorship`,
+`sponsorship`), a buy-in that may be zero so entry can be free, and a
+`claimRefund` guard for that case. This is what `ESCROW_ADDR` points at and what
+`crates/ledger/abi/ChessEscrow.json` is vendored from.
+
+| Parameter | Value |
+|---|---|
+| Token (USDC) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (canonical Base USDC) |
+| Oracle (result signer) | `0xE41Aa20B37a93DA94B22b0c9c2B5CC0691077B53` |
+| Owner | `0x4392d34Cc747160f8F749d1e249e2595f191DF6A` (hardware wallet; `Ownable2Step` transfer **accepted**) |
+| Fee recipient | `0x4392d34Cc747160f8F749d1e249e2595f191DF6A` |
+| Fee (rake) | 100 bps (1%) |
+| Settle timeout | 86400 s (24h) |
+
+Verified against the chain after deploy: every byte of the runtime code matches
+the local artifact except 114 bytes, all of which fall inside the six immutable
+slots (`token`, cached chain id, cached domain separator) — i.e. same source,
+immutables filled in at construction.
+
+> **⚠️ Still unaudited.** v2 was deployed without the independent audit
+> [PRODUCTION.md](PRODUCTION.md) asks for. `MAX_STAKE` stays at 25 USDC as the
+> guardrail. Owner is a single hardware wallet, not a multisig, and `setOracle`
+> is not behind a timelock — both are still open items on that checklist.
+
+> **⚠️ Two dead deployments. Do not use either.**
+> - `0x3fb1c2b89236c9a59c017901dad76f795a2fdbeb` — **v1 bytecode**, deployed by
+>   mistake from a checkout whose working tree was stale (its `main` ref had
+>   been force-moved out from under it). Owned by a throwaway key that was
+>   exposed in plaintext, so treat it as hostile, not merely wrong.
+> - The v1 below, superseded. It held 0 USDC at cutover, so there was nothing to
+>   migrate; balances were never at risk.
+
+## Base mainnet (chain 8453), 2026-07-10 — v1, SUPERSEDED
+
 
 **`ChessEscrow`**: [`0x7Cc1dD4F12BBfb40fCA6eC2334a27c646FCf923D`](https://basescan.org/address/0x7cc1dd4f12bbfb40fca6ec2334a27c646fcf923d)
 (source **verified** on Basescan)
