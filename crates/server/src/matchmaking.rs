@@ -1698,12 +1698,13 @@ struct Standing {
     score: f64,
     /// Pairings resolved so far (played games + forfeits).
     played: usize,
-    /// 1-based position in the payout order. NOT shared between equal scores —
-    /// `distribute_pool` pays by position, so sharing it would promise money
-    /// the contract won't send. See `tied`.
+    /// 1-based, shared between equal scores (1, 1, 3 …) — which is honest only
+    /// because `payout_split` shares the money too. While the pool was paid out
+    /// strictly by position, a shared rank promised two entrants an equal
+    /// finish and then paid one of them 2.6x the other.
     rank: usize,
-    /// Another entrant finished on this exact score, so this row's position
-    /// (and therefore its share of the pool) came from the tiebreak, not play.
+    /// Another entrant finished on this exact score, so the two of them share
+    /// the prize for those places.
     tied: bool,
     /// This entrant's seat is played by a connected agent.
     bot: bool,
@@ -1757,20 +1758,22 @@ struct TourneyView {
     age_secs: u64,
 }
 
+/// Scores in half-points. Every result moves a score by 0.5 or 1.0, so this is
+/// exact — and it lets "same score" be an integer comparison rather than `==`
+/// on f64, in a place where the answer decides who gets paid what.
+fn half_points(score: f64) -> i64 {
+    (score * 2.0).round() as i64
+}
+
 /// Final order of the field: score descending, and — because the sort is stable
 /// over `players` — equal scores separated by the order the entrants joined.
 ///
-/// This is THE ordering, not one of two. `distribute_pool` pays
-/// `payout_weights` out positionally against it (65/25/10 for a field of 3+),
-/// so position 1 and position 2 are paid very differently even when their
-/// scores are identical. Ranking the table separately, with tied players
-/// sharing a rank, showed two entrants a gold medal each and then paid one of
-/// them 2.6x the other — so both callers go through here, and the table
-/// reports the position that actually gets paid.
+/// This is THE ordering, not one of two: `distribute_pool` and the standings
+/// table both read it, so what a player is looking at is what the pool pays.
 ///
-/// The join-order tiebreak is not a good rule; it is just the current one, and
-/// `Standing::tied` exists so the UI can say so rather than imply the two
-/// players finished level in every sense that matters.
+/// Join order still decides where inside a tied bracket an entrant sits, but
+/// `payout_split` now pays that whole bracket out equally, so it no longer
+/// decides anyone's money — only the row order on screen.
 fn ranked_entrants(t: &Tournament) -> Vec<(&str, f64)> {
     let mut order: Vec<(&str, f64)> = t
         .players
@@ -1797,15 +1800,25 @@ fn standings_of(t: &Tournament) -> Vec<Standing> {
     order
         .iter()
         .enumerate()
-        .map(|(i, (p, score))| Standing {
-            player: (*p).to_string(),
-            score: *score,
-            played: played.get(p).copied().unwrap_or(0),
-            // Position in the payout order — deliberately never shared, because
-            // the payout never shares it.
-            rank: i + 1,
-            tied: order.iter().filter(|(_, s)| s == score).count() > 1,
-            bot: t.entrant_bots.contains_key(*p),
+        .map(|(i, (p, score))| {
+            let level = order
+                .iter()
+                .filter(|(_, s)| half_points(*s) == half_points(*score))
+                .count();
+            Standing {
+                player: (*p).to_string(),
+                score: *score,
+                played: played.get(p).copied().unwrap_or(0),
+                // Standard competition ranking: equal scores share the place,
+                // and `payout_split` pays the bracket out equally to match.
+                rank: order
+                    .iter()
+                    .position(|(_, s)| half_points(*s) == half_points(*score))
+                    .unwrap_or(i)
+                    + 1,
+                tied: level > 1,
+                bot: t.entrant_bots.contains_key(*p),
+            }
         })
         .collect()
 }
@@ -2384,6 +2397,80 @@ fn payout_weights(n: usize) -> Vec<u128> {
     }
 }
 
+/// How a finished field's pool is divided, in standings order.
+///
+/// Positions are worth `payout_weights` (65/25/10 for a field of 3+), and any
+/// rounding remainder goes to the top so the whole pool is distributed — the
+/// contract rakes `pool - sum(payouts)` to the fee recipient, so this MUST sum
+/// to exactly `pool`.
+///
+/// Tied brackets then share what their positions are collectively worth.
+/// Position alone used to decide the money, and position among equal scores is
+/// decided by `ranked_entrants`' stable sort over join order — so two entrants
+/// who finished dead level were paid 65% and 25% based on who pressed Join
+/// first. That is not a tiebreak, it is a prize for being early, worth more
+/// than winning a game; and join order is something an entrant controls, so it
+/// was a free and repeatable edge.
+fn payout_split(pool: u128, standings: &[(String, f64)]) -> anyhow::Result<Vec<u128>> {
+    // Tied brackets are found by scanning for CONTIGUOUS equal scores, which is
+    // only correct on ranked input: given [2.0, 1.0, 2.0] the two leaders would
+    // be treated as separate brackets and paid 65% and 10%. The sole caller
+    // passes `ranked_entrants` output, so this guards against a future one.
+    //
+    // An error rather than a `debug_assert`, because money paths fail closed
+    // and `debug_assert` is compiled out of the release build that actually
+    // handles money — it would have been loud in CI and silent in the only
+    // place being wrong costs anyone anything. `settle_tournament` logs this
+    // and returns before marking the tournament settled or enqueueing a
+    // payout, so a bad call pays nobody and stays retriable.
+    if !standings
+        .windows(2)
+        .all(|w| half_points(w[0].1) >= half_points(w[1].1))
+    {
+        return Err(anyhow::anyhow!(
+            "payout_split needs standings in ranked order (score descending)"
+        ));
+    }
+    let n = standings.len();
+    let weights = payout_weights(n);
+    let mut by_rank = vec![0u128; n];
+    let mut assigned = 0u128;
+    for i in 0..n {
+        by_rank[i] = pool
+            .checked_mul(weights[i])
+            .ok_or_else(|| anyhow::anyhow!("payout overflow"))?
+            / 10_000;
+        assigned += by_rank[i];
+    }
+    if n > 0 {
+        by_rank[0] += pool - assigned; // full pool distributed (0 rake)
+    }
+
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && half_points(standings[j].1) == half_points(standings[i].1) {
+            j += 1;
+        }
+        if j - i > 1 {
+            let total: u128 = by_rank[i..j].iter().sum();
+            let members = (j - i) as u128;
+            let share = total / members;
+            // Base units left over from an indivisible split (at most
+            // members-1, i.e. under a millionth of a USDC each). Handed out one
+            // apiece from the top so the sum still lands exactly on `total` —
+            // the only place entry order still shows up, and now it is worth
+            // 0.000001 USDC rather than a quarter of the pool.
+            let mut rem = total - share * members;
+            for slot in by_rank[i..j].iter_mut() {
+                *slot = share + if rem > 0 { rem -= 1; 1 } else { 0 };
+            }
+        }
+        i = j;
+    }
+    Ok(by_rank)
+}
+
 async fn distribute_pool(
     state: &AppState,
     tid: Uuid,
@@ -2399,37 +2486,19 @@ async fn distribute_pool(
         .checked_mul(n as u128)
         .ok_or_else(|| anyhow::anyhow!("pool overflow"))?;
 
-    // Payout per standings rank; remainder (rounding) goes to the winner.
-    let weights = payout_weights(n);
-    let mut by_rank = vec![0u128; n];
-    let mut assigned = 0u128;
-    for i in 0..n {
-        by_rank[i] = pool
-            .checked_mul(weights[i])
-            .ok_or_else(|| anyhow::anyhow!("payout overflow"))?
-            / 10_000;
-        assigned += by_rank[i];
-    }
-    if n > 0 {
-        by_rank[0] += pool - assigned; // full pool distributed (0 rake)
-    }
+    let by_rank = payout_split(pool, standings)?;
 
-    // Map payouts back to the entrant (players) order the contract expects.
-    use std::collections::HashMap;
-    let payout_for: HashMap<&str, u128> = standings
-        .iter()
-        .enumerate()
-        .map(|(i, (p, _))| (p.as_str(), by_rank[i]))
-        .collect();
-
+    // `standings` and `by_rank` are the same order, so read across by index —
+    // a name-keyed map would silently pay one of them nothing if two entrants
+    // ever shared a label.
     let mut addrs = Vec::with_capacity(n);
     let mut payouts = Vec::with_capacity(n);
-    for (player, _) in standings {
+    for (i, (player, _)) in standings.iter().enumerate() {
         let addr = player
             .parse::<Address>()
             .map_err(|_| anyhow::anyhow!("entrant {player} is not an address"))?;
         addrs.push(addr);
-        payouts.push(U256::from(*payout_for.get(player.as_str()).unwrap_or(&0)));
+        payouts.push(U256::from(by_rank[i]));
     }
 
     // Large fields settle via a Merkle root (O(1) per winner claim); small
@@ -2911,12 +2980,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tied_entrants_are_shown_the_position_the_pool_pays() {
-        // The table used to give tied entrants a SHARED rank while
-        // `distribute_pool` paid `payout_weights` out positionally — two gold
-        // medals on screen, 65% and 25% of the pool in the wallets, decided by
-        // who joined first. Position is now never shared, and `tied` marks the
-        // rows whose position came from the tiebreak rather than from play.
+    async fn tied_entrants_share_both_the_place_and_the_prize() {
+        // Two gold medals on screen used to mean 65% and 25% of the pool in the
+        // wallets, decided by who joined first. The table and the payout now
+        // agree: level entrants share the place AND the money.
         let (state, _c, _r) = test_state();
         let tid = tourney_create(
             State(state.clone()),
@@ -2952,12 +3019,17 @@ mod tests {
 
         let view = tourney_get(State(state.clone()), Path(tid)).await.expect("view").0;
         let ranks: Vec<usize> = view.standings.iter().map(|s| s.rank).collect();
-        assert_eq!(ranks, vec![1, 2, 3], "positions are never shared — the payout doesn't share them");
+        assert_eq!(ranks, vec![1, 1, 3], "level entrants share the place");
         assert!(view.standings[0].tied && view.standings[1].tied, "both level rows are flagged");
         assert!(!view.standings[2].tied);
+        // …and sharing the place is honest because they share the money.
+        let field: Vec<(String, f64)> =
+            view.standings.iter().map(|s| (s.player.clone(), s.score)).collect();
+        let amounts = payout_split(30_000_000, &field).expect("split");
+        assert_eq!(amounts[0], amounts[1], "a shared place must mean a shared prize");
 
         // And the table's order IS the order the pool is paid in.
-        let paid: Vec<String> = {
+        let payout_order: Vec<String> = {
             let ts = state.0.lobby.tournaments.lock();
             ranked_entrants(ts.get(&tid).unwrap())
                 .into_iter()
@@ -2965,7 +3037,100 @@ mod tests {
                 .collect()
         };
         let shown: Vec<String> = view.standings.iter().map(|s| s.player.clone()).collect();
-        assert_eq!(shown, paid, "what a player is looking at is what the pool pays");
+        assert_eq!(shown, payout_order, "what a player is looking at is what the pool pays");
+    }
+
+    /// Drive the REAL `payout_split` from a list of scores.
+    fn payouts_for(scores: &[f64], buy_in: u128) -> Vec<u128> {
+        let standings: Vec<(String, f64)> = scores
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("p{i}"), *s))
+            .collect();
+        payout_split(buy_in * scores.len() as u128, &standings).expect("split")
+    }
+
+    #[test]
+    fn tied_entrants_split_their_bracket_evenly() {
+        const USDC: u128 = 1_000_000; // 6dp
+                                      //
+        // Two level at the top of a field of four. This used to pay 26 and 10
+        // USDC — a 16 USDC gap for pressing Join first. The bracket is worth
+        // 65% + 25% = 90% of a 40 USDC pool, so each takes 18.
+        let p = payouts_for(&[2.0, 2.0, 1.0, 0.5], 10 * USDC);
+        assert_eq!(p, vec![18 * USDC, 18 * USDC, 4 * USDC, 0]);
+        assert_eq!(p.iter().sum::<u128>(), 40 * USDC, "the whole pool is still paid out");
+
+        // Everyone level: nobody out-performed anybody, so nobody is paid more.
+        let p = payouts_for(&[1.5, 1.5, 1.5, 1.5], 10 * USDC);
+        assert_eq!(p, vec![10 * USDC; 4], "an all-draw field returns every buy-in");
+        assert_eq!(p.iter().sum::<u128>(), 40 * USDC);
+
+        // A tie spanning into the zero-weight tail still shares what it is worth.
+        let p = payouts_for(&[3.0, 1.0, 1.0, 1.0, 1.0], 10 * USDC);
+        assert_eq!(p[0], 32_500_000, "outright winner keeps 65%");
+        assert_eq!(&p[1..], &[4_375_000; 4], "the 25%+10% bracket splits four ways");
+        assert_eq!(p.iter().sum::<u128>(), 50 * USDC);
+
+        // No ties: unchanged from before.
+        let p = payouts_for(&[3.0, 2.0, 1.0, 0.0], 10 * USDC);
+        assert_eq!(p, vec![26 * USDC, 10 * USDC, 4 * USDC, 0]);
+    }
+
+    #[test]
+    fn payout_split_rejects_unranked_standings() {
+        // The bracket scan is contiguous, so unranked input would pay the two
+        // leaders here 65% and 10% instead of splitting 75% between them.
+        // Rejected in EVERY build profile — a `debug_assert` here would vanish
+        // from the release binary that handles the money.
+        let unranked: Vec<(String, f64)> = [2.0, 1.0, 2.0]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("p{i}"), *s))
+            .collect();
+        let err = payout_split(30_000_000, &unranked).expect_err("must refuse to pay");
+        assert!(err.to_string().contains("ranked order"), "got: {err}");
+        // The sole real caller's input is accepted, so this can't fire in
+        // normal operation.
+        assert!(payout_split(30_000_000, &[
+            ("a".to_string(), 2.0),
+            ("b".to_string(), 2.0),
+            ("c".to_string(), 1.0),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn a_split_bracket_never_loses_a_base_unit_to_rake() {
+        // The contract rakes `pool - sum(payouts)` to the fee recipient, so an
+        // indivisible split must not quietly drop remainder on the floor.
+        const USDC: u128 = 1_000_000;
+        for n in 1..=9usize {
+            for tied in 1..=n {
+                // `tied` entrants level at the top, the rest strictly below.
+                let scores: Vec<f64> = (0..n)
+                    .map(|i| if i < tied { 9.0 } else { (n - i) as f64 * 0.5 })
+                    .collect();
+                // A buy-in that divides badly by 3, 6, 7 …
+                let buy_in = 3 * USDC + 1;
+                let p = payouts_for(&scores, buy_in);
+                assert_eq!(
+                    p.iter().sum::<u128>(),
+                    buy_in * n as u128,
+                    "n={n} tied={tied}: whole pool distributed"
+                );
+                let bracket = &p[..tied];
+                let (lo, hi) = (
+                    bracket.iter().min().copied().unwrap(),
+                    bracket.iter().max().copied().unwrap(),
+                );
+                assert!(
+                    hi - lo <= 1,
+                    "n={n} tied={tied}: level entrants differ by {} base units",
+                    hi - lo
+                );
+            }
+        }
     }
 
     #[test]
