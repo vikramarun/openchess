@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
+import { SponsorPool } from "@/components/SponsorPool";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
@@ -23,6 +24,7 @@ import {
   fetchTournament,
   fetchTournaments,
   rememberCasualIdentity,
+  hasPrizePool,
   kindOf,
   sameEntrant,
   type Standing,
@@ -472,8 +474,6 @@ function TournamentClient() {
             <b style={{ color: "var(--text-strong)" }}>{openT.name}</b>{" "}
             <span className={`status-pill ${openT.status}`}>{openT.status}</span>
             <div className="muted" style={{ fontSize: 13 }}>
-              {/* A buy-in is the only money in a tournament, and it's what makes
-                  its games ranked — nothing else on this page would say so. */}
               {/* The structure is fixed at creation and can't be changed
                   afterwards, so it belongs next to the entry fee: it is half of
                   what an entrant is agreeing to. */}
@@ -494,6 +494,38 @@ function TournamentClient() {
             </span>
           )}
         </div>
+
+        {/* Anyone may add to the pool, entrant or not, while the field is still
+            playing for it. Not once the tournament is `complete`: settlement is
+            being signed against the pool as read, so money arriving in that
+            window is raked rather than paid out (see TOURNAMENTS.md). */}
+        {hasPrizePool(openT) &&
+          config?.escrow &&
+          wagerOn &&
+          (openT.status === "open" || openT.status === "running") && (
+            <div className="panel" style={{ marginBottom: 16 }}>
+              <b style={{ color: "var(--text-strong)" }}>Prize pool</b>
+              <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+                {poolLabel(openT.pool) ?? "Nothing in the pot yet"}
+                {kindOf(openT) === "free"
+                  ? " — entry is free, so the prizes are whatever sponsors put up."
+                  : " — entries plus sponsorship."}
+              </div>
+              <SponsorPool
+                tid={openT.id}
+                escrow={config.escrow}
+                chainId={config.chainId}
+                onFunded={() => {
+                  // The server polls the chain for the pool, so the figure here
+                  // catches up on its own within a tick or two; this just makes
+                  // the next poll happen now rather than after the interval.
+                  fetchTournament(openT.id)
+                    .then((t) => setTourneys((prev) => prev.map((x) => (x.id === t.id ? t : x))))
+                    .catch(() => {});
+                }}
+              />
+            </div>
+          )}
 
         {entrant && current && seat?.seat === "bot" && (
           <div className="panel" style={{ textAlign: "center", marginBottom: 16 }}>

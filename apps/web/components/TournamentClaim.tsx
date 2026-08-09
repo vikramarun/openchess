@@ -73,6 +73,16 @@ export function TournamentClaim({
     functionName: "settleTimeout",
     query: { enabled },
   });
+  // A sponsor is not an entrant, so none of the reads above see them. Read the
+  // chain rather than trusting the local record that surfaced this tournament:
+  // it is a hint about what to ask, never the authority on what is owed.
+  const { data: sponsored, refetch: refetchSponsored } = useReadContract({
+    address: escrow,
+    abi: ESCROW_ABI,
+    functionName: "sponsorship",
+    args: address ? [tidHex, address] : undefined,
+    ...poll,
+  });
 
   // tournaments() → [buyIn, pool, claimedAmount, entrants, openedAt, settled, payoutRoot, exists]
   const t = tourn as
@@ -128,14 +138,26 @@ export function TournamentClaim({
               ? "pending"
               : null;
 
+  // A sponsorship reclaim is INDEPENDENT of the entrant actions above: the same
+  // wallet can be both (fund the pool, then play in it), and a sponsor who never
+  // entered is filtered out by every `hasEntered` check. So it is computed and
+  // rendered alongside `kind` rather than folded into it.
+  const mySponsorship = (sponsored as bigint | undefined) ?? 0n;
+  const sponsorRefundReady =
+    enabled &&
+    mySponsorship > 0n &&
+    !settled &&
+    settleTimeout != null &&
+    now > openedAt + settleTimeout;
+
   // Already-claimed is informational only, so it doesn't count toward showing
   // the parent's "Payouts & refunds" header.
-  const hasAction = kind != null && kind !== "claimed";
+  const hasAction = (kind != null && kind !== "claimed") || sponsorRefundReady;
   useEffect(() => {
     onResolved?.(hasAction);
   }, [hasAction, onResolved]);
 
-  if (kind == null) return null;
+  if (kind == null && !sponsorRefundReady) return null;
 
   const run = async (fn: () => Promise<`0x${string}`>) => {
     setError(null);
@@ -146,6 +168,7 @@ export function TournamentClaim({
       await publicClient!.waitForTransactionReceipt({ hash });
       refetchTourn();
       refetchClaimed();
+      refetchSponsored();
     } catch (e: any) {
       setError(e?.shortMessage ?? e?.message ?? "Transaction failed.");
     } finally {
@@ -176,10 +199,29 @@ export function TournamentClaim({
       }),
     );
 
+  const doSponsorRefund = () =>
+    address &&
+    run(() =>
+      writeContractAsync({
+        address: escrow,
+        abi: ESCROW_ABI,
+        functionName: "refundSponsorship",
+        args: [tidHex, address],
+      }),
+    );
+
   const errLine = error ? <span style={{ color: "#e06c6c", fontSize: 12 }}>{error}</span> : null;
 
-  // The single action/state for this tournament, built from `kind` above.
-  let node: React.ReactNode;
+  const sponsorNode = sponsorRefundReady ? (
+    <button className="ghost" onClick={doSponsorRefund} disabled={busy}>
+      {busy ? "Reclaiming…" : `Reclaim sponsorship · ${fmtUsdc(mySponsorship)} USDC`}
+    </button>
+  ) : null;
+
+  // The entrant action/state, built from `kind` above. Stays null for a wallet
+  // that only sponsored — it never entered, so none of these apply and falling
+  // through to the "pending" branch would promise it a refund it isn't owed.
+  let node: React.ReactNode = null;
   if (kind === "claimed") {
     node = (
       <span className="muted" style={{ fontSize: 13 }}>
@@ -200,8 +242,8 @@ export function TournamentClaim({
         {busy ? "Refunding…" : `Claim refund · ${fmtUsdc(buyIn)} USDC`}
       </button>
     );
-  } else {
-    // pending: abandoned but the refund window hasn't opened yet — say when.
+  } else if (kind === "pending") {
+    // abandoned but the refund window hasn't opened yet — say when.
     const left = openedAt + settleTimeout! - now;
     const dur =
       left <= 0
@@ -226,6 +268,7 @@ export function TournamentClaim({
         </span>
       )}
       {node}
+      {sponsorNode}
       {errLine}
     </span>
   );

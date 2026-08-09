@@ -24,6 +24,7 @@
     "test:offers": "tsx scripts/offers.test.ts",
     "test:payouts": "tsx scripts/payouts.test.ts",
     "test:tourney": "tsx scripts/tournamentKind.test.ts",
+    "test:sponsor": "tsx scripts/sponsorships.test.ts",
     "test:prefs": "tsx scripts/boardPrefs.test.ts",
     "test:brand": "tsx scripts/brand.test.ts",
     "test:font": "tsx scripts/font.test.ts",
