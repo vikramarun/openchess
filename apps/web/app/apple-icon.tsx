@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-import { MARK_TILE, rookMarkDataUri } from "@/lib/brand";
+import { MARK_ACCENT, MARK_LIGHT, MARK_TILE, ROOK_LEFT, ROOK_RIGHT } from "@/lib/brand";
 
 export const size = { width: 180, height: 180 };
 export const contentType = "image/png";
@@ -22,7 +22,10 @@ export default function AppleIcon() {
           backgroundColor: MARK_TILE,
         }}
       >
-        <img src={rookMarkDataUri()} width={124} height={124} alt="" />
+        <svg width={124} height={124} viewBox="0 0 64 64">
+          <path fill={MARK_LIGHT} d={ROOK_LEFT} />
+          <path fill={MARK_ACCENT} d={ROOK_RIGHT} />
+        </svg>
       </div>
     ),
     size,

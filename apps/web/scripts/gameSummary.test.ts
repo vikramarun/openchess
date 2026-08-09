@@ -5,7 +5,9 @@
 // The cases that matter are the empty ones. Engine names are self-declared and
 // optional, seats can be unnamed, and a casual game has no stake, so most of
 // this file is about what the card says when there is nothing to say.
-import type { GameDetail } from "../lib/gameApi";
+import { readFileSync } from "node:fs";
+
+import { GAME_REVALIDATE_SECS, type GameDetail } from "../lib/gameApi";
 import {
   gameSubtitle,
   gameTitle,
@@ -69,6 +71,17 @@ check(
   `${"x".repeat(27)}…`,
 );
 check("a 28-char name is left alone", seatLabel("x".repeat(28), WHITE, "White"), "x".repeat(28));
+// Engine names are self-declared and unverified, and the OG card stacks the two
+// seats with `white-space: pre-wrap`. A name of newlines fits inside the length
+// cap and still pushes everything below it off the card, so whitespace has to
+// be flattened before the cap, not just trimmed at the ends.
+check("newlines are flattened", seatLabel("A\n\n\n\n\n\nB", WHITE, "White"), "A B");
+check("tabs and runs collapse", seatLabel("Stock\t\t  fish", WHITE, "White"), "Stock fish");
+check(
+  "a name of pure newlines is not a name",
+  seatLabel("\n".repeat(26), WHITE, "White"),
+  "0x1111…1111",
+);
 
 // --- titles ---
 check("a finished game names both sides and the score", gameTitle(game()), "Stockfish 17 vs. Berserk — 1-0");
@@ -109,6 +122,19 @@ check(
   gameSubtitle(game({ moves: [{ ply: 1, uci: "e2e4", san: "e4", white_ms: 0, black_ms: 0 }] })),
   "10+0 · 1 ply",
 );
+
+// --- the title and the picture expire together ---
+// The OG image route repeats this number as a literal, because Next requires a
+// `revalidate` segment export to be statically analyzable and so it cannot
+// import the constant. If the two drift, a game crawled while live keeps a
+// scoreless title beside a card that already shows the result.
+const ogSource = readFileSync(
+  new URL("../app/game/[id]/opengraph-image.tsx", import.meta.url),
+  "utf8",
+);
+const declared = ogSource.match(/^export const revalidate = (\d+)/m)?.[1];
+check("the OG image declares a revalidate", declared !== undefined, true);
+check("it matches GAME_REVALIDATE_SECS", Number(declared), GAME_REVALIDATE_SECS);
 
 console.log(failed === 0 ? "\nall game-summary checks passed" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

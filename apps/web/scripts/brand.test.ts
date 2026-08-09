@@ -11,7 +11,7 @@
 // board script against the React path.
 import { readFileSync } from "node:fs";
 
-import { ROOK_LEFT, ROOK_RIGHT, rookMarkDataUri, rookMarkSvg } from "../lib/brand";
+import { ROOK_LEFT, ROOK_RIGHT, rookMarkSvg } from "../lib/brand";
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -74,16 +74,16 @@ for (const [name, svg] of [
 check("a size is emitted when asked for", rookMarkSvg({ size: 180 }).includes('width="180"'), true);
 check("no size is emitted otherwise", rookMarkSvg().includes("width="), false);
 
-// --- the data URI round-trips ---
-// The OG cards hand this to Satori as an <img> src; if the encoding is wrong the
-// card renders with a blank space where the mark should be, and still returns 200.
-const uri = rookMarkDataUri({ tile: true });
-check("data URI is base64 svg", uri.startsWith("data:image/svg+xml;base64,"), true);
-check(
-  "data URI decodes back to the mark",
-  Buffer.from(uri.split(",")[1], "base64").toString("utf8"),
-  tiled,
-);
+// --- the OG cards draw the mark inline, not through an <img> ---
+// resvg in a production bundle silently drops a nested SVG image, so a card
+// built that way loses its logo and still returns 200 — and the dev server
+// renders it fine, so nothing catches it before deploy. Pin the shape of the
+// fix, not just the outcome.
+for (const path of ["../lib/ogCard.tsx", "../app/apple-icon.tsx"]) {
+  const src = readFileSync(new URL(path, import.meta.url), "utf8");
+  check(`${path}: draws the mark inline`, src.includes("ROOK_LEFT") && src.includes("ROOK_RIGHT"), true);
+  check(`${path}: no data-URI <img>`, /data:image\/svg\+xml/.test(src), false);
+}
 
 console.log(failed === 0 ? "\nall brand checks passed" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

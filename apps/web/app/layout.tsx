@@ -47,7 +47,11 @@ export const metadata: Metadata = {
   creator: BRAND_NAME,
   publisher: BRAND_NAME,
   manifest: "/manifest.webmanifest",
-  alternates: { canonical: "/" },
+  // Deliberately NO `alternates.canonical` here. Metadata merges down the tree,
+  // so a canonical set at the root is inherited by every route that does not
+  // override it — which would declare /gauntlet, /tournament and the rest
+  // duplicates of the homepage and stop them being indexed separately. If a
+  // self-referencing canonical is ever wanted, it has to be set per segment.
   openGraph: {
     type: "website",
     siteName: BRAND_NAME,

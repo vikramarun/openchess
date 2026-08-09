@@ -33,10 +33,26 @@ export type GameDetail = {
   moves: GameMove[];
 };
 
-/** Fetch full game detail; returns null on 404 / network error / bad shape. */
+/** How long a server-rendered game detail may be reused, in seconds.
+ *
+ *  Next 14's fetch defaults to `force-cache`, so without this the Data Cache
+ *  holds a game forever: one crawled while live would keep a scoreless title
+ *  for the life of the deployment, even as its OG image (which sets its own
+ *  revalidate) went on to show the result. Both now expire together.
+ *
+ *  app/game/[id]/opengraph-image.tsx repeats this number as a literal, because
+ *  Next requires the `revalidate` segment export to be statically analyzable
+ *  and so cannot import it. Change both. */
+export const GAME_REVALIDATE_SECS = 300;
+
+/** Fetch full game detail; returns null on 404 / network error / bad shape.
+ *  The `next` option is server-only and ignored by the browser, so the client
+ *  components calling this are unaffected. */
 export async function fetchGame(id: string): Promise<GameDetail | null> {
   try {
-    const r = await fetch(`${SERVER_HTTP}/games/${encodeURIComponent(id)}`);
+    const r = await fetch(`${SERVER_HTTP}/games/${encodeURIComponent(id)}`, {
+      next: { revalidate: GAME_REVALIDATE_SECS },
+    });
     if (!r.ok) return null;
     const d = await r.json();
     // Validate the shape the replay depends on rather than trusting the body —

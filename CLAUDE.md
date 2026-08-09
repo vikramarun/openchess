@@ -201,6 +201,20 @@ wallet.
   `opengraph-image.tsx` is **auto-injected into that segment's metadata**, so if
   its `generateMetadata` also sets `openGraph.images` one silently overrides the
   other. Titles in `generateMetadata`, the picture in the file convention.
+- **An OG card must draw the mark as inline `<svg>`, never an `<img>` data
+  URI.** `next/og` rasterizes through resvg, and the resvg in a **production**
+  bundle does not decode a nested SVG image: it drops it and still returns 200,
+  so the card renders wordmark-only and every shared link quietly loses its
+  logo. `next dev` uses a different resvg that decodes it fine, so this passes
+  locally and breaks only once deployed — it shipped that way once already.
+  Encoding is irrelevant (base64 and percent-encoded give byte-identical,
+  markless output). `pnpm test:brand` greps `lib/ogCard.tsx` and
+  `app/apple-icon.tsx` for the inline form. The general lesson: **verify a
+  generated image against `next build && next start`, never the dev server.**
+- **A root `alternates.canonical` is inherited by every route.** Metadata merges
+  down the tree, so a canonical set in `app/layout.tsx` declares /gauntlet,
+  /tournament and the rest duplicates of the homepage and drops them out of the
+  index. There is deliberately none at the root; set one per segment if wanted.
 - **Every page is a Client Component, so metadata lives in a sibling
   `layout.tsx`.** `"use client"` and `export const metadata` are mutually
   exclusive, which is why each route has a three-line server layout next to its

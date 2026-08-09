@@ -7,10 +7,13 @@
 // `gap` for the same reason — fewer assumptions about what the renderer
 // implements.
 
-import { MARK_TILE, rookMarkDataUri } from "./brand";
+import { MARK_ACCENT, MARK_LIGHT, MARK_TILE, ROOK_LEFT, ROOK_RIGHT } from "./brand";
 
 /** Facebook/Twitter/Discord all crop toward 1.91:1; this is the standard. */
 export const OG_SIZE = { width: 1200, height: 630 };
+
+/** Rendered size of the mark in the card header. */
+const MARK_PX = 80;
 
 const TEXT = "#ededec";
 const MUTED = "#9c968c";
@@ -53,9 +56,10 @@ export function ogCard({ eyebrow, title, subtitle, detail }: OgCardProps) {
       />
 
       <div style={{ display: "flex", alignItems: "center" }}>
-        {/* Bare, not tiled: the card's own background is already MARK_TILE, so
-            a tile here would be an invisible rectangle. */}
-        <img src={rookMarkDataUri()} width={80} height={80} alt="" />
+        <svg width={MARK_PX} height={MARK_PX} viewBox="0 0 64 64">
+          <path fill={MARK_LIGHT} d={ROOK_LEFT} />
+          <path fill={MARK_ACCENT} d={ROOK_RIGHT} />
+        </svg>
         <div
           style={{
             marginLeft: 20,

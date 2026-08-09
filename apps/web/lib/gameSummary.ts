@@ -18,7 +18,11 @@ export function seatLabel(
   address: string | null,
   color: "White" | "Black",
 ): string {
-  const named = engine?.trim();
+  // Collapse all whitespace before measuring. The OG card renders the title
+  // with `white-space: pre-wrap` so the two seats stack, which means a name
+  // made of newlines pushes the opponent, the subtitle and the footer clean off
+  // the canvas — and it fits well inside the length cap while doing it.
+  const named = engine?.replace(/\s+/g, " ").trim();
   if (named) return named.length > 28 ? `${named.slice(0, 27)}…` : named;
   return shortAddress(address, color);
 }

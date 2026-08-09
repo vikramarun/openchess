@@ -58,19 +58,15 @@ export function rookMarkSvg({ tile = false, size }: MarkOptions = {}): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"${dims}>${body}</svg>`;
 }
 
-/** The mark as a data URI, for the <img> that Satori accepts in an
- *  ImageResponse (it renders only a subset of inline SVG, but takes an image
- *  source happily). base64 rather than percent-encoding: the raw markup has
- *  both `#` and `"` in it, which are exactly the characters a URI-encoded SVG
- *  gets wrong most often. */
-export function rookMarkDataUri(opts: MarkOptions = {}): string {
-  const svg = rookMarkSvg(opts);
-  const b64 =
-    typeof Buffer !== "undefined"
-      ? Buffer.from(svg, "utf8").toString("base64")
-      : btoa(svg);
-  return `data:image/svg+xml;base64,${b64}`;
-}
+// NOTE for the OG cards (lib/ogCard.tsx, app/apple-icon.tsx): draw the mark by
+// putting ROOK_LEFT/ROOK_RIGHT in an inline <svg>, and do NOT reach for an
+// <img> with a data URI of rookMarkSvg(). Satori rasterizes with resvg, and the
+// resvg build in a production bundle does not decode a nested SVG image — it
+// drops it and still returns a 200, so the card renders wordmark-only and every
+// shared link quietly loses its logo. The dev server uses a different resvg
+// that DOES decode it, so this passes locally and fails once deployed. That is
+// exactly how it shipped the first time. Encoding makes no difference; base64
+// and percent-encoded produce byte-identical, markless output.
 
 // --- strings -----------------------------------------------------------------
 
