@@ -98,6 +98,20 @@ pub struct SeatMeta {
     pub wallet: Option<String>,
 }
 
+/// Which ladder a game counts for.
+///
+/// Money is the only thing that makes a game ranked, and a per-game stake says
+/// so on its own — so this exists for the one case where the money sits
+/// upstream of the game: a tournament that charged a buy-in, whose pairings
+/// carry no stake of their own (the pool settles separately).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Ladder {
+    /// Free play. Moves the separate casual Elo, never the ranked one.
+    #[default]
+    Casual,
+    Ranked,
+}
+
 /// Resolve the wallet recorded for each seat, `[white, black]`.
 ///
 /// A wagered seat takes its wallet from the escrow addresses: money is the
@@ -105,7 +119,7 @@ pub struct SeatMeta {
 /// Everything else falls back to the authenticated wallet that took the seat.
 /// The fallback is the whole point — a casual game used to record no wallet at
 /// all, so a played game was invisible to `/players/{addr}/games`, to the
-/// win/loss record, and to Elo, which only ever moved on staked games.
+/// win/loss record, and to the casual ladder.
 pub fn seat_wallets(wager: Option<WagerSeats>, meta: &[SeatMeta; 2]) -> [Option<String>; 2] {
     [
         wager
@@ -556,6 +570,9 @@ pub struct LiveGame {
     pub white_engine: Option<String>,
     pub black_engine: Option<String>,
     pub stake: Option<String>,
+    /// Which ladder it counts for. Free-but-ranked happens (a buy-in
+    /// tournament), so a viewer keyed on `stake` alone would mislabel it.
+    pub rated: bool,
     pub initial_secs: u64,
     pub increment_secs: u64,
     pub created_ms: u64,
@@ -898,6 +915,7 @@ async fn create_game(
             tc,
             "casual",
             None,
+            Ladder::Casual,
             Default::default(),
             [SeatDelivery::Browser, SeatDelivery::Browser],
         )
@@ -950,6 +968,7 @@ impl AppState {
         tc: TimeControl,
         mode: &str,
         wager: Option<WagerSeats>,
+        ladder: Ladder,              // ranked only when money is upstream (buy-in)
         meta: [SeatMeta; 2],         // [white, black] self-declared identity
         delivery: [SeatDelivery; 2], // [white, black] seat delivery
     ) -> Result<CreateGameResp, StatusCode> {
@@ -988,6 +1007,10 @@ impl AppState {
 
         // Who owns each seat, wagered or not — see `seat_wallets`.
         let wallets = seat_wallets(wager, &meta);
+        // Which ladder it counts for. OR-ing with the wager is the fail-safe
+        // direction: a caller can forget to ask for Ranked, but a game with a
+        // stake on it can never be recorded casual by that omission.
+        let rated = wager.is_some() || ladder == Ladder::Ranked;
 
         // Persist the game row. For a wagered game this must succeed (fail-closed).
         if let Some(db) = &self.0.db {
@@ -1000,6 +1023,7 @@ impl AppState {
                 .create_game(
                     game_id,
                     mode,
+                    rated,
                     wallets[0].as_deref(),
                     wallets[1].as_deref(),
                     PgTc {
@@ -1073,6 +1097,7 @@ impl AppState {
                 white_engine: meta[0].engine.clone(),
                 black_engine: meta[1].engine.clone(),
                 stake: wager.map(|w| w.stake.to_string()),
+                rated,
                 initial_secs: tc.initial_ms / 1000,
                 increment_secs: tc.increment_ms / 1000,
                 created_ms: std::time::SystemTime::now()
@@ -1363,15 +1388,19 @@ mod tests {
     }
 
     /// `test_state` with a real Postgres behind it, so a test can look at the
-    /// row `start_game` actually wrote.
-    fn test_state_with_db(db: Arc<persistence::Db>) -> AppState {
+    /// row `start_game` actually wrote. The settlement sink is a parameter
+    /// because a wagered game is refused outright unless one is onchain.
+    fn test_state_with_db(
+        db: Arc<persistence::Db>,
+        settlement: Arc<dyn ledger::SettlementSink>,
+    ) -> AppState {
         let (cleanup_tx, _cleanup_rx) = mpsc::channel::<GameId>(8);
         let (results_tx, _results_rx) = mpsc::channel::<GameOutcome>(8);
         AppState(Arc::new(Inner {
             rooms: Mutex::new(HashMap::new()),
             live_games: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
-            settlement: Arc::new(ledger::LogSettlement),
+            settlement,
             db: Some(db),
             maintenance: AtomicBool::new(false),
             admin_wallet: Mutex::new(None),
@@ -1396,7 +1425,7 @@ mod tests {
         };
         let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
         db.migrate().await.expect("migrate");
-        let state = test_state_with_db(db.clone());
+        let state = test_state_with_db(db.clone(), Arc::new(ledger::LogSettlement));
 
         let white = "0xaa11111111111111111111111111111111111111";
         let black = "0xbb22222222222222222222222222222222222222";
@@ -1409,6 +1438,7 @@ mod tests {
                 TC,
                 "park",
                 None, // no stake: the case that used to record nobody
+                Ladder::Casual,
                 [seat(white), seat(black)],
                 [SeatDelivery::Browser, SeatDelivery::Browser],
             )
@@ -1423,6 +1453,84 @@ mod tests {
         assert_eq!(row.white_wallet.as_deref(), Some(white));
         assert_eq!(row.black_wallet.as_deref(), Some(black));
         assert_eq!(row.stake, None, "wallets recorded without a wager");
+        assert!(!row.rated, "and it's a free game, so it's on the casual ladder");
+    }
+
+    /// A staked game is ranked whatever the caller asked for. The `Ladder`
+    /// argument can only ever ADD rankedness — forgetting to pass `Ranked`
+    /// must not be able to file a game with money on it under casual.
+    /// Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_staked_game_is_ranked_even_when_the_caller_says_casual() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
+        db.migrate().await.expect("migrate");
+        let state = test_state_with_db(db.clone(), Arc::new(OnchainStub));
+
+        let wager = WagerSeats {
+            white: "0x00000000000000000000000000000000000000a1"
+                .parse()
+                .unwrap(),
+            black: "0x00000000000000000000000000000000000000b2"
+                .parse()
+                .unwrap(),
+            stake: U256::from(1_000_000u64),
+        };
+        let resp = state
+            .start_game(
+                TC,
+                "park",
+                Some(wager),
+                Ladder::Casual, // deliberately wrong
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("staked game starts");
+
+        let row = db
+            .game_detail(resp.game_id)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert!(row.rated, "money on the game makes it ranked regardless");
+    }
+
+    /// The other direction: money upstream of the game (a tournament buy-in)
+    /// makes it ranked even though no stake is attached to the pairing.
+    /// Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_buy_in_tournament_pairing_is_ranked_without_a_wager() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
+        db.migrate().await.expect("migrate");
+        let state = test_state_with_db(db.clone(), Arc::new(ledger::LogSettlement));
+
+        let resp = state
+            .start_game(
+                TC,
+                "tournament",
+                None, // the buy-in is a pool, not a per-game wager
+                Ladder::Ranked,
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("tournament game starts");
+
+        let row = db
+            .game_detail(resp.game_id)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert!(row.rated);
+        assert_eq!(row.stake, None, "ranked with nothing staked on the game");
     }
 
     fn bearer(token: &str) -> HeaderMap {
@@ -1528,6 +1636,7 @@ mod tests {
                 TC,
                 "casual",
                 None,
+                Ladder::Casual,
                 Default::default(),
                 [SeatDelivery::Browser, SeatDelivery::Browser],
             )
@@ -1544,6 +1653,7 @@ mod tests {
                 TC,
                 "casual",
                 None,
+                Ladder::Casual,
                 Default::default(),
                 [SeatDelivery::Browser, SeatDelivery::Browser],
             )
@@ -1624,6 +1734,7 @@ mod tests {
                 TC,
                 "casual",
                 None,
+                Ladder::Casual,
                 [
                     SeatMeta {
                         wallet: Some(addr.into()),

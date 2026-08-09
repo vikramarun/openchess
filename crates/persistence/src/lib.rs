@@ -38,13 +38,61 @@ pub struct OutboxRow {
     pub attempts: i32,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+/// One player's record over some set of games. Used three times per profile —
+/// once per ladder and once for the two together.
+#[derive(Debug, Default, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct PlayerStatsRow {
     pub games: i64,
     pub wins: i64,
     pub losses: i64,
     pub draws: i64,
     pub net: Decimal,
+}
+
+impl PlayerStatsRow {
+    /// The two ladders summed. A player who has never played one of them gets
+    /// no row back for it at all, which is why every field here starts at zero
+    /// rather than at NULL — the profile must render `0`, not blank.
+    fn plus(&self, other: &Self) -> Self {
+        Self {
+            games: self.games + other.games,
+            wins: self.wins + other.wins,
+            losses: self.losses + other.losses,
+            draws: self.draws + other.draws,
+            net: self.net + other.net,
+        }
+    }
+}
+
+/// One `GROUP BY rated` bucket of the record query.
+#[derive(Debug, sqlx::FromRow)]
+struct PlayerStatsBucketRow {
+    rated: bool,
+    games: i64,
+    wins: i64,
+    losses: i64,
+    draws: i64,
+    net: Decimal,
+}
+
+/// A player's record split by ladder, plus the two combined. `all` is carried
+/// rather than re-derived so the HTTP layer's flat (pre-split) fields and the
+/// profile's "All" view can never drift from the buckets under them.
+#[derive(Debug, Default)]
+pub struct PlayerStats {
+    pub all: PlayerStatsRow,
+    pub casual: PlayerStatsRow,
+    pub ranked: PlayerStatsRow,
+}
+
+/// The `users`-row half of a profile: both ladders and the photo version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerCard {
+    /// Ranked Elo — staked games and buy-in tournaments only.
+    pub rating: f32,
+    /// Casual Elo — everything else. A separate ladder, never mixed in.
+    pub casual_rating: f32,
+    pub avatar_updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A stored profile photo. Only read on the image route — the profile JSON
@@ -73,6 +121,9 @@ pub struct PlayerGameRow {
     pub result_reason: Option<String>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub moves: i64,
+    /// Which ladder this game counted for. Not derivable from `stake`: a
+    /// buy-in tournament game is ranked with no stake of its own.
+    pub rated: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -151,6 +202,9 @@ pub struct GameDetailRow {
     pub white_wallet: Option<String>,
     pub black_wallet: Option<String>,
     pub stake: Option<Decimal>,
+    /// Which ladder it counted for. A buy-in tournament game is `true` with a
+    /// null stake, so a viewer that reads `stake` alone calls it casual.
+    pub rated: bool,
     pub result: Option<String>,
     pub result_reason: Option<String>,
     pub result_hash: Option<String>,
@@ -240,6 +294,10 @@ impl Db {
         &self,
         id: Uuid,
         mode: &str,
+        // Which ladder this game counts for (migration 0015). Decided by the
+        // caller because it is not derivable here: a buy-in tournament game is
+        // ranked while carrying no stake of its own.
+        rated: bool,
         white_wallet: Option<&str>,
         black_wallet: Option<&str>,
         tc: Tc,
@@ -252,8 +310,8 @@ impl Db {
             r#"INSERT INTO games
                (id, mode, status, white_wallet, black_wallet,
                 time_initial_ms, time_increment_ms, white_addr, black_addr, stake,
-                settlement_status, white_engine, black_engine)
-               VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)"#,
+                settlement_status, white_engine, black_engine, rated)
+               VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"#,
         )
         .bind(id)
         .bind(mode)
@@ -267,6 +325,7 @@ impl Db {
         .bind(if wager.is_some() { "pending" } else { "none" })
         .bind(engines[0])
         .bind(engines[1])
+        .bind(rated)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -613,7 +672,7 @@ impl Db {
     /// Full detail for one game (public game view: replay + settlement status).
     pub async fn game_detail(&self, game_id: Uuid) -> Result<Option<GameDetailRow>> {
         let row = sqlx::query_as::<_, GameDetailRow>(
-            r#"SELECT id, mode, status, white_wallet, black_wallet, stake, result,
+            r#"SELECT id, mode, status, white_wallet, black_wallet, stake, rated, result,
                       result_reason, result_hash, result_sig, settlement_status,
                       time_initial_ms, time_increment_ms, finished_at,
                       white_engine, black_engine
@@ -780,15 +839,12 @@ impl Db {
     /// when the photo last changed (the version tag the API hands out, so
     /// clients can cache the image and still see a replacement).
     ///
-    /// One lookup rather than two — both halves live on the same row, and this
+    /// One lookup rather than three — all of it lives on the same row, and this
     /// is the most-hit public read on the server. Never selects the bytes.
-    /// Defaults to 1500 with no photo for a wallet that has never been seen.
-    pub async fn player_card(
-        &self,
-        wallet: &str,
-    ) -> Result<(f32, Option<chrono::DateTime<chrono::Utc>>)> {
-        let row: Option<(f32, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-            r#"SELECT rating,
+    /// Defaults to 1500/1500 with no photo for a wallet never seen before.
+    pub async fn player_card(&self, wallet: &str) -> Result<PlayerCard> {
+        let row: Option<(f32, f32, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT rating, casual_rating,
                       CASE WHEN avatar_data IS NOT NULL AND avatar_mime IS NOT NULL
                            THEN avatar_updated_at END
                  FROM users
@@ -797,15 +853,25 @@ impl Db {
         .bind(wallet.to_lowercase())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.unwrap_or((1500.0, None)))
+        let (rating, casual_rating, avatar_updated_at) = row.unwrap_or((1500.0, 1500.0, None));
+        Ok(PlayerCard {
+            rating,
+            casual_rating,
+            avatar_updated_at,
+        })
     }
 
     /// Aggregate W/L/D + net winnings (USDC base units) for an address over
-    /// finished games. `address` is matched case-insensitively.
-    pub async fn player_stats(&self, address: &str) -> Result<PlayerStatsRow> {
+    /// finished games, split by ladder. `address` is matched case-insensitively.
+    ///
+    /// One round trip: `GROUP BY rated` returns at most two rows and the fold
+    /// below fills in the ladder the player hasn't touched. Doing it here rather
+    /// than in the handler keeps the fold under the DB-backed tests.
+    pub async fn player_stats(&self, address: &str) -> Result<PlayerStats> {
         let addr = address.to_lowercase();
-        let row = sqlx::query_as::<_, PlayerStatsRow>(
+        let rows = sqlx::query_as::<_, PlayerStatsBucketRow>(
             r#"SELECT
+                 rated,
                  COUNT(*) AS games,
                  COUNT(*) FILTER (WHERE (lower(white_wallet)=$1 AND result='white')
                                      OR (lower(black_wallet)=$1 AND result='black')) AS wins,
@@ -819,30 +885,61 @@ impl Db {
                      OR (lower(black_wallet)=$1 AND result='white') THEN -stake
                    ELSE 0 END), 0) AS net
                FROM games
-               WHERE status='finished' AND (lower(white_wallet)=$1 OR lower(black_wallet)=$1)"#,
+               WHERE status='finished' AND (lower(white_wallet)=$1 OR lower(black_wallet)=$1)
+               GROUP BY rated"#,
         )
         .bind(&addr)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(row)
+        let mut stats = PlayerStats::default();
+        for r in rows {
+            let bucket = PlayerStatsRow {
+                games: r.games,
+                wins: r.wins,
+                losses: r.losses,
+                draws: r.draws,
+                net: r.net,
+            };
+            if r.rated {
+                stats.ranked = bucket;
+            } else {
+                stats.casual = bucket;
+            }
+        }
+        stats.all = stats.casual.plus(&stats.ranked);
+        Ok(stats)
     }
 
-    /// Current rating for an address (1500 if unseen).
+    /// Current ranked rating for an address (1500 if unseen).
     pub async fn player_rating(&self, address: &str) -> Result<f32> {
+        self.rating_on(address, true).await
+    }
+
+    /// Current rating on one ladder (1500 if unseen). The column name comes
+    /// from this literal and never from input, so the interpolation below is
+    /// not a query-building surface.
+    pub async fn rating_on(&self, address: &str, rated: bool) -> Result<f32> {
+        let col = if rated { "rating" } else { "casual_rating" };
         let r: Option<f32> =
-            sqlx::query_scalar("SELECT rating FROM users WHERE lower(wallet)=$1")
+            sqlx::query_scalar(&format!("SELECT {col} FROM users WHERE lower(wallet)=$1"))
                 .bind(address.to_lowercase())
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(r.unwrap_or(1500.0))
     }
 
-    /// Top-rated players, best first. Only players with at least one finished
-    /// rated game (two known wallets) are included, so freshly-signed-in wallets
-    /// sitting at the default 1500 don't pad the board. Powers the lobby
+    /// The ranked ladder, best first. Only players with at least one finished
+    /// RANKED game (two known wallets) are included, so freshly-signed-in
+    /// wallets sitting at the default 1500 don't pad the board. Powers the lobby
     /// leaderboard.
+    ///
+    /// `rated` is part of that filter, not decoration: this board renders
+    /// `users.rating`, which only ranked games move, so counting casual games
+    /// beside it would publish a number the rating didn't come from — and would
+    /// put a wallet that has only ever played free games onto the ranked ladder
+    /// at 1500, which is the padding the filter exists to prevent.
     pub async fn leaderboard(&self, limit: i64) -> Result<Vec<LeaderboardRow>> {
-        // Count finished rated games per wallet in a single GROUP BY pass over
+        // Count finished ranked games per wallet in a single GROUP BY pass over
         // `games` (each qualifying game contributes one row per side), then join
         // the counts back to `users`. This is O(users + games) — the old form ran
         // a correlated COUNT(*) per user (O(users × games)). COUNT(DISTINCT id)
@@ -855,11 +952,11 @@ impl Db {
                  SELECT wallet, COUNT(DISTINCT game_id) AS games
                  FROM (
                    SELECT id AS game_id, lower(white_wallet) AS wallet FROM games
-                     WHERE status='finished' AND result IS NOT NULL
+                     WHERE status='finished' AND result IS NOT NULL AND rated
                        AND white_wallet IS NOT NULL AND black_wallet IS NOT NULL
                    UNION ALL
                    SELECT id AS game_id, lower(black_wallet) AS wallet FROM games
-                     WHERE status='finished' AND result IS NOT NULL
+                     WHERE status='finished' AND result IS NOT NULL AND rated
                        AND white_wallet IS NOT NULL AND black_wallet IS NOT NULL
                  ) sides
                  GROUP BY wallet
@@ -874,33 +971,54 @@ impl Db {
     }
 
     /// Recent finished games involving an address (most recent first).
-    pub async fn player_games(&self, address: &str, limit: i64) -> Result<Vec<PlayerGameRow>> {
+    ///
+    /// `rated` filters to one ladder; `None` returns both. The filter belongs
+    /// here rather than in the client because `limit` is applied after it:
+    /// partitioning one 50-row page in the browser answers "the ranked games
+    /// among your last 50", not "your last 50 ranked games", and those differ a
+    /// lot for anyone whose recent play is lopsided.
+    pub async fn player_games(
+        &self,
+        address: &str,
+        limit: i64,
+        rated: Option<bool>,
+    ) -> Result<Vec<PlayerGameRow>> {
         let rows = sqlx::query_as::<_, PlayerGameRow>(
             r#"SELECT g.id, g.mode, g.white_wallet, g.black_wallet, g.result,
-                      g.stake, g.result_reason, g.finished_at,
+                      g.stake, g.result_reason, g.finished_at, g.rated,
                       (SELECT COUNT(*) FROM moves m WHERE m.game_id = g.id) AS moves
                FROM games g
                WHERE g.status='finished'
                  AND (lower(g.white_wallet)=$1 OR lower(g.black_wallet)=$1)
+                 AND ($3::BOOLEAN IS NULL OR g.rated = $3)
                ORDER BY g.finished_at DESC NULLS LAST LIMIT $2"#,
         )
         .bind(address.to_lowercase())
         .bind(limit)
+        .bind(rated)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
     }
 
-    /// Update Elo ratings for a finished game with two known wallets (no-op for
+    /// Update Elo for a finished game with two known wallets (no-op for
     /// anonymous games). K=24.
+    ///
+    /// The game's own `rated` flag picks the ladder: a staked game (or a buy-in
+    /// tournament pairing) moves `users.rating`, everything else moves
+    /// `users.casual_rating`. The two never mix, which is what lets the lobby
+    /// keep promising that a free game doesn't touch your ranked Elo.
     pub async fn update_ratings(&self, game_id: Uuid) -> Result<()> {
-        let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT white_wallet, black_wallet, result FROM games WHERE id=$1",
+        /// (white_wallet, black_wallet, result, rated) — everything rating a
+        /// game needs, and all of it nullable except the ladder.
+        type RatedGame = (Option<String>, Option<String>, Option<String>, bool);
+        let row: Option<RatedGame> = sqlx::query_as(
+            "SELECT white_wallet, black_wallet, result, rated FROM games WHERE id=$1",
         )
         .bind(game_id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((Some(white), Some(black), Some(result))) = row else {
+        let Some((Some(white), Some(black), Some(result), rated)) = row else {
             return Ok(()); // anonymous seat — nothing to rate
         };
         // Never rate a wallet against itself. A stake makes this impossible
@@ -918,18 +1036,21 @@ impl Db {
         };
         self.upsert_user(&white).await?;
         self.upsert_user(&black).await?;
-        let ra = self.player_rating(&white).await? as f64;
-        let rb = self.player_rating(&black).await? as f64;
+        let ra = self.rating_on(&white, rated).await? as f64;
+        let rb = self.rating_on(&black, rated).await? as f64;
         let expected_white = 1.0 / (1.0 + 10f64.powf((rb - ra) / 400.0));
         const K: f64 = 24.0;
         let new_a = ra + K * (score_white - expected_white);
         let new_b = rb + K * ((1.0 - score_white) - (1.0 - expected_white));
-        sqlx::query("UPDATE users SET rating=$2 WHERE lower(wallet)=lower($1)")
+        // Literal, never input — see `rating_on`.
+        let col = if rated { "rating" } else { "casual_rating" };
+        let update = format!("UPDATE users SET {col}=$2 WHERE lower(wallet)=lower($1)");
+        sqlx::query(&update)
             .bind(&white)
             .bind(new_a as f32)
             .execute(&self.pool)
             .await?;
-        sqlx::query("UPDATE users SET rating=$2 WHERE lower(wallet)=lower($1)")
+        sqlx::query(&update)
             .bind(&black)
             .bind(new_b as f32)
             .execute(&self.pool)
@@ -968,6 +1089,7 @@ mod tests {
         db.create_game(
             id,
             "park",
+            false,
             Some("0xwhite"),
             Some("0xblack"),
             Tc { initial_ms: 60000, increment_ms: 1000 },
@@ -1013,14 +1135,15 @@ mod tests {
         assert!(db.avatar(&wallet).await?.is_none(), "no photo to begin with");
         // Unseen wallet: the default rating, and nothing for the client to
         // build an image URL out of.
-        assert_eq!(db.player_card(&wallet).await?, (1500.0, None));
+        let card = db.player_card(&wallet).await?;
+        assert_eq!((card.rating, card.casual_rating, card.avatar_updated_at), (1500.0, 1500.0, None));
 
         // Sets a photo for a wallet that has never played — no users row yet.
         db.set_avatar(&wallet, "image/jpeg", b"\xff\xd8\xffbytes").await?;
         let got = db.avatar(&wallet.to_lowercase()).await?.expect("photo");
         assert_eq!(got.mime, "image/jpeg");
         assert_eq!(got.data, b"\xff\xd8\xffbytes");
-        let first = db.player_card(&wallet).await?.1.expect("timestamp");
+        let first = db.player_card(&wallet).await?.avatar_updated_at.expect("timestamp");
 
         // Replacing keeps one row and moves the version forward, which is what
         // busts the cached image URL.
@@ -1028,11 +1151,11 @@ mod tests {
         let got = db.avatar(&wallet).await?.expect("photo");
         assert_eq!(got.mime, "image/png");
         assert_eq!(got.data, b"\x89PNGnew");
-        assert!(db.player_card(&wallet).await?.1.expect("timestamp") >= first);
+        assert!(db.player_card(&wallet).await?.avatar_updated_at.expect("timestamp") >= first);
 
         db.clear_avatar(&wallet).await?;
         assert!(db.avatar(&wallet).await?.is_none(), "cleared");
-        assert!(db.player_card(&wallet).await?.1.is_none(), "and no version left");
+        assert!(db.player_card(&wallet).await?.avatar_updated_at.is_none(), "and no version left");
         Ok(())
     }
 
@@ -1051,22 +1174,25 @@ mod tests {
         let alice = format!("0xA_{tag}"); // mixed case on purpose (see below)
         let bob = format!("0xb_{tag}");
         let carol = format!("0xc_{tag}"); // signs in but never finishes a game
+        let dave = format!("0xd_{tag}"); // plays, but only free games
 
         db.upsert_user(&alice).await?;
         db.upsert_user(&bob).await?;
         db.upsert_user(&carol).await?;
+        db.upsert_user(&dave).await?;
 
-        // Two finished games between alice and bob, alice winning both (so her
-        // Elo ends above bob's — deterministic ordering, no test-only setter).
-        // The second game stores alice's wallet lowercased, so the case-insensitive
-        // count must fold the two together.
-        let finish = |white: String, black: String, result: &'static str| {
+        // Two finished RANKED games between alice and bob, alice winning both
+        // (so her Elo ends above bob's — deterministic ordering, no test-only
+        // setter). The second game stores alice's wallet lowercased, so the
+        // case-insensitive count must fold the two together.
+        let finish = |white: String, black: String, result: &'static str, rated: bool| {
             let db = db.clone();
             async move {
                 let id = Uuid::new_v4();
                 db.create_game(
                     id,
                     "park",
+                    rated,
                     Some(&white),
                     Some(&black),
                     Tc { initial_ms: 60000, increment_ms: 1000 },
@@ -1081,14 +1207,19 @@ mod tests {
                 Ok::<_, anyhow::Error>(())
             }
         };
-        finish(alice.clone(), bob.clone(), "white").await?; // alice (white) wins
-        finish(bob.clone(), alice.to_lowercase(), "black").await?; // alice (black) wins
+        finish(alice.clone(), bob.clone(), "white", true).await?; // alice (white) wins
+        finish(bob.clone(), alice.to_lowercase(), "black", true).await?; // alice (black) wins
+        // Casual games: they exist, they're finished, they have two known
+        // wallets — and none of that puts anyone on the ranked ladder.
+        finish(dave.clone(), alice.clone(), "white", false).await?;
+        finish(alice.clone(), dave.clone(), "white", false).await?;
 
         // A pending (unfinished) game must not count.
         let pending = Uuid::new_v4();
         db.create_game(
             pending,
             "park",
+            true,
             Some(&alice),
             Some(&bob),
             Tc { initial_ms: 60000, increment_ms: 1000 },
@@ -1105,9 +1236,16 @@ mod tests {
 
         let a = get(&alice).expect("alice on the board");
         let b = get(&bob).expect("bob on the board");
-        assert_eq!(a.games, 2, "both finished games count for alice (case-folded)");
+        assert_eq!(
+            a.games, 2,
+            "her two ranked games count (case-folded), her two casual ones don't"
+        );
         assert_eq!(b.games, 2, "both finished games count for bob");
         assert!(get(&carol).is_none(), "no finished games => not on the board");
+        assert!(
+            get(&dave).is_none(),
+            "only casual games => no ranked ladder entry, not a free 1500"
+        );
 
         // Ordered by rating desc: alice (won both -> higher Elo) before bob.
         let ai = board.iter().position(|r| r.wallet.to_lowercase() == alice.to_lowercase());
@@ -1136,6 +1274,7 @@ mod tests {
         db.create_game(
             id,
             "park",
+            false, // <- casual
             Some(&alice),
             Some(&bob),
             Tc { initial_ms: 60000, increment_ms: 1000 },
@@ -1150,21 +1289,23 @@ mod tests {
             .await?;
         db.update_ratings(id).await?;
 
-        let mine = db.player_games(&alice.to_lowercase(), 50).await?;
+        let mine = db.player_games(&alice.to_lowercase(), 50, None).await?;
         let row = mine.iter().find(|g| g.id == id).expect("in alice's history");
         assert_eq!(row.result.as_deref(), Some("white"));
         assert_eq!(row.stake, None, "casual game, no stake");
+        assert!(!row.rated, "and it counted for the casual ladder");
         assert_eq!(row.moves, 2);
         assert!(
-            db.player_games(&bob, 50).await?.iter().any(|g| g.id == id),
+            db.player_games(&bob, 50, None).await?.iter().any(|g| g.id == id),
             "and in bob's"
         );
 
-        // The same row is what the record and the rating read.
+        // The same row is what the record reads — under the casual bucket, and
+        // in the combined view, but never under ranked.
         let stats = db.player_stats(&alice).await?;
-        assert_eq!((stats.games, stats.wins, stats.losses), (1, 1, 0));
-        assert!(db.player_rating(&alice).await? > 1500.0, "a win moves Elo");
-        assert!(db.player_rating(&bob).await? < 1500.0);
+        assert_eq!((stats.casual.games, stats.casual.wins, stats.casual.losses), (1, 1, 0));
+        assert_eq!((stats.all.games, stats.all.wins), (1, 1));
+        assert_eq!(stats.ranked, PlayerStatsRow::default(), "nothing ranked here");
         Ok(())
     }
 
@@ -1187,6 +1328,7 @@ mod tests {
         db.create_game(
             id,
             "park",
+            false,
             Some(&wallet),
             Some(&wallet),
             Tc { initial_ms: 60000, increment_ms: 1000 },
@@ -1200,6 +1342,194 @@ mod tests {
         db.update_ratings(id).await?;
 
         assert_eq!(db.player_rating(&wallet).await?, 1500.0, "unrated self-play");
+        assert_eq!(
+            db.rating_on(&wallet, false).await?,
+            1500.0,
+            "and the casual ladder is not the loophole either"
+        );
+        Ok(())
+    }
+
+    /// Play one finished game on a ladder and hand back both wallets' ratings.
+    #[cfg(test)]
+    async fn played(
+        db: &Db,
+        white: &str,
+        black: &str,
+        rated: bool,
+        result: &str,
+    ) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        db.create_game(
+            id,
+            "park",
+            rated,
+            Some(white),
+            Some(black),
+            Tc { initial_ms: 60000, increment_ms: 1000 },
+            None,
+            [None, None],
+        )
+        .await?;
+        db.set_game_active(id).await?;
+        db.finish_and_enqueue(id, result, "checkmate", "hash", None, "1. e4 e5", None, false)
+            .await?;
+        db.update_ratings(id).await?;
+        Ok(id)
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn casual_and_ranked_elo_are_independent() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // The promise the lobby has always made and could not keep: a free game
+        // does not touch your ranked Elo. Two ladders, one flag, no crossover.
+        let tag = Uuid::new_v4().simple().to_string();
+        let alice = format!("0xA_{tag}");
+        let bob = format!("0xb_{tag}");
+
+        played(&db, &alice, &bob, false, "white").await?;
+        assert!(db.rating_on(&alice, false).await? > 1500.0, "casual win moves casual Elo");
+        assert!(db.rating_on(&bob, false).await? < 1500.0);
+        assert_eq!(db.player_rating(&alice).await?, 1500.0, "and NOT the ranked one");
+        assert_eq!(db.player_rating(&bob).await?, 1500.0);
+
+        // The mirror: a ranked game leaves the casual ladder where it was.
+        let casual_before = db.rating_on(&alice, false).await?;
+        played(&db, &alice, &bob, true, "white").await?;
+        assert!(db.player_rating(&alice).await? > 1500.0, "ranked win moves ranked Elo");
+        assert!(db.player_rating(&bob).await? < 1500.0);
+        assert_eq!(db.rating_on(&alice, false).await?, casual_before, "casual untouched");
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_buy_in_tournament_game_is_ranked_without_a_stake() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // Why `rated` is a column and not `stake IS NOT NULL`: a tournament
+        // pairing carries no stake of its own (the buy-in pool settles
+        // separately), and deriving rankedness from the stake would file every
+        // paid tournament under casual.
+        let tag = Uuid::new_v4().simple().to_string();
+        let alice = format!("0xA_{tag}");
+        let bob = format!("0xb_{tag}");
+        let id = Uuid::new_v4();
+        db.create_game(
+            id,
+            "tournament",
+            true, // ranked...
+            Some(&alice),
+            Some(&bob),
+            Tc { initial_ms: 60000, increment_ms: 1000 },
+            None, // ...with no wager on the game itself
+            [None, None],
+        )
+        .await?;
+        db.set_game_active(id).await?;
+        db.finish_and_enqueue(id, "white", "checkmate", "hash", None, "1. e4 e5", None, false)
+            .await?;
+        db.update_ratings(id).await?;
+
+        assert!(db.player_rating(&alice).await? > 1500.0, "moves the ranked ladder");
+        assert_eq!(db.rating_on(&alice, false).await?, 1500.0, "not the casual one");
+        let stats = db.player_stats(&alice).await?;
+        assert_eq!(stats.ranked.games, 1);
+        assert_eq!(stats.casual.games, 0);
+        assert_eq!(stats.ranked.net, Decimal::ZERO, "ranked, but nothing was staked");
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn player_stats_buckets_split_and_sum() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let me = format!("0xA_{tag}");
+        let opp = format!("0xb_{tag}");
+        played(&db, &me, &opp, true, "white").await?; // ranked win
+        played(&db, &me, &opp, true, "black").await?; // ranked loss
+        played(&db, &me, &opp, false, "white").await?; // casual win
+        played(&db, &me, &opp, false, "white").await?; // casual win
+        played(&db, &me, &opp, false, "draw").await?; // casual draw
+
+        let s = db.player_stats(&me).await?;
+        assert_eq!((s.ranked.games, s.ranked.wins, s.ranked.losses), (2, 1, 1));
+        assert_eq!((s.casual.games, s.casual.wins, s.casual.draws), (3, 2, 1));
+        assert_eq!(s.all.games, 5, "the All view is the two summed");
+        assert_eq!(s.all.wins, s.ranked.wins + s.casual.wins);
+        assert_eq!(s.casual.net, Decimal::ZERO, "free games stake nothing");
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn player_stats_is_all_zeroes_for_a_wallet_with_no_games() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        // `GROUP BY` returns NO row for a ladder the player has never touched,
+        // so the fold has to invent the zeroes. The profile must render `0`,
+        // not a blank tile.
+        let s = db.player_stats(&format!("0xZ_{}", Uuid::new_v4().simple())).await?;
+        assert_eq!(s.all, PlayerStatsRow::default());
+        assert_eq!(s.casual, PlayerStatsRow::default());
+        assert_eq!(s.ranked, PlayerStatsRow::default());
+        Ok(())
+    }
+
+    // Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn player_games_filter_selects_one_ladder() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+
+        let tag = Uuid::new_v4().simple().to_string();
+        let me = format!("0xA_{tag}");
+        let opp = format!("0xb_{tag}");
+        let ranked = played(&db, &me, &opp, true, "white").await?;
+        played(&db, &me, &opp, false, "white").await?;
+        played(&db, &me, &opp, false, "black").await?;
+
+        let mine = |f| {
+            let db = db.clone();
+            let me = me.clone();
+            async move { db.player_games(&me, 50, f).await }
+        };
+        assert_eq!(mine(None).await?.len(), 3, "no filter: both ladders");
+        let only_ranked = mine(Some(true)).await?;
+        assert_eq!(only_ranked.len(), 1);
+        assert_eq!(only_ranked[0].id, ranked);
+        assert!(only_ranked.iter().all(|g| g.rated));
+        let only_casual = mine(Some(false)).await?;
+        assert_eq!(only_casual.len(), 2);
+        assert!(only_casual.iter().all(|g| !g.rated));
         Ok(())
     }
 }

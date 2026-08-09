@@ -388,8 +388,19 @@ function TournamentClient() {
             <b style={{ color: "var(--text-strong)" }}>{openT.name}</b>{" "}
             <span className={`status-pill ${openT.status}`}>{openT.status}</span>
             <div className="muted" style={{ fontSize: 13 }}>
-              {openT.buy_in ? `${fmtUsdc(openT.buy_in)} USDC entry` : "casual"} ·{" "}
-              {openT.players.length} entrant{openT.players.length === 1 ? "" : "s"}
+              {/* A buy-in is the only money in a tournament, and it's what makes
+                  its games ranked — nothing else on this page would say so. */}
+              {openT.buy_in ? (
+                <>
+                  {fmtUsdc(openT.buy_in)} USDC entry{" "}
+                  <span className="tag tag-rated" title="Ranked: moves your ranked Elo">
+                    Ranked
+                  </span>
+                </>
+              ) : (
+                "casual"
+              )}{" "}
+              · {openT.players.length} entrant{openT.players.length === 1 ? "" : "s"}
               {openT.total_rounds > 0 &&
                 ` · round ${Math.min(openT.current_round + 1, openT.total_rounds)} of ${openT.total_rounds}`}
             </div>
@@ -611,8 +622,15 @@ function TournamentClient() {
                       {t.name} <span className={`status-pill ${t.status}`}>{t.status}</span>
                     </div>
                     <div className="muted" style={{ fontSize: 13 }}>
-                      {t.buy_in ? `${fmtUsdc(t.buy_in)} USDC entry` : "casual"} · {t.players.length}{" "}
-                      entrant{t.players.length === 1 ? "" : "s"}
+                      {t.buy_in ? (
+                        <>
+                          {fmtUsdc(t.buy_in)} USDC entry{" "}
+                          <span className="tag tag-rated">Ranked</span>
+                        </>
+                      ) : (
+                        "casual"
+                      )}{" "}
+                      · {t.players.length} entrant{t.players.length === 1 ? "" : "s"}
                       {t.total_rounds > 0 &&
                         ` · round ${Math.min(t.current_round + 1, t.total_rounds)}/${t.total_rounds}`}
                       {t.status !== "open" && leader && leader.score > 0 && (

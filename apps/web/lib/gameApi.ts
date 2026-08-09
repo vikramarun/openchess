@@ -18,6 +18,9 @@ export type GameDetail = {
   white: string | null;
   black: string | null;
   stake: string | null;
+  /** Which ladder it counted for. Not `stake != null`: a buy-in tournament game
+   *  is ranked with no stake of its own. Absent from an older server. */
+  rated?: boolean;
   result: string | null; // "white" | "black" | "draw"
   reason: string | null;
   result_hash: string | null;

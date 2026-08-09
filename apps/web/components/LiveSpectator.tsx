@@ -13,6 +13,7 @@ import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { fmtUsdc } from "@/lib/escrow";
+import { bucketOf } from "@/lib/profileFilter";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
 import { useEval, useEvalPref } from "@/lib/useEval";
 import { usePlyNav } from "@/lib/usePlyNav";
@@ -27,6 +28,8 @@ type Meta = {
   white_engine: string | null;
   black_engine: string | null;
   stake: string | null;
+  /** Which ladder it counts for. Absent from an older server. */
+  rated?: boolean;
   initial_secs: number;
   increment_secs: number;
 };
@@ -190,10 +193,19 @@ export function LiveSpectator({ id }: { id: string }) {
             <div className="muted" style={{ marginTop: 6, fontSize: 14 }}>
               {meta ? (
                 <>
-                  {meta.stake ? (
+                  {/* The ladder, not the stake — a buy-in tournament game is
+                      ranked with nothing staked on the game itself. */}
+                  {bucketOf(meta) === "ranked" ? (
                     <>
-                      Stake <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(meta.stake)} USDC</b>{" "}
-                      <span className="tag tag-rated">Rated</span>
+                      {meta.stake ? (
+                        <>
+                          Stake{" "}
+                          <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(meta.stake)} USDC</b>{" "}
+                        </>
+                      ) : (
+                        <>Tournament </>
+                      )}
+                      <span className="tag tag-rated">Ranked</span>
                     </>
                   ) : (
                     <>

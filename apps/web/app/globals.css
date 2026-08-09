@@ -1354,6 +1354,9 @@ table.standings tr.me td {
 .profile-head {
   display: flex;
   align-items: center;
+  /* Wraps on a phone: the wallet, the photo and two rating tiles don't fit on
+     one line there, and squeezing the address column instead breaks it mid-hex. */
+  flex-wrap: wrap;
   gap: 18px;
   padding: 20px;
   background: var(--panel);
@@ -1386,11 +1389,66 @@ table.standings tr.me td {
   color: var(--text-strong);
   font-family: ui-monospace, monospace;
 }
+/* Both ladders side by side at the right of the profile head. Two tiles where
+   there used to be one, so the head has to be allowed to wrap on a phone. */
+.rating-pair {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+  text-align: right;
+}
+/* The history table has more columns than a phone is wide (and the All view
+   adds one more). Scroll it inside its panel rather than pushing the page. */
+.table-scroll {
+  overflow-x: auto;
+}
+.rating-pair .stat {
+  min-width: 110px;
+  /* Dimming the ladder you aren't looking at, rather than unmounting it. */
+  transition: opacity 0.12s;
+}
+/* Casual / Ranked switcher. A group of buttons, not a tablist — /profile
+   already has a real tablist above it (see ProfileStats). Pill geometry from
+   .tc-chip, active state from .rep-preset.active, so it looks like the rest of
+   the app without a new visual idiom. */
+.seg {
+  display: inline-flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.seg-btn {
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background 0.12s,
+    color 0.12s;
+}
+.seg-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-strong);
+}
+.seg-btn.on {
+  border-color: var(--accent);
+  background: #62992418;
+  color: var(--text-strong);
+}
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 16px;
+}
+/* The casual view has no Net USDC tile — free games stake nothing, so the
+   fourth column would be a permanent 0.00. */
+.stat-grid.cols-3 {
+  grid-template-columns: repeat(3, 1fr);
 }
 .stat {
   background: var(--panel);
@@ -1455,7 +1513,10 @@ table.standings tr.me td {
 }
 
 @media (max-width: 880px) {
-  .stat-grid {
+  .stat-grid,
+  /* The 3-tile casual grid needs the same narrow-screen treatment; without it
+     `.cols-3` wins on specificity and keeps three columns on a phone. */
+  .stat-grid.cols-3 {
     grid-template-columns: repeat(2, 1fr);
   }
   .mode-grid {

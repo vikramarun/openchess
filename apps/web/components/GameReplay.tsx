@@ -15,6 +15,7 @@ import { lastMoveFromUci, material, type Side } from "@/lib/board";
 import { other, useFlip } from "@/lib/useFlip";
 import { fmtUsdc } from "@/lib/escrow";
 import type { GameDetail } from "@/lib/gameApi";
+import { bucketOf } from "@/lib/profileFilter";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
 import { useEval, useEvalPref } from "@/lib/useEval";
 import { usePlyNav } from "@/lib/usePlyNav";
@@ -172,10 +173,20 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
           <div className="panel">
             <div style={{ fontWeight: 700, color: "var(--text-strong)" }}>Game review</div>
             <div className="muted" style={{ marginTop: 6, fontSize: 14 }}>
-              {detail.stake ? (
+              {/* Keyed on the ladder, not the stake: a buy-in tournament game is
+                  ranked while carrying no stake of its own, and calling that
+                  "Casual" here would contradict the Elo it just moved. */}
+              {bucketOf(detail) === "ranked" ? (
                 <>
-                  Stake <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(detail.stake)} USDC</b>{" "}
-                  <span className="tag tag-rated">Rated</span>
+                  {detail.stake ? (
+                    <>
+                      Stake{" "}
+                      <b style={{ color: "var(--text-strong)" }}>{fmtUsdc(detail.stake)} USDC</b>{" "}
+                    </>
+                  ) : (
+                    <>Tournament </>
+                  )}
+                  <span className="tag tag-rated">Ranked</span>
                 </>
               ) : (
                 <>

@@ -28,8 +28,8 @@ use ledger::{merkle_proof, tournament_leaf, Address, U256};
 use crate::agents::AgentUnavailable;
 use crate::ratelimit::client_ip;
 use crate::{
-    build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, SeatDelivery,
-    SeatMeta, MAX_STAKE,
+    build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, Ladder,
+    SeatDelivery, SeatMeta, MAX_STAKE,
 };
 
 /// Fields larger than this settle via a Merkle root (winners claim individually)
@@ -674,6 +674,8 @@ async fn park_accept(
             tc,
             "park",
             wager,
+            // A staked offer is ranked via its wager; a free one is casual.
+            Ladder::Casual,
             meta,
             [poster_delivery, acceptor_delivery],
         )
@@ -1051,7 +1053,14 @@ async fn queue_join(
     // aborts (escrow refunded) if an agent vanished, returning Err. On any Err
     // the claims are released and both players are put back.
     let resp = match state
-        .start_game(tc, "gauntlet", wager, [opp_meta, my_meta], [white_delivery, black_delivery])
+        .start_game(
+            tc,
+            "gauntlet",
+            wager,
+            Ladder::Casual, // staked tiers are ranked via their wager
+            [opp_meta, my_meta],
+            [white_delivery, black_delivery],
+        )
         .await
     {
         Ok(r) => r,
@@ -2127,14 +2136,25 @@ async fn dispatch_from_current(state: &AppState, tid: Uuid) {
 /// `round_remaining` to (and returns) the number of real games created.
 async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize {
     // Snapshot pairings + tc + bot entrants (never hold the lock across .await).
-    let (pairings, tc, bots, engines) = {
+    // The buy-in comes along as a bool: a paid tournament's games are ranked
+    // even though no pairing carries a stake of its own (the pool settles
+    // separately), and this is the only place that knows it. The amount is
+    // irrelevant here, so don't clone the string every round.
+    let (pairings, tc, bots, engines, ladder) = {
         let ts = state.0.lobby.tournaments.lock();
         let Some(t) = ts.get(&tid) else { return 0 };
         let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
         let Ok(tc) = validate_tc(t.initial_secs, t.increment_secs) else {
             return 0;
         };
-        (pairings, tc, t.entrant_bots.clone(), t.entrant_engines.clone())
+        let ladder = tournament_ladder(t.buy_in.as_deref());
+        (
+            pairings,
+            tc,
+            t.entrant_bots.clone(),
+            t.entrant_engines.clone(),
+            ladder,
+        )
     };
 
     let seat_meta = |p: &str| SeatMeta {
@@ -2182,7 +2202,8 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
                     .start_game(
                         tc,
                         "tournament",
-                        None,
+                        None, // the buy-in is a pool, never a per-game wager
+                        ladder,
                         [seat_meta(&white), seat_meta(&black)],
                         [wd, bd],
                     )
@@ -2312,6 +2333,21 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
 /// those rows already were; entrants recover via the contract's `claimRefund`.
 fn is_rehydratable(buy_in: Option<&str>, organizer: Option<&str>) -> bool {
     buy_in.is_none() || organizer.is_some()
+}
+
+/// Which ladder a tournament's pairings count for.
+///
+/// The entry fee is the only money in a tournament — no pairing carries a
+/// wager of its own — so this is the one place rankedness can't be inferred
+/// from the game. `buy_in` is persisted (migration 0005) and restored by
+/// `recover_tournaments`, so a tournament that survives a restart keeps
+/// dispatching ranked games rather than quietly coming back casual.
+fn tournament_ladder(buy_in: Option<&str>) -> Ladder {
+    if buy_in.is_some() {
+        Ladder::Ranked
+    } else {
+        Ladder::Casual
+    }
 }
 
 /// Recover tournaments after a restart.
@@ -3677,6 +3713,19 @@ mod tests {
         assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "organized buy-in row is kept");
         assert!(is_rehydratable(None, None), "a casual row needs no organizer — anyone may start it");
         assert!(is_rehydratable(None, Some("0xabc")));
+    }
+
+    #[test]
+    fn a_rehydrated_buy_in_tournament_still_dispatches_ranked_games() {
+        // The entry fee is the only money in a tournament, so it is the only
+        // thing that can make its pairings ranked — and it has to survive a
+        // restart to do it. `buy_in` is persisted and `recover_tournaments`
+        // copies it back, so a rehydrated paid tournament keeps dispatching
+        // ranked games instead of quietly coming back casual for its whole
+        // remaining schedule.
+        assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "it comes back at all");
+        assert_eq!(tournament_ladder(Some("1000000")), Ladder::Ranked);
+        assert_eq!(tournament_ladder(None), Ladder::Casual, "a free tournament is casual");
     }
 
     #[tokio::test]

@@ -104,4 +104,10 @@ jobs:
           # happening, every phone photo would start arriving at full size and
           # uploads would 413 — for users only, never in a test.
           pnpm test:avatar
+          # Ranked vs casual on the profile. A game is ranked when money was on
+          # it — including a buy-in tournament game, which carries no stake of
+          # its own, so classifying by stake quietly files paid games as casual.
+          # The same helpers have to degrade to today's single record against a
+          # server that predates the split, which is the normal deploy order.
+          pnpm test:profile
           pnpm build

@@ -24,7 +24,8 @@ export function SiteFooter() {
           <div className="footer-h">Fees &amp; payouts</div>
           A flat 1% fee on the profit from a settled game. Win and you get your own stake
           back plus your opponent’s, less the fee. Lose and your stake goes to them. A draw
-          or no-show returns it untouched. Rated games affect your Elo.
+          or no-show returns it untouched. Staked games move your ranked Elo; free games move a
+          separate casual Elo.
         </div>
         <div>
           <div className="footer-h">Verify it yourself</div>

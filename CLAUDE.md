@@ -24,6 +24,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
+(cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -223,8 +224,8 @@ wallet.
   W/L/D record, net USDC and Elo all read — and they used to be written from the
   *wager*, so an unstaked game recorded NULL seats and disappeared the moment it
   finished. It failed perfectly silently: the game plays, settles, shows in the
-  lobby, then isn't in anyone's history, and Elo only ever moved on staked
-  games. The seat wallet now rides on `SeatMeta.wallet` and `seat_wallets`
+  lobby, then isn't in anyone's history. The seat wallet now rides on
+  `SeatMeta.wallet` and `seat_wallets`
   (`main.rs`) picks the escrow address when there's a stake, else the
   authenticated wallet — so **every mode that seats a signed-in player has to
   fill it in** (park, queue, tournament do). Two riders. The client must *send*
@@ -234,6 +235,26 @@ wallet.
   does, and the two Elo writes apply in order, so the winner's would land last
   and farm rating. Note this fix is not retroactive — games already played with
   NULL seats can't be attributed, because nothing recorded who sat there.
+- **There are two ladders, and `games.rated` is which.** A game is RANKED when
+  money was on it — a per-game USDC stake, or a pairing in a tournament that
+  charged a buy-in — and CASUAL otherwise; the two move `users.rating` and
+  `users.casual_rating` independently and never mix. That is what makes the
+  lobby's long-standing promise ("a free game doesn't affect your Elo") true
+  again once casual games started being attributed at all. Three things to know.
+  **Ranked is not `stake IS NOT NULL`:** a tournament pairing carries no stake of
+  its own (the buy-in is a pool settled separately), so anything deriving the
+  ladder from the stake files every paid tournament under casual. The flag is
+  decided once at creation (`Ladder` → `start_game` → `create_game`, where it is
+  OR-ed with the wager so a staked game can't be recorded casual by omission) and
+  read back everywhere after, including by the client
+  (`lib/profileFilter.ts` `bucketOf`). **Two flags, two jobs:** `room.rs`'s
+  `contested` (`ply >= 2`) decides *whether* a rating moves; `games.rated`
+  decides *which*. **Casual is farmable and stays off the leaderboard** — free
+  games cost nothing, and the same-wallet guard only catches one wallet on both
+  seats, not two cooperating ones. Removing the payoff is the defence, so don't
+  put casual Elo on a public board, and never thread a seat wallet into the
+  unauthenticated `POST /games`: that would make a ladder writable with no SIWE
+  at all.
 
 ## Conventions
 - Money is `rust_decimal` / `U256`, never `f64`. USDC has 6 decimals.
@@ -251,7 +272,9 @@ wallet.
   (`app/tournament/page.tsx`, the `leftRound` effect); backing out keeps you out
   of that round only. Anything that reintroduces a "click here to play this
   round" gate re-breaks the mode.
-- **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a game
-  is **rated (Elo) only if both sides made ≥1 move** (`ply >= 2`, guarded in
-  `room.rs finish()`). Never ding rating for a game a player didn't play.
+- **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a
+  rating moves **only if both sides made ≥1 move** (`ply >= 2`, the `contested`
+  guard in `room.rs finish()`). Never ding rating for a game a player didn't
+  play. Which of the two ratings moves is a separate question — see
+  `games.rated` above.
 - End commit messages with the `Co-Authored-By: Claude …` trailer.

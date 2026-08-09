@@ -13,9 +13,14 @@ type Entry = {
   games: number;
 };
 
-/** Lobby leaderboard: top-rated bots by Elo. Renders nothing until there's at
- *  least one rated player (or if the server is unreachable), so it stays out of
- *  the way on an empty/offline lobby. */
+/** Lobby leaderboard: the ranked ladder, best Elo first.
+ *
+ *  Ranked only — a wallet needs at least one finished RANKED game (staked, or a
+ *  buy-in tournament) to appear, and the games count beside a rating counts the
+ *  same set. Casual Elo is deliberately absent: free games are free to farm, and
+ *  this board is what people read before staking money. Renders nothing when
+ *  it's empty or the server is unreachable, so it stays out of the way on a
+ *  quiet lobby. */
 export function Leaderboard() {
   const [rows, setRows] = useState<Entry[]>([]);
 
