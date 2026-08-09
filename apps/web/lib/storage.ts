@@ -27,6 +27,9 @@ export const KEYS = {
   autoAccept: "openchess.autoAccept",
   /** Per-tournament casual display name. */
   tournamentIdentity: "openchess.tournamentIdentity",
+  /** Tournaments this browser has sponsored, per wallet — the only way to
+   *  rediscover a sponsorship, since the server never sees one. */
+  sponsored: "openchess.sponsored",
 } as const;
 
 /** Pre-namespace names, kept only so `readMigrated` can rescue their values.

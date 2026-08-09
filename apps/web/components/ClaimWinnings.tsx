@@ -6,6 +6,7 @@ import { useAccount } from "wagmi";
 import { GameRefund } from "@/components/GameRefund";
 import { TournamentClaim } from "@/components/TournamentClaim";
 import { fetchUnsettledGames, type UnsettledGame } from "@/lib/gameApi";
+import { sponsoredTournaments } from "@/lib/sponsorships";
 import { fetchClaimableTournaments } from "@/lib/tournaments";
 
 type Candidate = { id: string; name: string; status: string };
@@ -47,11 +48,20 @@ export function ClaimWinnings({ escrow, chainId }: { escrow: `0x${string}`; chai
         fetchUnsettledGames(address),
       ]);
       if (!live) return;
-      setItems(
+      const entered =
         tourns.status === "fulfilled"
           ? tourns.value.map((t) => ({ id: t.tournament_id, name: t.name, status: t.status }))
-          : [],
-      );
+          : [];
+      // Tournaments this browser SPONSORED. The server's list only knows
+      // entrants (`players @> addr`), and a sponsor isn't one — nor does the
+      // server see the sponsorship at all, since it's a browser transaction. So
+      // without this a sponsor whose tournament was abandoned has no route back
+      // to their own money. TournamentClaim re-reads the chain before offering
+      // anything, so a stale local id costs one view call and renders nothing.
+      const sponsoredOnly = sponsoredTournaments(address)
+        .filter((id) => !entered.some((t) => t.id === id))
+        .map((id) => ({ id, name: "Sponsored tournament", status: "unknown" }));
+      setItems([...entered, ...sponsoredOnly]);
       setGames(unsettled.status === "fulfilled" ? unsettled.value : []);
     })();
     return () => {

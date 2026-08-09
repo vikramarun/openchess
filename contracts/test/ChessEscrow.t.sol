@@ -329,6 +329,174 @@ contract ChessEscrowTest {
         escrow.enterTournament(tid, white);
     }
 
+    // --- sponsorship ------------------------------------------------------
+
+    address sponsor = address(0x5555);
+
+    function test_sponsor_funds_the_pool_from_own_bankroll() public {
+        bytes32 tid = keccak256("s1");
+        _enterAll(tid);
+        _fund(sponsor, 10 * STAKE);
+
+        // Permissionless: the sponsor moves their OWN money, no oracle involved.
+        vm.prank(sponsor);
+        escrow.sponsorTournament(tid, 6 * STAKE);
+
+        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        _assert(pool == 9 * STAKE, "3 entries + 6 sponsored");
+        _assert(escrow.bankroll(sponsor) == 4 * STAKE, "left the sponsor's bankroll");
+        _assert(escrow.sponsorship(tid, sponsor) == 6 * STAKE, "recorded per sponsor");
+
+        // The whole pool pays out, sponsorship included.
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 5 * STAKE;
+        payouts[1] = 3 * STAKE;
+        payouts[2] = STAKE;
+        _settleT(tid, _players3(), payouts, DEADLINE);
+        _assert(escrow.bankroll(white) == 14 * STAKE, "winner paid from the sponsored pool");
+        _assert(escrow.bankroll(fee) == 0, "nothing raked when the split is exhaustive");
+    }
+
+    function test_several_sponsors_can_fund_one_pool() public {
+        bytes32 tid = keccak256("s2");
+        _enterAll(tid);
+        address sponsor2 = address(0x6666);
+        _fund(sponsor, 10 * STAKE);
+        _fund(sponsor2, 10 * STAKE);
+
+        vm.prank(sponsor);
+        escrow.sponsorTournament(tid, 2 * STAKE);
+        vm.prank(sponsor2);
+        escrow.sponsorTournament(tid, 3 * STAKE);
+        vm.prank(sponsor);
+        escrow.sponsorTournament(tid, STAKE); // topping up again accumulates
+
+        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        _assert(pool == 9 * STAKE, "3 entries + 6 sponsored across two sponsors");
+        _assert(escrow.sponsorship(tid, sponsor) == 3 * STAKE, "sponsor total accumulates");
+        _assert(escrow.sponsorship(tid, sponsor2) == 3 * STAKE, "second sponsor tracked apart");
+    }
+
+    function test_free_entry_tournament_pays_a_sponsored_pool() public {
+        // The point of the whole feature: entry costs nothing, the prize is
+        // real. A zero buy-in used to be rejected outright by openTournament.
+        bytes32 tid = keccak256("s3");
+        _fund(carol, 10 * STAKE);
+        _fund(sponsor, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, 0);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, carol);
+        _assert(escrow.bankroll(white) == 10 * STAKE, "entry cost nothing");
+
+        vm.prank(sponsor);
+        escrow.sponsorTournament(tid, 5 * STAKE);
+
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 3 * STAKE;
+        payouts[1] = 2 * STAKE;
+        _settleT(tid, _players3(), payouts, DEADLINE);
+        _assert(escrow.bankroll(white) == 13 * STAKE, "winner paid, having staked nothing");
+        _assert(escrow.bankroll(carol) == 10 * STAKE, "last place lost nothing");
+        _assert(escrow.bankroll(sponsor) == 5 * STAKE, "the sponsor funded it all");
+    }
+
+    function test_sponsorship_refunded_after_the_timeout() public {
+        // The abandonment path. Without this the sponsor's money is stranded
+        // forever: claimRefund only ever returns `buyIn`, and only to entrants.
+        bytes32 tid = keccak256("s4");
+        _enterAll(tid);
+        _fund(sponsor, 10 * STAKE);
+        vm.prank(sponsor);
+        escrow.sponsorTournament(tid, 4 * STAKE);
+
+        // Before the timeout it is irrevocable — otherwise a sponsor could rug
+        // a field that paid to enter an advertised pool.
+        vm.expectRevert();
+        escrow.refundSponsorship(tid, sponsor);
+
+        vm.warp(block.timestamp + 3601);
+        escrow.refundSponsorship(tid, sponsor);
+        escrow.claimRefund(tid, white);
+        escrow.claimRefund(tid, black);
+        escrow.claimRefund(tid, carol);
+
+        _assert(escrow.bankroll(sponsor) == 10 * STAKE, "sponsor whole");
+        _assert(escrow.bankroll(white) == 10 * STAKE, "entrant whole");
+        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        _assert(pool == 0, "pool fully unwound");
+
+        // Not twice.
+        vm.expectRevert();
+        escrow.refundSponsorship(tid, sponsor);
+    }
+
+    function test_sponsorship_refund_rejects_a_non_sponsor() public {
+        bytes32 tid = keccak256("s5");
+        _enterAll(tid);
+        vm.warp(block.timestamp + 3601);
+        vm.expectRevert();
+        escrow.refundSponsorship(tid, sponsor); // never sponsored
+    }
+
+    function test_sponsoring_a_settled_tournament_rejected() public {
+        bytes32 tid = keccak256("s6");
+        _enterAll(tid);
+        _fund(sponsor, 10 * STAKE);
+        uint256[] memory payouts = new uint256[](3);
+        payouts[0] = 3 * STAKE;
+        _settleT(tid, _players3(), payouts, DEADLINE);
+        vm.prank(sponsor);
+        vm.expectRevert();
+        escrow.sponsorTournament(tid, STAKE);
+    }
+
+    function test_sponsoring_past_the_settle_window_rejected() public {
+        // Money into a pool that can no longer be settled would only sit there
+        // until refundSponsorship — refuse it at the door instead.
+        bytes32 tid = keccak256("s7");
+        _enterAll(tid);
+        _fund(sponsor, 10 * STAKE);
+        vm.warp(block.timestamp + 3601);
+        vm.prank(sponsor);
+        vm.expectRevert();
+        escrow.sponsorTournament(tid, STAKE);
+    }
+
+    function test_sponsor_cannot_exceed_unlocked_bankroll() public {
+        bytes32 tid = keccak256("s8");
+        _enterAll(tid);
+        _fund(sponsor, STAKE);
+        vm.prank(sponsor);
+        vm.expectRevert();
+        escrow.sponsorTournament(tid, 2 * STAKE);
+
+        // And staked funds are not sponsorable: locked exposure still counts.
+        bytes32 gid = keccak256("s8g");
+        vm.prank(oracle);
+        escrow.openGame(gid, sponsor, black, STAKE);
+        vm.prank(sponsor);
+        vm.expectRevert();
+        escrow.sponsorTournament(tid, STAKE);
+    }
+
+    function test_refund_on_a_free_entry_tournament_rejected() public {
+        // Nothing to give back, and going through with it would burn the
+        // entrant's claimed flag on a zero transfer.
+        bytes32 tid = keccak256("s9");
+        vm.prank(oracle);
+        escrow.openTournament(tid, 0);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.warp(block.timestamp + 3601);
+        vm.expectRevert();
+        escrow.claimRefund(tid, white);
+    }
+
     function _leaf(address a, uint256 amt) internal pure returns (bytes32) {
         return keccak256(bytes.concat(keccak256(abi.encode(a, amt))));
     }

@@ -22,6 +22,15 @@ export const ESCROW_ABI = [
   { type: "function", name: "claimTournament", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "account", type: "address" }, { name: "amount", type: "uint256" }, { name: "proof", type: "bytes32[]" }], outputs: [] },
   // Reclaim a buy-in from a tournament that never settled past the timeout.
   { type: "function", name: "claimRefund", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "account", type: "address" }], outputs: [] },
+  // Fund a tournament's prize pool from your own unlocked bankroll. Permissionless
+  // (it moves only the caller's money), which is why the web app calls it
+  // directly rather than asking the server to — the server never sees it, and
+  // polls `tournaments(tid).pool` to learn the result.
+  { type: "function", name: "sponsorTournament", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "amount", type: "uint256" }], outputs: [] },
+  { type: "function", name: "sponsorship", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "uint256" }] },
+  // A sponsor's safety net, mirroring claimRefund for entrants: if the pool is
+  // never settled, take the sponsorship back after the timeout.
+  { type: "function", name: "refundSponsorship", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "sponsor", type: "address" }], outputs: [] },
   // tournaments(tid) → (buyIn, pool, claimedAmount, entrants, openedAt, settled, payoutRoot, exists)
   { type: "function", name: "tournaments", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [{ name: "buyIn", type: "uint256" }, { name: "pool", type: "uint256" }, { name: "claimedAmount", type: "uint256" }, { name: "entrants", type: "uint32" }, { name: "openedAt", type: "uint64" }, { name: "settled", type: "bool" }, { name: "payoutRoot", type: "bytes32" }, { name: "exists", type: "bool" }] },
   { type: "function", name: "tournamentClaimed", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
