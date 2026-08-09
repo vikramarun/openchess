@@ -36,11 +36,32 @@ const NODES = Number(q.get("nodes")) || 30_000;
 const PLY_CAP = 200;
 const CONCURRENCY = Number(q.get("conc")) || 3;
 
-type Arm = { id: string; multiPv: number; epsilonCp: number };
+type Arm = {
+  id: string;
+  multiPv: number;
+  epsilonCp: number;
+  /** `twopass`: shortlist by style on a cheap search, then let the engine
+   *  re-verify the shortlist with the rest of the budget via `searchmoves`. */
+  mode?: "single" | "twopass";
+  /** How many style-preferred moves go into the second pass. */
+  shortlist?: number;
+  /** Fraction of the node budget spent on pass 1. */
+  split?: number;
+};
 const BASELINE: Arm = { id: "baseline", multiPv: 1, epsilonCp: 0 };
 const ARM_EPS = (q.get("arms") ?? "0,15,25,40,60").split(",").map(Number);
 const ARM_MPV = Number(q.get("mpv")) || 4;
-const ARMS: Arm[] = ARM_EPS.map((e) => ({ id: `mpv${ARM_MPV} ε${e}`, multiPv: ARM_MPV, epsilonCp: e }));
+const MODE = (q.get("mode") ?? "single") as "single" | "twopass";
+const SHORTLIST = Number(q.get("k")) || 2;
+const SPLIT = Number(q.get("split")) || 0.34;
+const ARMS: Arm[] = ARM_EPS.map((e) => ({
+  id: MODE === "twopass" ? `2pass \u03b5${e} k${SHORTLIST}` : `mpv${ARM_MPV} \u03b5${e}`,
+  multiPv: ARM_MPV,
+  epsilonCp: e,
+  mode: MODE,
+  shortlist: SHORTLIST,
+  split: SPLIT,
+}));
 
 /** A worker speaking plain UCI, driven one search at a time. */
 class Eng {
@@ -65,7 +86,7 @@ class Eng {
   private send(c: string) {
     this.w.postMessage(c);
   }
-  private until(pred: (l: string) => boolean, kick: () => void, ms = 30_000): Promise<void> {
+  private until(pred: (l: string) => boolean, kick: () => void, ms = 120_000): Promise<void> {
     return new Promise((res, rej) => {
       const to = setTimeout(() => { cleanup(); rej(new Error("engine timeout")); }, ms);
       const fn = (l: string) => { if (pred(l)) { clearTimeout(to); cleanup(); res(); } };
@@ -81,10 +102,14 @@ class Eng {
   }
   newGame() { this.send("ucinewgame"); }
   /** Search from a move history and return the engine's answer + candidates. */
-  search(moves: string[]): Promise<{ bestmove: string; collector: CandidateCollector }> {
+  search(
+    moves: string[],
+    nodes: number = NODES,
+    restrictTo?: string[],
+  ): Promise<{ bestmove: string; collector: CandidateCollector }> {
     const collector = new CandidateCollector();
     return new Promise((res, rej) => {
-      const to = setTimeout(() => { cleanup(); rej(new Error("bestmove timeout")); }, 60_000);
+      const to = setTimeout(() => { cleanup(); rej(new Error("bestmove timeout")); }, 30_000);
       const fn = (l: string) => {
         const m = l.match(/^bestmove\s+(\S+)/);
         if (m) { clearTimeout(to); cleanup(); res({ bestmove: m[1], collector }); return; }
@@ -93,7 +118,9 @@ class Eng {
       const cleanup = () => { this.listeners = this.listeners.filter((x) => x !== fn); };
       this.listeners.push(fn);
       this.send(moves.length ? `position startpos moves ${moves.join(" ")}` : "position startpos");
-      this.send(`go nodes ${NODES}`);
+      // `searchmoves` greedily consumes every remaining token, so it goes last.
+      const tail = restrictTo?.length ? ` searchmoves ${restrictTo.join(" ")}` : "";
+      this.send(`go nodes ${Math.max(1, Math.floor(nodes))}${tail}`);
     });
   }
   dispose() { try { this.send("quit"); this.w.terminate(); } catch { /* ignore */ } }
@@ -131,15 +158,44 @@ async function playGame(
     if (n >= 3) return "d";
 
     const side = pos.turn === "white" ? white : black;
-    side.eng.setMultiPv(side.arm.multiPv);
-    const { bestmove, collector } = await side.eng.search(moves);
+    const arm = side.arm;
+    const twoPass = arm.mode === "twopass" && arm.epsilonCp > 0;
+    const split = arm.split ?? 0.34;
+
+    // Pass 1 finds the candidates. In two-pass mode it gets only part of the
+    // budget, because the rest re-verifies the shortlist — the TOTAL node count
+    // matches the baseline either way, so the comparison stays fair.
+    side.eng.setMultiPv(arm.multiPv);
+    const { bestmove, collector } = await side.eng.search(moves, twoPass ? NODES * split : NODES);
     const h = collector.harvest(bestmove);
     const pool = acceptableMoves(h, {
-      epsilonCp: side.arm.epsilonCp,
+      epsilonCp: arm.epsilonCp,
       minDepth: 4,
       disableBeyondCp: 400,
     });
-    const uci = pool.length ? pool[Math.floor(rng() * pool.length)].uci : bestmove;
+
+    let uci: string;
+    if (!pool.length) {
+      // Nothing to style. Spend the remaining budget on an ordinary search so
+      // the arm never quietly thinks less than the baseline.
+      uci = twoPass ? (await side.eng.search(moves, NODES * (1 - split))).bestmove : bestmove;
+    } else if (!twoPass) {
+      uci = pool[Math.floor(rng() * pool.length)].uci;
+    } else {
+      // Shortlist by "style" (random here — taste is uncorrelated with
+      // strength), then let the engine choose among the shortlist with a
+      // full-width search restricted to those moves. It reaches far greater
+      // depth on two moves than it could on all of them.
+      const picks = [...pool];
+      const shortlist: string[] = [];
+      const k = Math.min(arm.shortlist ?? 2, picks.length);
+      for (let i = 0; i < k; i++) {
+        shortlist.push(picks.splice(Math.floor(rng() * picks.length), 1)[0].uci);
+      }
+      side.eng.setMultiPv(1);
+      const p2 = await side.eng.search(moves, NODES * (1 - split), shortlist);
+      uci = shortlist.includes(p2.bestmove) ? p2.bestmove : shortlist[0];
+    }
     const mv = parseUci(uci);
     if (!mv || !pos.isLegal(mv)) return pos.turn === "white" ? "b" : "w"; // illegal = loss
     pos.play(mv);
@@ -182,37 +238,56 @@ export default function Bench() {
       let n = 0;
       const tally = { w: 0, d: 0, l: 0 };
 
-      // Each opening is a unit of work: the arm plays it as White and as Black.
-      const units = openings.map((op, i) => async () => {
-        const a = new Eng();
-        const b = new Eng();
-        await Promise.all([a.ready, b.ready]);
-        try {
-          for (const armIsWhite of [true, false]) {
-            if (stop.current) return;
-            const w = armIsWhite ? { eng: a, arm } : { eng: a, arm: BASELINE };
-            const bl = armIsWhite ? { eng: b, arm: BASELINE } : { eng: b, arm };
-            const r = await playGame(w, bl, op, rng);
-            const armPoint = r === "d" ? 0.5 : (r === "w") === armIsWhite ? 1 : 0;
-            armScore += armPoint;
-            n += 1;
-            if (armPoint === 1) tally.w++;
-            else if (armPoint === 0.5) tally.d++;
-            else tally.l++;
-            if (n % 10 === 0) say(`  ${arm.id}: ${n} games, score ${(armScore / n).toFixed(3)}`);
-          }
-        } finally {
-          a.dispose();
-          b.dispose();
-        }
-        void i;
-      });
-
-      // Bounded concurrency.
-      const queue = [...units];
+      // One pair of engines per concurrency slot, reused across every opening
+      // that slot handles. Creating a fresh pair per opening meant compiling
+      // the 7 MB wasm two dozen times per arm, and under that churn the
+      // handshake started timing out — which is what stalled the first run.
+      // `ucinewgame` already clears state between games.
+      let dropped = 0;
+      const queue = [...openings];
       await Promise.all(
-        Array.from({ length: CONCURRENCY }, async () => {
-          while (queue.length) await queue.shift()!();
+        Array.from({ length: CONCURRENCY }, async (_, slot) => {
+          // Stagger, so the slots do not all compile the wasm at the same moment.
+          await new Promise((r) => setTimeout(r, slot * 1500));
+          const a = new Eng();
+          const b = new Eng();
+          try {
+            await Promise.all([a.ready, b.ready]);
+          } catch (e) {
+            say(`  !! slot failed to start: ${e instanceof Error ? e.message : String(e)}`);
+            a.dispose();
+            b.dispose();
+            return;
+          }
+          try {
+            while (queue.length && !stop.current) {
+              const op = queue.shift();
+              if (!op) break;
+              // A single bad game is dropped, never allowed to reject and take
+              // the whole measurement down with it.
+              try {
+                for (const armIsWhite of [true, false]) {
+                  if (stop.current) return;
+                  const w = armIsWhite ? { eng: a, arm } : { eng: a, arm: BASELINE };
+                  const bl = armIsWhite ? { eng: b, arm: BASELINE } : { eng: b, arm };
+                  const r = await playGame(w, bl, op, rng);
+                  const armPoint = r === "d" ? 0.5 : (r === "w") === armIsWhite ? 1 : 0;
+                  armScore += armPoint;
+                  n += 1;
+                  if (armPoint === 1) tally.w++;
+                  else if (armPoint === 0.5) tally.d++;
+                  else tally.l++;
+                  if (n % 6 === 0) say(`  ${arm.id}: ${n} games, score ${(armScore / n).toFixed(3)}`);
+                }
+              } catch (e) {
+                dropped += 1;
+                say(`  !! game dropped: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+          } finally {
+            a.dispose();
+            b.dispose();
+          }
         }),
       );
 
@@ -223,7 +298,8 @@ export default function Bench() {
       const hi = elo(Math.min(0.999, s + 1.96 * se));
       say(
         `${arm.id.padEnd(10)} n=${n}  +${tally.w} =${tally.d} -${tally.l}  score ${s.toFixed(3)}  ` +
-          `Elo ${d >= 0 ? "+" : ""}${d.toFixed(0)} [${lo.toFixed(0)}, ${hi.toFixed(0)}]  (${((Date.now() - t0) / 1000).toFixed(0)}s)`,
+          `Elo ${d >= 0 ? "+" : ""}${d.toFixed(0)} [${lo.toFixed(0)}, ${hi.toFixed(0)}]  (${((Date.now() - t0) / 1000).toFixed(0)}s)` +
+          (dropped ? `  [${dropped} openings dropped]` : ""),
       );
     }
     say("done");
