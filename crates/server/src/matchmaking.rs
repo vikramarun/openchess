@@ -2415,14 +2415,22 @@ fn payout_split(pool: u128, standings: &[(String, f64)]) -> anyhow::Result<Vec<u
     // Tied brackets are found by scanning for CONTIGUOUS equal scores, which is
     // only correct on ranked input: given [2.0, 1.0, 2.0] the two leaders would
     // be treated as separate brackets and paid 65% and 10%. The sole caller
-    // passes `ranked_entrants` output, so this is a guard against a future one
-    // — cheap, and the failure it prevents is silent and monetary.
-    debug_assert!(
-        standings
-            .windows(2)
-            .all(|w| half_points(w[0].1) >= half_points(w[1].1)),
-        "payout_split needs standings in ranked order (score descending)"
-    );
+    // passes `ranked_entrants` output, so this guards against a future one.
+    //
+    // An error rather than a `debug_assert`, because money paths fail closed
+    // and `debug_assert` is compiled out of the release build that actually
+    // handles money — it would have been loud in CI and silent in the only
+    // place being wrong costs anyone anything. `settle_tournament` logs this
+    // and returns before marking the tournament settled or enqueueing a
+    // payout, so a bad call pays nobody and stays retriable.
+    if !standings
+        .windows(2)
+        .all(|w| half_points(w[0].1) >= half_points(w[1].1))
+    {
+        return Err(anyhow::anyhow!(
+            "payout_split needs standings in ranked order (score descending)"
+        ));
+    }
     let n = standings.len();
     let weights = payout_weights(n);
     let mut by_rank = vec![0u128; n];
@@ -3070,12 +3078,26 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "ranked order")]
     fn payout_split_rejects_unranked_standings() {
         // The bracket scan is contiguous, so unranked input would pay the two
-        // leaders here 65% and 10% instead of splitting 75% between them. The
-        // guard has to actually fire, or it is just a comment.
-        payouts_for(&[2.0, 1.0, 2.0], 10_000_000);
+        // leaders here 65% and 10% instead of splitting 75% between them.
+        // Rejected in EVERY build profile — a `debug_assert` here would vanish
+        // from the release binary that handles the money.
+        let unranked: Vec<(String, f64)> = [2.0, 1.0, 2.0]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("p{i}"), *s))
+            .collect();
+        let err = payout_split(30_000_000, &unranked).expect_err("must refuse to pay");
+        assert!(err.to_string().contains("ranked order"), "got: {err}");
+        // The sole real caller's input is accepted, so this can't fire in
+        // normal operation.
+        assert!(payout_split(30_000_000, &[
+            ("a".to_string(), 2.0),
+            ("b".to_string(), 2.0),
+            ("c".to_string(), 1.0),
+        ])
+        .is_ok());
     }
 
     #[test]
