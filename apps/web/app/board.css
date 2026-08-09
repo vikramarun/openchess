@@ -5,10 +5,11 @@
  * unscoped global selectors, so there is no way to layer a second set on top
  * without an order-dependent specificity fight — we own the rules instead.
  *
- * Everything here reads a CSS custom property. Changing a theme is a variable
- * write on <html> (lib/boardPrefs.ts applyBoardPrefs), which is how lila does
- * it too: no stylesheet swap, no network round trip, and two boards on one page
- * can show different themes (the settings preview needs that).
+ * Everything here reads a CSS custom property. Changing a theme is a single
+ * variable write on <html> (lib/boardPrefs.ts applyBoardPrefs), which is how
+ * lila does it too: no stylesheet swap and no network round trip, so every
+ * board on the page repaints in the same frame. That is what lets the settings
+ * preview be an ordinary board rather than a special-cased copy.
  *
  * The :root block below is a fallback for the window before the bootstrap
  * script runs, and for JS-disabled browsers — without it an unstyled board is

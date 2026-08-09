@@ -149,11 +149,18 @@ export function boardCssVars(prefs: BoardPrefs): Record<string, string> {
   };
 }
 
-export function applyBoardPrefs(prefs: BoardPrefs, el?: HTMLElement) {
-  const target = el ?? (typeof document !== "undefined" ? document.documentElement : null);
-  if (!target) return;
-  const vars = boardCssVars(prefs);
-  for (const [name, value] of Object.entries(vars)) target.style.setProperty(name, value);
+/** Stamp the theme onto <html>, where every board on the page inherits it.
+ *
+ *  Deliberately not parameterised by element: one document-level write is the
+ *  whole point. Nothing here needs two boards themed differently, and the
+ *  settings preview is an ordinary board reading these same variables, which is
+ *  exactly why it updates in the same frame as the game boards behind it. */
+export function applyBoardPrefs(prefs: BoardPrefs) {
+  if (typeof document === "undefined") return;
+  const target = document.documentElement;
+  for (const [name, value] of Object.entries(boardCssVars(prefs))) {
+    target.style.setProperty(name, value);
+  }
 }
 
 /** The chessground config a live board can adopt through `api.set()`.
