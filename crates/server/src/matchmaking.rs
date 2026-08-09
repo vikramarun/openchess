@@ -2412,6 +2412,17 @@ fn payout_weights(n: usize) -> Vec<u128> {
 /// than winning a game; and join order is something an entrant controls, so it
 /// was a free and repeatable edge.
 fn payout_split(pool: u128, standings: &[(String, f64)]) -> anyhow::Result<Vec<u128>> {
+    // Tied brackets are found by scanning for CONTIGUOUS equal scores, which is
+    // only correct on ranked input: given [2.0, 1.0, 2.0] the two leaders would
+    // be treated as separate brackets and paid 65% and 10%. The sole caller
+    // passes `ranked_entrants` output, so this is a guard against a future one
+    // — cheap, and the failure it prevents is silent and monetary.
+    debug_assert!(
+        standings
+            .windows(2)
+            .all(|w| half_points(w[0].1) >= half_points(w[1].1)),
+        "payout_split needs standings in ranked order (score descending)"
+    );
     let n = standings.len();
     let weights = payout_weights(n);
     let mut by_rank = vec![0u128; n];
@@ -3006,11 +3017,11 @@ mod tests {
         // …and sharing the place is honest because they share the money.
         let field: Vec<(String, f64)> =
             view.standings.iter().map(|s| (s.player.clone(), s.score)).collect();
-        let paid = payout_split(30_000_000, &field).expect("split");
-        assert_eq!(paid[0], paid[1], "a shared place must mean a shared prize");
+        let amounts = payout_split(30_000_000, &field).expect("split");
+        assert_eq!(amounts[0], amounts[1], "a shared place must mean a shared prize");
 
         // And the table's order IS the order the pool is paid in.
-        let paid: Vec<String> = {
+        let payout_order: Vec<String> = {
             let ts = state.0.lobby.tournaments.lock();
             ranked_entrants(ts.get(&tid).unwrap())
                 .into_iter()
@@ -3018,7 +3029,7 @@ mod tests {
                 .collect()
         };
         let shown: Vec<String> = view.standings.iter().map(|s| s.player.clone()).collect();
-        assert_eq!(shown, paid, "what a player is looking at is what the pool pays");
+        assert_eq!(shown, payout_order, "what a player is looking at is what the pool pays");
     }
 
     /// Drive the REAL `payout_split` from a list of scores.
@@ -3056,6 +3067,15 @@ mod tests {
         // No ties: unchanged from before.
         let p = payouts_for(&[3.0, 2.0, 1.0, 0.0], 10 * USDC);
         assert_eq!(p, vec![26 * USDC, 10 * USDC, 4 * USDC, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ranked order")]
+    fn payout_split_rejects_unranked_standings() {
+        // The bracket scan is contiguous, so unranked input would pay the two
+        // leaders here 65% and 10% instead of splitting 75% between them. The
+        // guard has to actually fire, or it is just a comment.
+        payouts_for(&[2.0, 1.0, 2.0], 10_000_000);
     }
 
     #[test]
