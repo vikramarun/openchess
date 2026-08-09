@@ -698,6 +698,125 @@ pre {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* Board plus the controls under it. The controls live outside .board-row so the
+ * eval bar keeps stretching to exactly the board's height. */
+.board-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.board-tools {
+  display: flex;
+  justify-content: flex-end;
+}
+.flip-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.flip-btn:hover {
+  color: var(--text-strong);
+  border-color: var(--accent);
+}
+/* Coordinates off. chessground only builds its coord elements at construction,
+ * so hiding them here is what keeps this toggle from rebuilding the board. */
+.board-wrap[data-coords="off"] coords {
+  display: none;
+}
+
+/* ---------- tabs (Customize page) ---------- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+  font-size: 15px;
+  cursor: pointer;
+  border-radius: 0;
+}
+.tab:hover {
+  color: var(--text-strong);
+}
+.tab.on {
+  color: var(--text-strong);
+  border-bottom-color: var(--accent);
+}
+
+/* ---------- board & piece settings ---------- */
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 380px) 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.settings-preview {
+  position: sticky;
+  top: 16px;
+}
+.settings-controls {
+  display: grid;
+  gap: 16px;
+}
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.swatch {
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  overflow: hidden;
+  background-color: transparent;
+}
+.swatch:hover {
+  border-color: var(--muted);
+}
+.swatch.on {
+  border-color: var(--accent);
+}
+.board-swatch {
+  width: 46px;
+  height: 46px;
+  background-size: cover;
+}
+.piece-swatch {
+  display: flex;
+  width: 72px;
+  height: 40px;
+}
+.piece-swatch span {
+  flex: 1 1 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.piece-swatch img {
+  width: 30px;
+  height: 30px;
+}
+
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-preview {
+    position: static;
+    max-width: 380px;
+  }
+}
 /* ---------- evaluation bar ---------- */
 .eval-bar {
   position: relative;

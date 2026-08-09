@@ -7,7 +7,8 @@ import { Chessboard } from "@/components/Chessboard";
 import { EvalToggle } from "@/components/EvalBar";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
-import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
+import { other, useFlip } from "@/lib/useFlip";
 import { shortAddress } from "@/lib/address";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { connectSpectator } from "@/lib/spectatorSocket";
@@ -121,6 +122,30 @@ export function LiveSpectator({ id }: { id: string }) {
   const turn = sideToMoveFromFen(fen);
   const mat = material(view.fen);
   const tc = meta ? tcLabel(meta.initial_secs, meta.increment_secs) : null;
+  const { orientation, flip } = useFlip("white");
+
+  // Name-plates follow perspective, not color — the side you are looking from
+  // sits at the bottom, so flipping the board has to move them too.
+  const bar = (side: Side) => {
+    const w = side === "white";
+    return (
+      <PlayerBar
+        color={side}
+        name={
+          meta
+            ? seatName(w ? meta.white_name : meta.black_name, w ? meta.white : meta.black)
+            : w
+              ? "White"
+              : "Black"
+        }
+        engine={w ? meta?.white_engine : meta?.black_engine}
+        clockMs={w ? clock?.white_ms : clock?.black_ms}
+        active={live && turn === side}
+        captured={w ? mat.whiteCaptured : mat.blackCaptured}
+        edge={w ? mat.advantage : -mat.advantage}
+      />
+    );
+  };
 
   return (
     <div className="container">
@@ -131,32 +156,18 @@ export function LiveSpectator({ id }: { id: string }) {
       </div>
       <div className="game-wrap">
         <div className="board-col">
-          <PlayerBar
-            color="black"
-            name={meta ? seatName(meta.black_name, meta.black) : "Black"}
-            engine={meta?.black_engine}
-            clockMs={clock?.black_ms}
-            active={live && turn === "black"}
-            captured={mat.blackCaptured}
-            edge={-mat.advantage}
-          />
+          {bar(other(orientation))}
           <Chessboard
             fen={view.fen}
+            orientation={orientation}
             lastMove={lastMoveFromUci(view.lastUci)}
             check={view.check}
             showEval={evalOn && !engineEval.failed}
             evalScore={engineEval.score}
             evalThinking={engineEval.thinking}
+            onFlip={flip}
           />
-          <PlayerBar
-            color="white"
-            name={meta ? seatName(meta.white_name, meta.white) : "White"}
-            engine={meta?.white_engine}
-            clockMs={clock?.white_ms}
-            active={live && turn === "white"}
-            captured={mat.whiteCaptured}
-            edge={mat.advantage}
-          />
+          {bar(orientation)}
           {nav.total > 0 && (
             <MoveNav
               at={nav.at}
