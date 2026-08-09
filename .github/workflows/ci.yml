@@ -54,6 +54,7 @@ jobs:
           pnpm test:book
           pnpm test:books
           pnpm test:time
+          pnpm test:candidates
           pnpm test:eval
           pnpm test:auth
           pnpm build

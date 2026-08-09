@@ -10,6 +10,7 @@
     "test:book": "tsx scripts/polyglot.test.ts",
     "test:books": "tsx scripts/books.test.ts",
     "test:time": "tsx scripts/time.test.ts",
+    "test:candidates": "tsx scripts/candidates.test.ts",
     "test:eval": "tsx scripts/eval.test.ts",
     "test:auth": "tsx scripts/authedFetch.test.ts"
   },

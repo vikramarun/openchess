@@ -14,6 +14,7 @@ import {
 import { SERVER_WS } from "./config";
 import { BrowserEngine } from "./engine";
 import { bookMove } from "./openings";
+import { acceptableMoves } from "./candidates";
 import { budgetMs, goCommand } from "./timePolicy";
 
 export type PlayHandlers = {
@@ -139,7 +140,18 @@ export function playSeat(
               clock: c ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 } : null,
               budgetMs: budget,
             });
-            const uci = booked ?? (await engine.bestMoveWithPlan(history, plan));
+            // Always go through the MultiPV-aware search, even though nothing
+            // styles the result yet. At MultiPV 1 with no style budget the
+            // outcome is exactly the engine's own move, so this is a no-op
+            // today — and it means the collector runs on real games now rather
+            // than arriving untested alongside the style dials.
+            const uci =
+              booked ??
+              (await (async () => {
+                const r = await engine.search(history, plan, 1);
+                const pool = acceptableMoves(r, { epsilonCp: 0, minDepth: 6, disableBeyondCp: 400 });
+                return pool.length ? pool[0].uci : r.bestmove;
+              })());
             if (cancelled()) {
               ws.close();
               return;

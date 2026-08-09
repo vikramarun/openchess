@@ -8,6 +8,8 @@
 // npm package (v18.0.x) — see public/ENGINE.md. Single-threaded avoids the
 // SharedArrayBuffer/COOP+COEP headers a multi-threaded build would require.
 
+import { CandidateCollector, type Harvest } from "./candidates";
+
 /** Worker script served from public/; the sibling .wasm is located next to it. */
 const ENGINE_URL = "/stockfish-18-lite-single.js";
 /** Transposition-table size (MB). Modest fixed default — bigger helps slightly
@@ -27,27 +29,58 @@ export type EngineInfo = {
   pv: string[];
 };
 
-/** Parse a UCI `info` line into a score. Returns null for the lines that carry
- *  no usable score — currmove/nps chatter, and fail-high/low bounds, which are
- *  provisional and would make an eval bar jump around mid-search. */
-export function parseInfoLine(line: string): EngineInfo | null {
+/** Everything a UCI `info` line can carry, unfiltered. */
+export type InfoLine = {
+  /** 1 when the token is absent, which is how a MultiPV-1 search reports. */
+  multipv: number;
+  cp: number | null;
+  mate: number | null;
+  depth: number;
+  pv: string[];
+  /** Fail-high/low marker. These are inequalities (`v >= beta`), not values. */
+  bound: "lower" | "upper" | null;
+  /** Win/draw/loss permille, when UCI_ShowWDL is on. */
+  wdl: [number, number, number] | null;
+};
+
+/** Parse an `info` line with no filtering. Returns null only for lines that
+ *  carry no score at all — currmove/nps chatter, `bestmove`, non-info lines. */
+export function parseUciInfo(line: string): InfoLine | null {
   if (!line.startsWith("info ")) return null;
-  if (line.includes(" lowerbound") || line.includes(" upperbound")) return null;
   const t = line.split(/\s+/);
   let depth = 0;
+  let multipv = 1;
   let cp: number | null = null;
   let mate: number | null = null;
   let pv: string[] = [];
+  let bound: "lower" | "upper" | null = null;
+  let wdl: [number, number, number] | null = null;
   for (let i = 1; i < t.length; i++) {
     switch (t[i]) {
       case "depth":
         depth = Number(t[++i]) || 0;
         break;
-      case "multipv":
-        // MultiPV is pinned to 1 in the handshake; ignore anything else so a
-        // future multi-line search can't feed a side line to the bar.
-        if (Number(t[++i]) !== 1) return null;
+      case "multipv": {
+        const v = Number(t[++i]);
+        multipv = Number.isFinite(v) ? v : 1;
         break;
+      }
+      case "lowerbound":
+        bound = "lower";
+        break;
+      case "upperbound":
+        bound = "upper";
+        break;
+      case "wdl": {
+        const w = Number(t[i + 1]);
+        const d = Number(t[i + 2]);
+        const l = Number(t[i + 3]);
+        if ([w, d, l].every(Number.isFinite)) {
+          wdl = [w, d, l];
+          i += 3;
+        }
+        break;
+      }
       case "score":
         if (t[i + 1] === "cp") {
           const v = Number(t[i + 2]);
@@ -70,11 +103,28 @@ export function parseInfoLine(line: string): EngineInfo | null {
     }
   }
   if (cp === null && mate === null) return null;
-  return { cp, mate, depth, pv };
+  return { multipv, cp, mate, depth, pv, bound, wdl };
+}
+
+/** The eval bar's score, or null.
+ *
+ *  A filter over `parseUciInfo` rather than its own tokenizer, so the two can't
+ *  drift. The two rejections it adds are load-bearing and pinned by
+ *  scripts/eval.test.ts: side PVs (a MultiPV search must never feed a side line
+ *  to the bar) and fail-high/low bounds (provisional, and they would make the
+ *  bar jump around mid-search). The returned object's KEY ORDER is also pinned
+ *  there — that test compares with JSON.stringify. */
+export function parseInfoLine(line: string): EngineInfo | null {
+  const i = parseUciInfo(line);
+  if (!i || i.multipv !== 1 || i.bound !== null) return null;
+  return { cp: i.cp, mate: i.mate, depth: i.depth, pv: i.pv };
 }
 
 export class BrowserEngine {
   private worker: Worker;
+  /** Mirrors the engine's MultiPV so the handshake value isn't re-sent. */
+  private multiPv = 1;
+  private showWdl = false;
   private listeners: ((line: string) => void)[] = [];
   private ready: Promise<void>;
   /** Serializes analyse() searches on the single worker. */
@@ -136,6 +186,7 @@ export class BrowserEngine {
     // wait only affects the truly-slow case, where waiting beats failing.
     await this.waitFor((l) => l.includes("uciok"), 120_000);
     this.send("setoption name MultiPV value 1");
+    this.multiPv = 1;
     this.send(`setoption name Hash value ${HASH_MB}`);
     this.send("isready");
     await this.waitFor((l) => l.includes("readyok"));
@@ -153,7 +204,27 @@ export class BrowserEngine {
    *  hardware-independent by design, which also means a slow device would
    *  happily search past its flag. With the wall it gets a shallower search
    *  instead — degradation, not a lost game. */
-  private async go(movesUci: string[], goCmd: string, hardStopMs?: number): Promise<string> {
+  private go(movesUci: string[], goCmd: string, hardStopMs?: number, onLine?: (l: string) => void): Promise<string> {
+    // A move request preempts the eval bar and then queues behind it, rather
+    // than racing it. Both matter once `go` can send `setoption` (MultiPV):
+    // UCI commands must not interleave, and the move that decides a game
+    // should not wait out an analysis that only decorates one.
+    this.cancelAnalysis?.();
+    const run = () => this.runGo(movesUci, goCmd, hardStopMs, onLine);
+    const p = this.analysisQueue.then(run, run);
+    this.analysisQueue = p.then(
+      () => {},
+      () => {},
+    );
+    return p;
+  }
+
+  private async runGo(
+    movesUci: string[],
+    goCmd: string,
+    hardStopMs?: number,
+    onLine?: (l: string) => void,
+  ): Promise<string> {
     await this.ready;
     const pos = movesUci.length
       ? `position startpos moves ${movesUci.join(" ")}`
@@ -174,7 +245,9 @@ export class BrowserEngine {
           clearTimeout(to);
           cleanup();
           resolve(m[1]);
+          return;
         }
+        onLine?.(line);
       };
       const cleanup = () => {
         if (wall) clearTimeout(wall);
@@ -193,6 +266,35 @@ export class BrowserEngine {
     plan: { cmd: string; hardStopMs?: number },
   ): Promise<string> {
     return this.go(movesUci, plan.cmd, plan.hardStopMs);
+  }
+
+  /** Set MultiPV, skipping the `setoption` when it is already correct — the
+   *  common case, and one fewer command between `position` and `go`. */
+  private setMultiPv(n: number) {
+    const want = Math.max(1, Math.min(5, Math.floor(n)));
+    if (want === this.multiPv) return;
+    this.multiPv = want;
+    this.send(`setoption name MultiPV value ${want}`);
+  }
+
+  /** Search, returning the engine's best move AND the top-N candidates it
+   *  considered. `multiPv` 1 collects nothing beyond the played move, which is
+   *  the full-strength default. */
+  async search(
+    movesUci: string[],
+    plan: { cmd: string; hardStopMs?: number },
+    multiPv: number,
+    opts: { showWdl?: boolean } = {},
+  ): Promise<{ bestmove: string } & Harvest> {
+    await this.ready;
+    if (opts.showWdl !== undefined && opts.showWdl !== this.showWdl) {
+      this.showWdl = opts.showWdl;
+      this.send(`setoption name UCI_ShowWDL value ${opts.showWdl}`);
+    }
+    this.setMultiPv(multiPv);
+    const collector = new CandidateCollector();
+    const bestmove = await this.go(movesUci, plan.cmd, plan.hardStopMs, (l) => collector.feed(l));
+    return { bestmove, ...collector.harvest(bestmove) };
   }
 
   /** Best move (UCI) for the given move history under a fixed think time. */
