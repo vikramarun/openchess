@@ -163,9 +163,21 @@ check(
 );
 
 const page = read("app/page.tsx");
-// The `inGame` ternary's else-arm runs from ") : (" to the closing ")}" of the
-// expression; <HomeDemo> has to be inside it.
-const elseArm = page.slice(page.indexOf("inGame ? ("), page.indexOf('<div id="play">'));
+// The `inGame` ternary's else-arm runs from ") : (" to the start of the lobby
+// slot; <HomeDemo> has to be inside it.
+//
+// Both anchors are asserted FOUND before they are used. Without that, a
+// reformat makes indexOf return -1, `slice(-1)` quietly returns a different
+// string than intended, and this check reports on text it was never aiming at.
+const ternaryAt = page.indexOf("inGame ? (");
+const lobbySlotAt = page.indexOf('<div id="play">');
+check(
+  "page.tsx still has the inGame ternary and the lobby slot",
+  ternaryAt !== -1 && lobbySlotAt !== -1 && ternaryAt < lobbySlotAt,
+  `inGame ternary at ${ternaryAt}, lobby slot at ${lobbySlotAt}`,
+);
+const elseArm =
+  ternaryAt !== -1 && lobbySlotAt > ternaryAt ? page.slice(ternaryAt, lobbySlotAt) : "";
 check(
   "page.tsx renders <HomeDemo> inside the !inGame branch",
   elseArm.includes(") : (") && elseArm.slice(elseArm.indexOf(") : (")).includes("<HomeDemo"),

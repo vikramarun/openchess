@@ -219,6 +219,28 @@ export function Lobby({
   const modalUnderfunded =
     !!modalStake.trim() && modalStakeBig != null && available != null && available < modalStakeBig;
 
+  // The quickplay view does not poll (see above), so `offers` is empty here and
+  // `houseSeat` below would always be null — the modal would promise the
+  // self-play demo even with a house seat standing, then hand you a real game
+  // against the bot, because playNow's own fallback fetch finds it. One read
+  // when the modal opens is all the label needs, and it costs a request per
+  // modal open rather than one every three seconds per visitor.
+  useEffect(() => {
+    if (view !== "quickplay" || !pickTc || offers.length > 0) return;
+    let alive = true;
+    fetch(`${SERVER_HTTP}/park/offers`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((o) => {
+        if (alive) setOffers(o);
+      })
+      .catch(() => {
+        /* the label falls back to the demo wording, which playNow honours */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [view, pickTc, offers.length]);
+
   // Whether the House Bot has a free seat standing at the picked clock — it
   // decides what the modal's instant-play button honestly promises.
   const houseSeat = pickTc

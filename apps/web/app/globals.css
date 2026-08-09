@@ -448,6 +448,13 @@ a:hover {
   align-items: start;
   padding: var(--s-6) 0 var(--s-8);
 }
+/* min-width: 0 for the same reason .rep-slot has it — a grid item defaults to
+   `min-width: auto`, i.e. never narrower than its content, and the board inside
+   carries chessground's coordinate overlay. Without this the track can refuse
+   to shrink and push the page wider than the screen. */
+.home-hero-board {
+  min-width: 0;
+}
 .home-hero-pitch {
   display: flex;
   flex-direction: column;
@@ -2336,6 +2343,11 @@ select:focus-visible,
 .tabbar-item.on {
   color: var(--text-strong);
 }
+/* Five tabs share a 320px viewport at 64px each; a wrapped label would make one
+   tab two lines tall and the whole bar with it. */
+.tabbar-label {
+  white-space: nowrap;
+}
 .tabbar-icon {
   transition: transform var(--dur-2) var(--ease), color var(--dur-1) var(--ease);
 }
@@ -2402,12 +2414,16 @@ select:focus-visible,
     gap: 10px;
   }
   /* 85px of status readout, in a 343px row that also has to hold the wordmark,
-     the wallet pill and Sign in — without this the auth button is squeezed to
-     ~75px and "Sign in" wraps to two lines inside a 56px header. It is a status
-     indicator, not a control, and the homepage states the same thing at full
-     width in .engine-banner. */
-  .engine-pill {
+     the wallet pill and Sign in — with the words in, the auth button is
+     squeezed to ~75px and "Sign in" wraps to two lines inside a 56px header.
+     The DOT stays: /game, /gauntlet and /tournament have no engine banner of
+     their own, so hiding the pill outright would leave a phone with no engine
+     status anywhere. `title` on the pill carries the words. */
+  .engine-pill-label {
     display: none;
+  }
+  .engine-pill {
+    padding: 5px 8px;
   }
   .brand {
     font-size: 20px;

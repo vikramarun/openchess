@@ -20,7 +20,7 @@
 // repertoire grid's tracks and pushed the fourth dropdown past the right edge
 // of the page. Nothing errors, nothing looks broken above the fold — the page
 // is just wider than the screen.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // Comments stripped up front: `ruleBody` ends a block at the first `}`, and
@@ -185,6 +185,60 @@ check(
     mobile,
   ),
   "no `body { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)) }` in a ≤720px query",
+);
+
+// --- half five: no route styles itself with a class that no longer exists ---
+// Deleting a rule is invisible: the class stays in the JSX, the page still
+// renders, and it quietly falls back to the browser default. That shipped —
+// removing the homepage's `.hero` rules when the homepage stopped using them
+// also stripped /gauntlet, /tournament and /profile, whose <h1> went from 46px
+// centered to the UA's 30px left-aligned, with nothing to say so.
+//
+// Static `className="…"` literals only: a template literal or a ternary is a
+// runtime value this cannot resolve, and guessing at one would either miss
+// classes or invent them.
+function tsxFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    const p = join(dir, entry);
+    if (statSync(p).isDirectory()) tsxFiles(p, out);
+    else if (p.endsWith(".tsx")) out.push(p);
+  }
+  return out;
+}
+
+const web = join(__dirname, "..");
+const allCss = ["globals.css", "board.css", "chessground.base.css"]
+  .map((f) => readFileSync(join(web, "app", f), "utf8"))
+  .join("\n");
+const definedClasses = new Set(
+  [...allCss.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((m) => m[1]),
+);
+
+// A class that is deliberately a grouping hook with no rule of its own. Keep
+// this list short and say why — every entry is a class the check can no longer
+// protect.
+const UNSTYLED_ON_PURPOSE = new Set([
+  // Wraps each round's pairings in the tournament list; the spacing all lives
+  // on its children. Predates this check.
+  "pairing-round",
+]);
+
+const orphans: string[] = [];
+for (const file of [...tsxFiles(join(web, "app")), ...tsxFiles(join(web, "components"))]) {
+  const src = readFileSync(file, "utf8");
+  for (const m of src.matchAll(/className="([^"{}]+)"/g)) {
+    for (const cls of m[1].split(/\s+/).filter(Boolean)) {
+      if (definedClasses.has(cls) || UNSTYLED_ON_PURPOSE.has(cls)) continue;
+      const rel = file.slice(web.length + 1);
+      const entry = `${cls} (${rel})`;
+      if (!orphans.includes(entry)) orphans.push(entry);
+    }
+  }
+}
+check(
+  "every class a component names has a rule",
+  orphans.length === 0,
+  `no CSS defines: ${orphans.join(", ")}`,
 );
 
 process.exit(failed === 0 ? 0 : 1);

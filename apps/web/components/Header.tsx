@@ -39,11 +39,14 @@ export function Header() {
           ? "Engine failed"
           : "Engine";
 
+  // Gauntlet is not a tab of its own, so activeTab folds it into /tournament.
+  // Here it has its own link and has to win on its own path, or /gauntlet would
+  // light Tournament instead. Prefix, not equality: on a future /gauntlet/<id>
+  // an exact match would light NEITHER link — Tournament is suppressed and
+  // Gauntlet wouldn't claim it.
+  const onGauntlet = pathname === "/gauntlet" || pathname.startsWith("/gauntlet/");
   const isOn = (href: string) =>
-    // Gauntlet is not a tab of its own, so activeTab folds it into /tournament.
-    // Here it has its own link and has to win on its own path, or /gauntlet
-    // would light Tournament instead.
-    href === "/gauntlet" ? pathname === "/gauntlet" : section === href && pathname !== "/gauntlet";
+    href === "/gauntlet" ? onGauntlet : section === href && !onGauntlet;
 
   return (
     <header className="site-header">
@@ -68,8 +71,14 @@ export function Header() {
           ))}
         </nav>
         <div className="header-actions">
-          <span className="engine-pill" title="Stockfish runs in your browser, free">
-            <span className={`dot ${status}`} /> {label}
+          {/* The label is hidden below 720px, not the whole pill: 85px is more
+              than the row can spare next to the wordmark and Sign in, but the
+              routes with no engine banner of their own (/game, /gauntlet,
+              /tournament) would otherwise show no engine status at all on a
+              phone. The dot keeps it, and `title` carries the words. */}
+          <span className="engine-pill" title={`${label} — Stockfish runs in your browser, free`}>
+            <span className={`dot ${status}`} />
+            <span className="engine-pill-label">{label}</span>
           </span>
           <WalletMenu />
           <AuthButton />
