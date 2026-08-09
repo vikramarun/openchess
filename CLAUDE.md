@@ -22,6 +22,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:nav)     # move nav (following the live tip vs. parked on a ply)
 (cd apps/web && pnpm test:offers)  # lobby offer grouping + the join walk
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
+(cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -106,8 +107,9 @@ wallet.
   the backstop, and the only half that covers the pages with no lobby to stand
   down (`/game/[id]`, gauntlet, tournament). Keep the hero in the SERVER render —
   `Lobby` is client-only, so moving the `<h1>` inside it drops the landing
-  page's only heading out of the HTML. Nothing in the test suite pins any of
-  this — it's CSS and layout, and there's no layout harness.
+  page's only heading out of the HTML. `pnpm test:layout` pins the two CSS
+  halves (sticky, and ranked under the overlay) by reading `globals.css`; the
+  React half — what `inGame` hides — is unpinned, since there's no DOM harness.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to

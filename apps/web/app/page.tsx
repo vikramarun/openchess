@@ -43,7 +43,12 @@ export default function Home() {
 
   return (
     <div className="container">
-      {!inGame && (
+      {inGame ? (
+        // The hero's <h1> is the only heading this page has, so hiding it
+        // leaves the document with none while you play. Keep one for anyone
+        // navigating by headings — visually there's a whole board saying it.
+        <h1 className="sr-only">Your game</h1>
+      ) : (
         <>
           <div className="hero">
             <h1>
@@ -65,64 +70,71 @@ export default function Home() {
 
       {mounted ? <Lobby onActiveChange={onActiveChange} /> : null}
 
-      <div className="mode-grid" style={{ marginTop: 16 }}>
-        <Link href="/gauntlet" className="mode-card">
-          <div className="mc-top">
-            <span className="mc-icon">🔥</span>
-            <span className="mc-title">Gauntlet</span>
-            <span className="mc-tag">stakes</span>
-          </div>
-          <div className="mc-desc">
-            Your engine plays back-to-back games at a fixed tier until you stop. Lock a
-            balance once, net-settle onchain.
-          </div>
-        </Link>
+      {/* Everything below is the pitch to someone who ISN'T playing yet:
+          "Gauntlet · stakes", "How stakes work", the leaderboard. Under a live
+          board it's both noise and ~5000px of page. Stood down with the hero. */}
+      {!inGame && (
+        <>
+          <div className="mode-grid" style={{ marginTop: 16 }}>
+            <Link href="/gauntlet" className="mode-card">
+              <div className="mc-top">
+                <span className="mc-icon">🔥</span>
+                <span className="mc-title">Gauntlet</span>
+                <span className="mc-tag">stakes</span>
+              </div>
+              <div className="mc-desc">
+                Your engine plays back-to-back games at a fixed tier until you stop. Lock a
+                balance once, net-settle onchain.
+              </div>
+            </Link>
 
-        <Link href="/tournament" className="mode-card">
-          <div className="mc-top">
-            <span className="mc-icon">🏆</span>
-            <span className="mc-title">Tournament</span>
-            <span className="mc-tag">stakes</span>
+            <Link href="/tournament" className="mode-card">
+              <div className="mc-top">
+                <span className="mc-icon">🏆</span>
+                <span className="mc-title">Tournament</span>
+                <span className="mc-tag">stakes</span>
+              </div>
+              <div className="mc-desc">
+                Pay one entry into a prize pool. Round-robin now, Swiss and knockout soon. The
+                pool is distributed onchain by final standings.
+              </div>
+            </Link>
           </div>
-          <div className="mc-desc">
-            Pay one entry into a prize pool. Round-robin now, Swiss and knockout soon. The
-            pool is distributed onchain by final standings.
-          </div>
-        </Link>
-      </div>
 
-      <Leaderboard />
+          <Leaderboard />
 
-      <div className="how-it-works">
-        <div className="how-title">How stakes work</div>
-        <div className="how-steps">
-          <div className="how-step">
-            <div className="how-num">1</div>
-            <div className="how-h">Deposit USDC</div>
-            <div className="muted">
-              Fund your balance in the escrow contract on Base. It stays yours. Withdraw any
-              time it isn’t locked in a game.
+          <div className="how-it-works">
+            <div className="how-title">How stakes work</div>
+            <div className="how-steps">
+              <div className="how-step">
+                <div className="how-num">1</div>
+                <div className="how-h">Deposit USDC</div>
+                <div className="muted">
+                  Fund your balance in the escrow contract on Base. It stays yours. Withdraw any
+                  time it isn’t locked in a game.
+                </div>
+              </div>
+              <div className="how-step">
+                <div className="how-num">2</div>
+                <div className="how-h">Play for stakes</div>
+                <div className="muted">
+                  Post or join a staked game, run a Gauntlet, or enter a Tournament. Your engine
+                  plays and both stakes lock onchain.
+                </div>
+              </div>
+              <div className="how-step">
+                <div className="how-num">3</div>
+                <div className="how-h">Settle onchain</div>
+                <div className="muted">
+                  The oracle signs the result and the escrow pays out. Win and you get your
+                  own stake back plus your opponent’s, less a 1% fee. Lose and your stake goes
+                  to them. A draw or no-show returns it untouched.
+                </div>
+              </div>
             </div>
           </div>
-          <div className="how-step">
-            <div className="how-num">2</div>
-            <div className="how-h">Play for stakes</div>
-            <div className="muted">
-              Post or join a staked game, run a Gauntlet, or enter a Tournament. Your engine
-              plays and both stakes lock onchain.
-            </div>
-          </div>
-          <div className="how-step">
-            <div className="how-num">3</div>
-            <div className="how-h">Settle onchain</div>
-            <div className="muted">
-              The oracle signs the result and the escrow pays out. Win and you get your
-              own stake back plus your opponent’s, less a 1% fee. Lose and your stake goes
-              to them. A draw or no-show returns it untouched.
-            </div>
-          </div>
-        </div>
-      </div>
+        </>
+      )}
 
       <SiteFooter />
     </div>
