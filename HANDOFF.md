@@ -122,6 +122,14 @@ newest context first — details live in each PR:
   tournaments capped (`RL_MAX_TOURNAMENTS`); tournament names sanitized;
   park stakes validated at post; a post-flag move is no longer echoed/persisted;
   native gauntlet re-authenticates mid-run instead of aborting.
+- **P2 round 3 (PR #53):** localStorage keys unified under `openchess.*` with
+  a read-time migration for the four legacy names (see CLAUDE.md — the
+  fallback is load-bearing); **buy-in tournament creation now requires the
+  organizer to hold at least the entry fee in escrow** (402 otherwise), which
+  ties the oracle-gas cost of `openTournament` to something a free SIWE
+  session can't mint — it fails closed on a real shortfall and OPEN on an RPC
+  error so a flaky node can't lock organizers out; `entrant_engines` persists
+  (**migration 0017**), closing the last documented restart gap.
 - **P2 round 2 (PRs #49/#50, after launch was pushed):** `/games/live` joined
   the polls bucket; a signed-in entrant in a FREE tournament now owns their
   games (`entrant_wallets`, **migration 0016**, strict about stale bearers,

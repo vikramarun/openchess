@@ -69,8 +69,16 @@ let decodeFails = false;
   }
 };
 
+// Seeded under the PRE-NAMESPACE key on purpose: an upload from a returning
+// visitor who hasn't re-signed-in must still carry their session, which means
+// going through lib/storage.ts's migration rather than around it.
 const store = new Map<string, string>([["chess_token", "tok-123"]]);
 const dispatched: string[] = [];
+const localStorageStub = {
+  getItem: (k: string) => store.get(k) ?? null,
+  setItem: (k: string, v: string) => void store.set(k, v),
+  removeItem: (k: string) => void store.delete(k),
+};
 (globalThis as unknown as { window: unknown }).window = {
   dispatchEvent: (e: { type: string }) => {
     dispatched.push(e.type);
@@ -78,6 +86,8 @@ const dispatched: string[] = [];
   },
   addEventListener: () => {},
   removeEventListener: () => {},
+  // As a real browser has it — lib/storage.ts reads `window.localStorage`.
+  localStorage: localStorageStub,
 };
 (globalThis as unknown as { Event: unknown }).Event = class {
   type: string;
@@ -85,11 +95,7 @@ const dispatched: string[] = [];
     this.type = type;
   }
 };
-(globalThis as unknown as { localStorage: unknown }).localStorage = {
-  getItem: (k: string) => store.get(k) ?? null,
-  setItem: (k: string, v: string) => void store.set(k, v),
-  removeItem: (k: string) => void store.delete(k),
-};
+(globalThis as unknown as { localStorage: unknown }).localStorage = localStorageStub;
 
 let failed = 0;
 function check(name: string, got: unknown, want: unknown) {

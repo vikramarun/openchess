@@ -17,6 +17,7 @@ import {
   type Repertoire,
 } from "./books";
 import { parseBook, pickBookMove, type BookEntry } from "./polyglot";
+import { readMigrated, writeKey } from "./storage";
 import { DEFAULT_TIME_POLICY, normalizeTimePolicy, timePolicyLabel, type TimePolicy } from "./timePolicy";
 
 export type BrowserBotConfig = {
@@ -36,8 +37,6 @@ export const DEFAULT_CONFIG: BrowserBotConfig = {
   repertoire: DEFAULT_REPERTOIRE,
   time: DEFAULT_TIME_POLICY,
 };
-
-const CONFIG_KEY = "browser_bot_config";
 
 /** Clamp a numeric config field, treating a valid 0 as 0 (not falsy-default). */
 function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
@@ -61,7 +60,7 @@ export function parseBrowserBotConfig(raw: unknown): BrowserBotConfig {
 export function getBrowserBotConfig(): BrowserBotConfig {
   if (typeof window === "undefined") return DEFAULT_CONFIG;
   try {
-    return parseBrowserBotConfig(JSON.parse(localStorage.getItem(CONFIG_KEY) ?? "{}"));
+    return parseBrowserBotConfig(JSON.parse(readMigrated("browserBot") ?? "{}"));
   } catch {
     return DEFAULT_CONFIG;
   }
@@ -72,11 +71,11 @@ export function getBrowserBotConfig(): BrowserBotConfig {
 export function saveBrowserBotConfig(cfg: Partial<BrowserBotConfig>) {
   let stored: unknown = {};
   try {
-    stored = JSON.parse(localStorage.getItem(CONFIG_KEY) ?? "{}");
+    stored = JSON.parse(readMigrated("browserBot") ?? "{}");
   } catch {
     /* corrupt blob — overwrite it */
   }
-  localStorage.setItem(CONFIG_KEY, JSON.stringify({ ...(stored as object), ...cfg }));
+  writeKey("browserBot", JSON.stringify({ ...(stored as object), ...cfg }));
 }
 
 /** Engine label declared to opponents (informational, never verified). The

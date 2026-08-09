@@ -5,9 +5,10 @@ import { useCallback, useEffect, useState } from "react";
 import { sideToMoveFromFen } from "./board";
 import { useEngine } from "./engineContext";
 import { toWhiteRelative, type EvalScore } from "./evalScore";
+import { KEYS } from "./storage";
 
 /** localStorage key for the viewer's eval-bar preference. */
-const PREF_KEY = "openchess.evalBar";
+const PREF_KEY = KEYS.evalBar;
 
 /** Viewports below this get the eval bar OFF by default: the bar costs a 7 MB
  *  engine download plus a continuous search on the viewer's CPU — the wrong

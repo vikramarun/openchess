@@ -14,6 +14,7 @@
 
 import { boardBackground, boardTheme, DEFAULT_BOARD_THEME } from "./boardThemes";
 import { DEFAULT_PIECE_SET, pieceSet, pieceVars } from "./pieceSets";
+import { KEYS } from "./storage";
 
 /** "inside" is chessground's default: rank/file labels drawn in the corners of
  *  the edge squares. lichess also offers a true outside-the-board gutter, which
@@ -48,7 +49,7 @@ export const DEFAULT_PREFS: BoardPrefs = {
   highlightCheck: true,
 };
 
-export const STORAGE_KEY = "openchess.board";
+export const STORAGE_KEY = KEYS.board;
 
 /** Exported for the bootstrap script, which embeds the same list so its
  *  normalization can't drift from `normalizePrefs`. */

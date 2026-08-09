@@ -262,12 +262,9 @@ function TournamentClient() {
       }
     }
     try {
-      const r = await fetch(`${SERVER_HTTP}/tournaments`, {
+      const r = await authedFetch(`${SERVER_HTTP}/tournaments`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(buyInBase && token ? { authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           name: name.trim(),
           buy_in: buyInBase,
@@ -277,7 +274,13 @@ function TournamentClient() {
       });
       if (!r.ok)
         return setErr(
-          r.status === 503 ? MAINTENANCE_MSG : `Couldn’t create (${r.status}).`,
+          r.status === 401
+            ? SESSION_EXPIRED
+            : r.status === 402
+              ? "Deposit at least the entry fee before opening a paid tournament — the organizer plays too."
+              : r.status === 503
+                ? MAINTENANCE_MSG
+                : `Couldn’t create (${r.status}).`,
         );
       setName("");
       setBuyIn("");
