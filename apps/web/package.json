@@ -9,7 +9,8 @@
     "test:book": "tsx scripts/polyglot.test.ts",
     "test:eval": "tsx scripts/eval.test.ts",
     "test:auth": "tsx scripts/authedFetch.test.ts",
-    "test:seat": "tsx scripts/playSeat.test.ts"
+    "test:seat": "tsx scripts/playSeat.test.ts",
+    "test:prefs": "tsx scripts/boardPrefs.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "2.1.7",

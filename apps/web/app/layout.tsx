@@ -1,9 +1,16 @@
 import type { Metadata } from "next";
 
 import "./globals.css";
+// chessground's structural CSS, vendored (its package "exports" map makes the
+// published assets unreachable by import). board.css supplies the theme half —
+// the board squares and piece art it would otherwise hardcode.
+import "./chessground.base.css";
+import "./board.css";
 import { Providers } from "./providers";
+import { BoardPrefsSync } from "@/components/BoardPrefsSync";
 import { Header } from "@/components/Header";
 import { MaintenanceBanner } from "@/components/MaintenanceBanner";
+import { boardBootstrapScript } from "@/lib/boardBootstrap";
 
 export const metadata: Metadata = {
   title: "OpenChess — machines play, you wager",
@@ -15,32 +22,21 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const cg = "https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets";
-  // Subresource Integrity: a CDN compromise can't inject altered CSS.
   return (
-    <html lang="en">
+    // suppressHydrationWarning is for the bootstrap script below: it stamps a
+    // style attribute on <html> before React hydrates, which the server render
+    // has no way to predict. It suppresses one level only, so a real mismatch
+    // anywhere inside the page still reports.
+    <html lang="en" suppressHydrationWarning>
       <head>
-        <link
-          rel="stylesheet"
-          href={`${cg}/chessground.base.css`}
-          integrity="sha384-xC640aoNTmtjZ0u134MQFxX+je+vedHUFNkXCvU7TQRU6ZJgXpTl8bUDKaIDraBz"
-          crossOrigin="anonymous"
-        />
-        <link
-          rel="stylesheet"
-          href={`${cg}/chessground.brown.css`}
-          integrity="sha384-FNiviQs+kF/vWoOm7Bi/QYTWBeQIH/DskHImXQ5g6zGjcJwj1eoUahVUSwYEXfH1"
-          crossOrigin="anonymous"
-        />
-        <link
-          rel="stylesheet"
-          href={`${cg}/chessground.cburnett.css`}
-          integrity="sha384-t0l6ORC8cGo8/GMWCsKb4kVgvWzfwkDU8W9CXOh6Ai8dvgfMdhWl5UYMddaI835A"
-          crossOrigin="anonymous"
-        />
+        {/* Stamps the saved board theme onto <html> before the first paint, so a
+            themed board never flashes brown on the way in. Must stay inline and
+            in <head>: localStorage is client-only, and React runs too late. */}
+        <script dangerouslySetInnerHTML={{ __html: boardBootstrapScript() }} />
       </head>
       <body>
         <Providers>
+          <BoardPrefsSync />
           <Header />
           <MaintenanceBanner />
           {children}

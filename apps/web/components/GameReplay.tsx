@@ -11,7 +11,8 @@ import { EvalToggle } from "@/components/EvalBar";
 import { MoveList, MoveNav } from "@/components/MoveNav";
 import { PlayerBar } from "@/components/PlayerBar";
 import { shortAddress } from "@/lib/address";
-import { lastMoveFromUci, material } from "@/lib/board";
+import { lastMoveFromUci, material, type Side } from "@/lib/board";
+import { other, useFlip } from "@/lib/useFlip";
 import { fmtUsdc } from "@/lib/escrow";
 import type { GameDetail } from "@/lib/gameApi";
 import { TC_NAME, tcLabel } from "@/lib/timeControls";
@@ -117,6 +118,23 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
     }
   })();
 
+  const { orientation, flip } = useFlip("white");
+
+  // Name-plates follow perspective, not color — the side you are looking from
+  // sits at the bottom, so flipping the board has to move them too.
+  const bar = (side: Side) => {
+    const w = side === "white";
+    return (
+      <PlayerBar
+        color={side}
+        name={seatName(w ? detail.white : detail.black)}
+        clockMs={w ? clock.white_ms : clock.black_ms}
+        captured={w ? mat.whiteCaptured : mat.blackCaptured}
+        edge={w ? mat.advantage : -mat.advantage}
+      />
+    );
+  };
+
   return (
     <div className="container">
       <div style={{ marginBottom: 12 }}>
@@ -126,28 +144,18 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
       </div>
       <div className="game-wrap">
         <div className="board-col">
-          <PlayerBar
-            color="black"
-            name={seatName(detail.black)}
-            clockMs={clock.black_ms}
-            captured={mat.blackCaptured}
-            edge={-mat.advantage}
-          />
+          {bar(other(orientation))}
           <Chessboard
             fen={fen}
+            orientation={orientation}
             lastMove={frames.lastMoves[at]}
             check={frames.checks[at]}
             showEval={evalOn && !engineEval.failed}
             evalScore={engineEval.score}
             evalThinking={engineEval.thinking}
+            onFlip={flip}
           />
-          <PlayerBar
-            color="white"
-            name={seatName(detail.white)}
-            clockMs={clock.white_ms}
-            captured={mat.whiteCaptured}
-            edge={mat.advantage}
-          />
+          {bar(orientation)}
           {/* Replay transport */}
           <MoveNav
             at={at}

@@ -26,7 +26,7 @@ export function Header() {
         <Link href="/gauntlet">Gauntlet</Link>
         <Link href="/tournament">Tournament</Link>
         <Link href="/play">Test&nbsp;Engine</Link>
-        <Link href="/profile">Profile</Link>
+        <Link href="/profile">Customize</Link>
       </nav>
       <div className="header-actions">
         <span className="engine-pill" title="Stockfish runs in your browser — free">

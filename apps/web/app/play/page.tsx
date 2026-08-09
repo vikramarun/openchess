@@ -8,8 +8,9 @@ import { useEffect, useRef, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { PlayerBar } from "@/components/PlayerBar";
-import { lastMoveFromUci, material, sideToMoveFromFen } from "@/lib/board";
+import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
 import { ensureBookLoaded } from "@/lib/browserBot";
+import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { playSeat } from "@/lib/play";
@@ -162,30 +163,35 @@ export default function PlayPage() {
   const live = !result && status === "playing";
   const turn = sideToMoveFromFen(fen);
   const mat = material(fen);
+  const { orientation, flip } = useFlip("white");
+
+  // Name-plates are positioned by perspective, not by color: the side you are
+  // looking from sits at the bottom. Flipping the board has to move them too.
+  const bar = (side: Side) => (
+    <PlayerBar
+      color={side}
+      name="Stockfish"
+      engine="in browser"
+      clockMs={side === "white" ? clock?.white_ms : clock?.black_ms}
+      active={live && turn === side}
+      captured={side === "white" ? mat.whiteCaptured : mat.blackCaptured}
+      edge={side === "white" ? mat.advantage : -mat.advantage}
+    />
+  );
 
   return (
     <div className="container">
       <div className="game-wrap">
         <div className="board-col">
-          <PlayerBar
-            color="black"
-            name="Stockfish"
-            engine="in browser"
-            clockMs={clock?.black_ms}
-            active={live && turn === "black"}
-            captured={mat.blackCaptured}
-            edge={-mat.advantage}
+          {bar(other(orientation))}
+          <Chessboard
+            fen={fen}
+            orientation={orientation}
+            lastMove={lastMoveFromUci(lastUci)}
+            check={inCheck}
+            onFlip={flip}
           />
-          <Chessboard fen={fen} lastMove={lastMoveFromUci(lastUci)} check={inCheck} />
-          <PlayerBar
-            color="white"
-            name="Stockfish"
-            engine="in browser"
-            clockMs={clock?.white_ms}
-            active={live && turn === "white"}
-            captured={mat.whiteCaptured}
-            edge={mat.advantage}
-          />
+          {bar(orientation)}
         </div>
 
         <div className="sidebar">

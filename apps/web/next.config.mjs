@@ -4,10 +4,13 @@
 // This is a wallet-signing money app, so it ships a Content-Security-Policy and
 // the standard hardening headers. The CSP is scoped to exactly the origins the
 // app talks to: the game server (env), Base's default RPCs (wagmi/RainbowKit),
-// WalletConnect's relay/explorer, and the jsDelivr CDN that serves chessground's
-// CSS (loaded with SRI in app/layout.tsx). `frame-ancestors 'none'` +
+// and WalletConnect's relay/explorer. `frame-ancestors 'none'` +
 // X-Frame-Options block clickjacking of the Deposit/Withdraw and Finish-sign-in
 // buttons.
+//
+// `style-src` deliberately has no CDN entry: chessground's CSS used to be
+// loaded from jsDelivr with SRI, and is now vendored into app/ instead, so
+// there is one less third-party origin and no SRI hashes to re-pin on a bump.
 const isProd = process.env.NODE_ENV === "production";
 const SERVER_HTTP = process.env.NEXT_PUBLIC_SERVER_HTTP || "http://127.0.0.1:8080";
 const SERVER_WS = process.env.NEXT_PUBLIC_SERVER_WS || "ws://127.0.0.1:8080";
@@ -51,7 +54,8 @@ const csp = [
   "frame-ancestors 'none'",
   "form-action 'self'",
   `script-src ${scriptSrc}`,
-  "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline'",
+  // 'self' also covers the vendored piece SVGs under public/piece/.
   "img-src 'self' data: blob: https:", // ENS/wallet avatars (IPFS gateways, arbitrary https)
   "font-src 'self' data:",
   "worker-src 'self' blob:", // Stockfish web worker

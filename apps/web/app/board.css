@@ -1,0 +1,124 @@
+/* Board theme + piece set.
+ *
+ * Replaces chessground's shipped chessground.brown.css and
+ * chessground.cburnett.css. Those hardcode one board and one piece set in
+ * unscoped global selectors, so there is no way to layer a second set on top
+ * without an order-dependent specificity fight — we own the rules instead.
+ *
+ * Everything here reads a CSS custom property. Changing a theme is a variable
+ * write on <html> (lib/boardPrefs.ts applyBoardPrefs), which is how lila does
+ * it too: no stylesheet swap, no network round trip, and two boards on one page
+ * can show different themes (the settings preview needs that).
+ *
+ * The :root block below is a fallback for the window before the bootstrap
+ * script runs, and for JS-disabled browsers — without it an unstyled board is
+ * an invisible board. Values are brown + cburnett, matching the defaults in
+ * lib/boardThemes.ts and lib/pieceSets.ts. The --board-bg URI is generated;
+ * regenerate it the way lib/boardThemes.ts boardBackground() does if the brown
+ * theme's colors ever change.
+ *
+ * Note there are no `square.selected` / `.move-dest` / `.premove-dest` rules.
+ * Every board in this app is viewOnly (games are engine-vs-engine), so those
+ * squares are never rendered. Add them back alongside an interactive board.
+ */
+
+:root {
+  --board-bg: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%208%208%22%20shape-rendering%3D%22crispEdges%22%3E%3Crect%20width%3D%228%22%20height%3D%228%22%20fill%3D%22%23f0d9b5%22%2F%3E%3Cpath%20fill%3D%22%23b58863%22%20d%3D%22M1%200h1v1H1zM3%200h1v1H3zM5%200h1v1H5zM7%200h1v1H7zM0%201h1v1H0zM2%201h1v1H2zM4%201h1v1H4zM6%201h1v1H6zM1%202h1v1H1zM3%202h1v1H3zM5%202h1v1H5zM7%202h1v1H7zM0%203h1v1H0zM2%203h1v1H2zM4%203h1v1H4zM6%203h1v1H6zM1%204h1v1H1zM3%204h1v1H3zM5%204h1v1H5zM7%204h1v1H7zM0%205h1v1H0zM2%205h1v1H2zM4%205h1v1H4zM6%205h1v1H6zM1%206h1v1H1zM3%206h1v1H3zM5%206h1v1H5zM7%206h1v1H7zM0%207h1v1H0zM2%207h1v1H2zM4%207h1v1H4zM6%207h1v1H6z%22%2F%3E%3C%2Fsvg%3E");
+  --board-light: #f0d9b5;
+  --board-dark: #b58863;
+  --board-coord-on-light: rgba(72, 72, 72, 0.8);
+  --board-coord-on-dark: rgba(255, 255, 255, 0.8);
+  --board-last-move: rgba(155, 199, 0, 0.41);
+
+  --piece-white-pawn: url("/piece/cburnett/wP.svg");
+  --piece-white-knight: url("/piece/cburnett/wN.svg");
+  --piece-white-bishop: url("/piece/cburnett/wB.svg");
+  --piece-white-rook: url("/piece/cburnett/wR.svg");
+  --piece-white-queen: url("/piece/cburnett/wQ.svg");
+  --piece-white-king: url("/piece/cburnett/wK.svg");
+  --piece-black-pawn: url("/piece/cburnett/bP.svg");
+  --piece-black-knight: url("/piece/cburnett/bN.svg");
+  --piece-black-bishop: url("/piece/cburnett/bB.svg");
+  --piece-black-rook: url("/piece/cburnett/bR.svg");
+  --piece-black-queen: url("/piece/cburnett/bQ.svg");
+  --piece-black-king: url("/piece/cburnett/bK.svg");
+}
+
+/* ---------- squares ---------- */
+
+cg-board {
+  background-color: var(--board-light);
+  background-image: var(--board-bg);
+}
+
+cg-board square.last-move {
+  background-color: var(--board-last-move);
+}
+
+cg-board square.check {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 0, 0, 1) 0%,
+    rgba(231, 0, 0, 1) 25%,
+    rgba(169, 0, 0, 0) 89%,
+    rgba(158, 0, 0, 0) 100%
+  );
+}
+
+/* ---------- rank / file labels ---------- */
+/* Selector groups are chessground's; only the colors are ours. The first group
+ * is every label sitting on a light square, the second on a dark square. */
+
+.cg-wrap coords:nth-child(odd) coord:nth-child(even),
+.cg-wrap coords.squares:nth-child(even) coord:nth-child(odd),
+.cg-wrap.orientation-black coords.files:nth-child(even) coord:nth-child(odd),
+.cg-wrap coords.files:nth-child(even) coord:nth-child(even) {
+  color: var(--board-coord-on-light);
+}
+
+.cg-wrap coords:nth-child(odd) coord:nth-child(odd),
+.cg-wrap coords.squares:nth-child(even) coord:nth-child(even),
+.cg-wrap.orientation-black coords.files:nth-child(even) coord:nth-child(even),
+.cg-wrap coords.files:nth-child(even) coord:nth-child(odd) {
+  color: var(--board-coord-on-dark);
+}
+
+/* ---------- pieces ---------- */
+/* Names must match lib/pieceSets.ts pieceVar(). */
+
+.cg-wrap piece.pawn.white {
+  background-image: var(--piece-white-pawn);
+}
+.cg-wrap piece.knight.white {
+  background-image: var(--piece-white-knight);
+}
+.cg-wrap piece.bishop.white {
+  background-image: var(--piece-white-bishop);
+}
+.cg-wrap piece.rook.white {
+  background-image: var(--piece-white-rook);
+}
+.cg-wrap piece.queen.white {
+  background-image: var(--piece-white-queen);
+}
+.cg-wrap piece.king.white {
+  background-image: var(--piece-white-king);
+}
+.cg-wrap piece.pawn.black {
+  background-image: var(--piece-black-pawn);
+}
+.cg-wrap piece.knight.black {
+  background-image: var(--piece-black-knight);
+}
+.cg-wrap piece.bishop.black {
+  background-image: var(--piece-black-bishop);
+}
+.cg-wrap piece.rook.black {
+  background-image: var(--piece-black-rook);
+}
+.cg-wrap piece.queen.black {
+  background-image: var(--piece-black-queen);
+}
+.cg-wrap piece.king.black {
+  background-image: var(--piece-black-king);
+}

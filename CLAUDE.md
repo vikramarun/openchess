@@ -16,6 +16,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
+(cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -23,6 +24,10 @@ cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
 - Contract ABIs are **vendored** in `crates/ledger/abi/`, so `cargo build` does
   **not** need a prior `forge build`. Re-vendor after editing the contract
   (command in the comment above the `sol!` macros in `crates/ledger/src/lib.rs`).
+- chessground's CSS is **vendored** in `apps/web/app/chessground.base.css` (its
+  npm `exports` map makes the published assets unimportable). Re-vendor on a
+  bump — command in that file's header. Don't re-add the old jsDelivr `<link>`s;
+  `style-src` no longer allows that origin.
 - Deploy the server with **`./scripts/deploy-server.sh`** — never a bare
   `fly deploy` (it re-adds Fly's HA machine, which breaks this single-node app).
 
@@ -41,7 +46,8 @@ crates/book-gen      dev tool: builds assets/house-book.bin (Polyglot) from a
                      SAN repertoire — not part of any deployed artifact
 contracts/           ChessEscrow.sol (Foundry) — pooled bankroll + EIP-712 settlement
 apps/web             Next.js: lobby, in-browser Stockfish 18 (WASM/NNUE) + uploadable
-                     Polyglot book (lib/polyglot.ts), wallet/SIWE, bot control, spectator, profiles
+                     Polyglot book (lib/polyglot.ts), wallet/SIWE, bot control, spectator, profiles,
+                     board/piece themes (lib/boardPrefs.ts + app/board.css)
 ```
 
 ## Architecture in three sentences
@@ -127,6 +133,26 @@ wallet.
   parses fine and never hits (`book::shipped_book` tests exist to catch exactly
   that); and `BookPolicy::Best` would walk one identical line every game, which
   is why `Weighted` is the default.
+- **The board theme is applied twice, and the two paths must agree.** A theme is
+  CSS custom properties on `<html>` (`--board-bg`, 12 `--piece-*`), written both
+  by an inline script in `app/layout.tsx` **before first paint** and by
+  `applyBoardPrefs` after React mounts. The script has to be inline and in
+  `<head>` — localStorage is client-only and React runs after the first paint,
+  so without it every navigation flashes the default brown board. If the two
+  paths ever compute different values the board visibly changes on load, which
+  no screenshot of a settled page would catch: `pnpm test:prefs` runs the script
+  in a sandbox and asserts it produces byte-identical variables. Both generate
+  from the same tables (`lib/boardThemes.ts`, `lib/pieceSets.ts`) — keep it that
+  way rather than hand-writing the script. The script also means `<html>` needs
+  `suppressHydrationWarning`.
+  Two further traps: chessground reads `coordinates`/`coordinatesOnSquares`
+  **only when it builds the board**, so passing them through `api.set()`
+  silently does nothing — hiding coordinates is done in CSS
+  (`.board-wrap[data-coords="off"]`), and only the "every square" layout
+  recreates the instance. And roughly a third of lichess's piece sets are
+  CC BY-NC-SA or outright non-free; this repo is MIT and settles real money, so
+  a new set needs its license checked and recorded in
+  `apps/web/public/piece/CREDITS.md`.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr` — which silently disabled the client's self-match
