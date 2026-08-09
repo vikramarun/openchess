@@ -9,3 +9,15 @@ allowBuilds:
   keccak: true
   secp256k1: true
   utf-8-validate: true
+  # Both arrived with the Dynamic SDK and both are declined on purpose — an
+  # entry here is a decision, not a permission, and pnpm 11 errors on any
+  # dependency whose build script is neither allowed nor refused.
+  #
+  # `sharp` is Node-side image processing (Dynamic pulls it in through its icon
+  # tooling) and this app never optimizes an image on the server: next/image
+  # callers pass `unoptimized` and there are no remotePatterns. `bigint-buffer`
+  # is a native speedup for Solana bigint maths, and there is no Solana here.
+  # Every build in this repo has run with both unbuilt, so `false` costs nothing
+  # and skips compiling two native addons on every CI run.
+  bigint-buffer: false
+  sharp: false

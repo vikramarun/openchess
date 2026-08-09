@@ -208,6 +208,25 @@ a:hover {
      36px of a 360px popover. */
   padding: 14px;
 }
+/* "Add funds" — only rendered for embedded (email/Google) wallets, which arrive
+   empty. Sits above BankrollPanel because a user who can't afford Deposit is
+   already looking at this popover. */
+.fund-btn {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 10px 14px 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.fund-btn:hover {
+  border-color: var(--accent);
+}
 
 /* account chip (signed-in state of the single auth button) */
 .account-chip {

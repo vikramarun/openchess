@@ -242,7 +242,9 @@ already bumped, so `git tag v0.1.1 && git push origin v0.1.1` is the whole job).
   popup just says "your opponent".
 - **Rabby is in the wallet shortlist.** RainbowKit's default "Popular" group
   doesn't include it, so a Rabby user saw an install wall with the extension
-  already installed (`apps/web/lib/wagmi.ts` now spells the group out).
+  already installed (`apps/web/lib/wagmi.ts` spelled the group out). Since the
+  move to Dynamic the shortlist lives in the Dynamic dashboard instead, so the
+  fix is config, not code — keep Rabby enabled there.
 - **"Quick Play" is now "Test Engine".** That covers the tab, the page heading, and the
   cross-links from gauntlet/tournament.
 - **Sessions expire gracefully** (PR #27, merged 2026-08-08). A stale token is

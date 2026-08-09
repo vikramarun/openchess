@@ -111,7 +111,33 @@ honest checklist.
 - [ ] Terms of service, geofencing, and responsible-play controls as required.
 
 ### 6. Frontend config
-- [ ] Set `NEXT_PUBLIC_WC_PROJECT_ID` (WalletConnect Cloud) for production.
+- [ ] Set `NEXT_PUBLIC_DYNAMIC_ENV_ID` to the **live** Dynamic environment id.
+- [ ] In the Dynamic dashboard (https://app.dynamic.xyz), for that environment:
+  enable Base (chain 8453) — it must match the chain list in `apps/web/lib/wagmi.ts`,
+  which Dynamic no longer syncs automatically; enable email + Google sign-in and
+  embedded wallets ("create on sign up"); enable the wallet shortlist including
+  **Rabby**, filtering by connector *key*, not name; and set your own WalletConnect
+  project id under Developer → Integrations.
+- [ ] **CORS origins (Security → CORS Origin), per environment.** An EMPTY list
+  is not enforced, so the first origin you add switches enforcement on and
+  everything unlisted breaks at once — including the machine you're working on.
+  Format is scheme + host + port, no trailing slash, no path.
+
+  | Environment | Origins |
+  |---|---|
+  | **Live** | `https://openchess.ai` — and deliberately nothing else |
+  | **Sandbox** (local + previews) | `http://localhost:3000` (note `http`, and the port is part of the origin) and the Vercel preview pattern, e.g. `https://*.vercel.app` |
+
+  Keep the preview wildcard **out of the live environment**. The environment id
+  ships in the client bundle and is public by design, so `https://*.vercel.app`
+  on live would let any vercel.app deployment authenticate against it and burn
+  the MAU quota. On sandbox that costs nothing.
+
+  `www.openchess.ai` does not resolve, so the apex is the only production origin.
+  Two local gotchas: `.claude/launch.json` sets `autoPort: true`, so a busy port
+  3000 silently moves the dev server to 3001 and Dynamic then rejects it (check
+  the URL bar first when local sign-in breaks for no reason) — and the server's
+  `SIWE_DOMAIN` below has to track the same host:port.
 - [ ] Set `WEB_ORIGIN` (server CORS) and ensure the browser origin host equals the
   server's `SIWE_DOMAIN`, and `SIWE_CHAIN_ID` matches your chain (8453 Base).
 - [ ] Set `NEXT_PUBLIC_SERVER_HTTP` / `NEXT_PUBLIC_SERVER_WS` to your deployed
@@ -199,7 +225,8 @@ then point the web app at it.
 3. Add Environment Variables (Project Settings → Environment Variables):
    - `NEXT_PUBLIC_SERVER_HTTP` = `https://<your-game-server-host>`
    - `NEXT_PUBLIC_SERVER_WS`   = `wss://<your-game-server-host>`
-   - `NEXT_PUBLIC_WC_PROJECT_ID` = your WalletConnect Cloud project id
+   - `NEXT_PUBLIC_DYNAMIC_ENV_ID` = your Dynamic environment id (sandbox for
+     preview deployments, live for production)
 4. Deploy. The engine under `public/engines/sf18-lite-single-*/` is served as
    static assets, so the in-browser engine works with no extra config
    (single-threaded build, no COOP/COEP).
@@ -277,7 +304,7 @@ but do the contract audit + oracle-key hardening + legal review first.)
 | `ADMIN_WALLET` | no | who may toggle maintenance/drain mode; defaults to the onchain escrow `owner()`, so only set to override (e.g. local dev without a chain) |
 
 **Web** (`apps/web`): `NEXT_PUBLIC_SERVER_HTTP`, `NEXT_PUBLIC_SERVER_WS`,
-`NEXT_PUBLIC_WC_PROJECT_ID`.
+`NEXT_PUBLIC_DYNAMIC_ENV_ID`.
 
 **Deploy** (`script/Deploy.s.sol`): `TOKEN` (defaults to Base USDC), `ORACLE`,
 `FEE_RECIPIENT`, `FEE_BPS`, `SETTLE_TIMEOUT`.
