@@ -154,15 +154,25 @@ pays. A prize table computed a second way in the UI will drift.
 
 ---
 
-## Part 2 — sponsorship (contract v2) — **CONTRACT WRITTEN, NOT DEPLOYED**
+## Part 2 — sponsorship (contract v2) — **BUILT, NOT DEPLOYED**
 
-The contract half is implemented and tested in
-[ChessEscrow.sol](contracts/src/ChessEscrow.sol): buy-in may be zero,
+Contract ([ChessEscrow.sol](contracts/src/ChessEscrow.sol)): zero buy-in,
 `sponsorTournament`, `refundSponsorship`, the `claimRefund` zero-buy-in guard,
-and a solvency invariant that now actually covers pools. **Nothing is deployed**
-— see the warning at the top of [DEPLOYMENTS.md](DEPLOYMENTS.md). Still to do:
-the server side (`ledger` sponsorship reads, free-entry entry-skip, the
-three-kind tournament model), the web sponsor flow, and the audit + migration.
+and a solvency invariant that now actually covers pools.
+
+Server ([matchmaking.rs](crates/server/src/matchmaking.rs)): the three-kind
+model on `buy_in` (`None` / `Some("0")` / `Some(n)`), free entry skipping
+`enterTournament`, `tournament_ladder` keyed on the entrant's risk rather than
+on the pool's existence, `pool_refresh_task` polling the pool sponsorship makes
+underivable, and a guard against starting an unfunded free event.
+
+Web: `kindOf` + a shared `Terms` component so a free event doesn't render as
+"0 USDC entry, Ranked", and no refund button where the contract refuses one.
+
+**Nothing is deployed** — see the warning at the top of
+[DEPLOYMENTS.md](DEPLOYMENTS.md). Remaining: the sponsor flow in the web app (a
+"fund this pool" button calling `sponsorTournament`, like `deposit`), Part 3,
+and the audit + bankroll migration.
 
 ### Contract changes
 
