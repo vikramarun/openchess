@@ -38,7 +38,18 @@ cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
 - chessground's CSS is **vendored** in `apps/web/app/chessground.base.css` (its
   npm `exports` map makes the published assets unimportable). Re-vendor on a
   bump; the command is in that file's header. Don't re-add the old jsDelivr
-  `<link>`s, since `style-src` no longer allows that origin.
+  `<link>`s, since `style-src` no longer allows that origin. Overrides belong in
+  `app/board.css`, never in the vendored file — a re-vendor replaces it
+  wholesale and silently drops the edit (that is where the coords'
+  `font-family` override lives, since chessground hardcodes `sans-serif`).
+- The UI font is **Noto Sans, self-hosted by `next/font`** (`app/layout.tsx`
+  defines `--font-sans`; `globals.css` is the only place that applies it).
+  next/font fetches it at build time and serves it from our own origin, so
+  `font-src 'self'` needs no new entry — don't replace it with a `<link>` to
+  Google Fonts. Note what the fallback means: `globals.css` *named* Noto Sans
+  from the start but nothing ever loaded it, so every visitor quietly got
+  SF Pro or Segoe UI instead. If `--font-sans` stops resolving, that is the
+  silent failure you are back to.
 - Deploy the server with **`./scripts/deploy-server.sh`**, never a bare
   `fly deploy` (it re-adds Fly's HA machine, which breaks this single-node app).
 
