@@ -128,6 +128,7 @@ export function GameReplay({ detail }: { detail: GameDetail }) {
       <PlayerBar
         color={side}
         name={seatName(w ? detail.white : detail.black)}
+        engine={(w ? detail.white_engine : detail.black_engine) ?? undefined}
         clockMs={w ? clock.white_ms : clock.black_ms}
         captured={w ? mat.whiteCaptured : mat.blackCaptured}
         edge={w ? mat.advantage : -mat.advantage}

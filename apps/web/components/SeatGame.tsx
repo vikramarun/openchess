@@ -13,6 +13,7 @@ import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/b
 import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
+import { acquirePlayerEngine, fallbackEngine, releasePlayerEngine } from "@/lib/playerEngine";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
@@ -69,6 +70,7 @@ export function SeatGame({
   const nav = usePlyNav(frames.length - 1);
   const view = frames[nav.at];
   const [opponent, setOpponent] = useState<Opponent | null>(null);
+  const [engineSwapped, setEngineSwapped] = useState(false);
   const [status, setStatus] = useState("loading engine…");
   const [settleStatus, setSettleStatus] = useState<string | null>(null);
   // The seat's `ready` frame, parked until the player answers the prompt. The
@@ -104,15 +106,25 @@ export function SeatGame({
     let cancelled = false;
     const cancelledFn = () => cancelled;
     let engine: BrowserEngine | null = null;
+    let released = true;
     let spectator: { close: () => void } | null = null;
     let seat: { close: () => void } | null = null;
     let finished = false;
 
     const run = async () => {
       setEvalByPly({}); // a new game starts from an empty eval history
-      engine = new BrowserEngine();
-      await engine.whenReady();
-      if (cancelled) return;
+      // Normally already warm: the lobby prewarms before it stakes anything,
+      // precisely so a 7 MB download can't fail with money escrowed.
+      engine = await acquirePlayerEngine();
+      // Release here rather than relying on the cleanup below: if the effect
+      // was torn down DURING the await, cleanup has already run and saw
+      // `released` still true, so nothing would ever give this reference back
+      // and the engine would stay pinned for the life of the tab.
+      if (cancelled) {
+        releasePlayerEngine();
+        return;
+      }
+      released = false;
       // Warm the uploaded book so it's ready before the first move.
       await ensureBookLoaded();
 
@@ -148,6 +160,11 @@ export function SeatGame({
               if (m.opponent) setOpponent(m.opponent);
             }
           },
+          // A dead worker must not forfeit a stake — play on with a fresh one.
+          onEngineFallback: async () => {
+            setEngineSwapped(true);
+            return fallbackEngine();
+          },
           // Our seat's search, reused. The score is from the side to move's
           // perspective (UCI), and the side to move at ply N is white when N is
           // even — so the flip to white-relative needs no board lookup.
@@ -179,7 +196,12 @@ export function SeatGame({
       cancelled = true;
       spectator?.close();
       seat?.close();
-      engine?.dispose();
+      // Release rather than dispose: the seat engine is shared and stays warm
+      // for a minute, so the next game doesn't re-download 7 MB.
+      if (!released) {
+        released = true;
+        releasePlayerEngine();
+      }
     };
   }, [gameId, token, applyFrame, confirmStakes]);
 
@@ -391,6 +413,12 @@ export function SeatGame({
           <div className="muted" style={{ marginTop: 8 }}>
             Status: {status}
           </div>
+          {engineSwapped && (
+            <div className="muted" style={{ marginTop: 6, fontSize: 13, color: "var(--danger)" }}>
+              Your engine stopped responding — this game is being played by a fresh Stockfish 18.
+              Your settings still apply from the next game.
+            </div>
+          )}
           {/* No `failed` here on purpose: if the observer engine won't load, the
               seat's own search still feeds the bar, so there is nothing for the
               player to act on. */}

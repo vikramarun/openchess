@@ -8,8 +8,14 @@
 // npm package (v18.0.x) — see public/ENGINE.md. Single-threaded avoids the
 // SharedArrayBuffer/COOP+COEP headers a multi-threaded build would require.
 
-/** Worker script served from public/; the sibling .wasm is located next to it. */
-const ENGINE_URL = "/stockfish-18-lite-single.js";
+/** Worker script; the glue locates the sibling .wasm next to it.
+ *
+ *  The directory carries a content hash so the 7 MB binary can be served
+ *  `immutable` (next.config.mjs). Next serves public/ with
+ *  `max-age=0, must-revalidate` by default, which meant a round trip for the
+ *  engine on every cold page. Re-hash the directory when the binary changes —
+ *  that is the whole point of the name. */
+const ENGINE_URL = "/engines/sf18-lite-single-a8fbc05e/stockfish-18-lite-single.js";
 /** Transposition-table size (MB). Modest fixed default — bigger helps slightly
  *  at longer time controls; two engines run at once on the self-play page. */
 const HASH_MB = 64;
@@ -30,27 +36,58 @@ export type EngineInfo = {
   pv: string[];
 };
 
-/** Parse a UCI `info` line into a score. Returns null for the lines that carry
- *  no usable score — currmove/nps chatter, and fail-high/low bounds, which are
- *  provisional and would make an eval bar jump around mid-search. */
-export function parseInfoLine(line: string): EngineInfo | null {
+/** Everything a UCI `info` line can carry, unfiltered. */
+export type InfoLine = {
+  /** 1 when the token is absent, which is how a MultiPV-1 search reports. */
+  multipv: number;
+  cp: number | null;
+  mate: number | null;
+  depth: number;
+  pv: string[];
+  /** Fail-high/low marker. These are inequalities (`v >= beta`), not values. */
+  bound: "lower" | "upper" | null;
+  /** Win/draw/loss permille, when UCI_ShowWDL is on. */
+  wdl: [number, number, number] | null;
+};
+
+/** Parse an `info` line with no filtering. Returns null only for lines that
+ *  carry no score at all — currmove/nps chatter, `bestmove`, non-info lines. */
+export function parseUciInfo(line: string): InfoLine | null {
   if (!line.startsWith("info ")) return null;
-  if (line.includes(" lowerbound") || line.includes(" upperbound")) return null;
   const t = line.split(/\s+/);
   let depth = 0;
+  let multipv = 1;
   let cp: number | null = null;
   let mate: number | null = null;
   let pv: string[] = [];
+  let bound: "lower" | "upper" | null = null;
+  let wdl: [number, number, number] | null = null;
   for (let i = 1; i < t.length; i++) {
     switch (t[i]) {
       case "depth":
         depth = Number(t[++i]) || 0;
         break;
-      case "multipv":
-        // MultiPV is pinned to 1 in the handshake; ignore anything else so a
-        // future multi-line search can't feed a side line to the bar.
-        if (Number(t[++i]) !== 1) return null;
+      case "multipv": {
+        const v = Number(t[++i]);
+        multipv = Number.isFinite(v) ? v : 1;
         break;
+      }
+      case "lowerbound":
+        bound = "lower";
+        break;
+      case "upperbound":
+        bound = "upper";
+        break;
+      case "wdl": {
+        const w = Number(t[i + 1]);
+        const d = Number(t[i + 2]);
+        const l = Number(t[i + 3]);
+        if ([w, d, l].every(Number.isFinite)) {
+          wdl = [w, d, l];
+          i += 3;
+        }
+        break;
+      }
       case "score":
         if (t[i + 1] === "cp") {
           const v = Number(t[i + 2]);
@@ -73,7 +110,21 @@ export function parseInfoLine(line: string): EngineInfo | null {
     }
   }
   if (cp === null && mate === null) return null;
-  return { cp, mate, depth, pv };
+  return { multipv, cp, mate, depth, pv, bound, wdl };
+}
+
+/** The eval bar's score, or null.
+ *
+ *  A filter over `parseUciInfo` rather than its own tokenizer, so the two can't
+ *  drift. The two rejections it adds are load-bearing and pinned by
+ *  scripts/eval.test.ts: side PVs (a MultiPV search must never feed a side line
+ *  to the bar) and fail-high/low bounds (provisional, and they would make the
+ *  bar jump around mid-search). The returned object's KEY ORDER is also pinned
+ *  there — that test compares with JSON.stringify. */
+export function parseInfoLine(line: string): EngineInfo | null {
+  const i = parseUciInfo(line);
+  if (!i || i.multipv !== 1 || i.bound !== null) return null;
+  return { cp: i.cp, mate: i.mate, depth: i.depth, pv: i.pv };
 }
 
 export class BrowserEngine {
@@ -244,6 +295,28 @@ export class BrowserEngine {
    *  search must not leave it running. */
   stopSearch() {
     this.send("stop");
+  }
+
+  /** Best move (UCI) for a caller-built `go` command — the seam the time policy
+   *  drives (lib/timePolicy.ts builds the command, this runs it).
+   *
+   *  `hardStopMs` stops a search that does not self-terminate. `go nodes N` is
+   *  the case that needs it: hardware-independent by design, which also means a
+   *  slow device would happily search past its flag. */
+  async bestMoveWithPlan(
+    movesUci: string[],
+    plan: { cmd: string; hardStopMs?: number },
+    onInfo?: (info: EngineInfo) => void,
+  ): Promise<string> {
+    if (plan.hardStopMs === undefined || plan.hardStopMs <= 0) {
+      return this.go(movesUci, plan.cmd, onInfo);
+    }
+    const wall = setTimeout(() => this.stopSearch(), plan.hardStopMs);
+    try {
+      return await this.go(movesUci, plan.cmd, onInfo);
+    } finally {
+      clearTimeout(wall);
+    }
   }
 
   /** Best move (UCI) for the given move history under a fixed think time. */

@@ -54,6 +54,12 @@ class StubEngine {
   async bestMoveWithClock(history: string[]) {
     return this.next(history);
   }
+  /** The seat now builds its own `go` command from the configured time policy
+   *  (lib/timePolicy.ts) and hands it over, so this is the method the move loop
+   *  actually calls. `bestMove` stays because retryAfterResync still uses it. */
+  async bestMoveWithPlan(history: string[]) {
+    return this.next(history);
+  }
   async bestMove(history: string[]) {
     return this.next(history);
   }

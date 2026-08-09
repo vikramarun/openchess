@@ -78,10 +78,23 @@ const securityHeaders = [
   },
 ];
 
+// The engine is 7 MB and the books ~1 MB, and Next serves public/ with
+// `max-age=0, must-revalidate` — so every cold page paid a round trip for
+// each of them. Both are safe to freeze because both are addressed by a
+// changing name: the engine directory carries a content hash
+// (lib/engine.ts), and book requests carry a version query (lib/books.ts).
+// Change the content without changing the name and clients keep the old copy
+// for a year, so do not.
+const immutable = [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }];
+
 const nextConfig = {
   reactStrictMode: true,
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    return [
+      { source: "/:path*", headers: securityHeaders },
+      { source: "/engines/:path*", headers: immutable },
+      { source: "/books/:path*", headers: immutable },
+    ];
   },
   webpack: (config) => {
     // wagmi / RainbowKit / WalletConnect pull in optional Node-only deps
