@@ -279,6 +279,23 @@ fn coin_flip() -> bool {
     rand::random()
 }
 
+/// Order a pair into the `[white, black]` layout every seat-indexed array uses,
+/// given whether `a` won the coin.
+///
+/// Everything about a pairing is carried in parallel — seat metadata, delivery,
+/// launch tokens, the colour each client is told, and the wallets the wager is
+/// built from — and ALL of it has to flip together. Hand-writing the swap at
+/// each site is how one of them ends up inverted, which does not fail loudly:
+/// it seats a player on the wrong side, or opens escrow against the wrong two
+/// wallets. So the flip lives here, once, and every site calls it.
+fn seats<T>(a_is_white: bool, a: T, b: T) -> [T; 2] {
+    if a_is_white {
+        [a, b]
+    } else {
+        [b, a]
+    }
+}
+
 // --------------------------------------------------------------------------
 // Park / Patzer
 // --------------------------------------------------------------------------
@@ -614,11 +631,7 @@ async fn park_accept(
             unclaim();
             return Err(StatusCode::BAD_REQUEST); // no self-play wagers
         }
-        let (white, black) = if poster_white {
-            (&poster, &acceptor)
-        } else {
-            (&acceptor, &poster)
-        };
+        let [white, black] = seats(poster_white, &poster, &acceptor);
         match build_wager(white, black, stake) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -691,12 +704,8 @@ async fn park_accept(
     // start_game creates the room, locks escrow, and DISPATCHES bot seats —
     // and aborts the game (escrow refunded) if an agent vanished, returning
     // Err. On any Err the claims are released and the offer reopens.
-    // Both arrays are indexed [white, black], so the coin orders them.
-    let (meta, delivery) = if poster_white {
-        ([poster_meta, acceptor_meta], [poster_delivery, acceptor_delivery])
-    } else {
-        ([acceptor_meta, poster_meta], [acceptor_delivery, poster_delivery])
-    };
+    let meta = seats(poster_white, poster_meta, acceptor_meta);
+    let delivery = seats(poster_white, poster_delivery, acceptor_delivery);
     let resp = match state.start_game(tc, "park", wager, meta, delivery).await {
         Ok(r) => r,
         Err(e) => {
@@ -706,18 +715,12 @@ async fn park_accept(
         }
     };
 
-    // Unpack the [white, black] response back into poster/acceptor terms.
-    let (poster_idx, acceptor_idx) = if poster_white { (0, 1) } else { (1, 0) };
-    let (poster_token, acceptor_token) = if poster_white {
-        (resp.white_token, resp.black_token)
-    } else {
-        (resp.black_token, resp.white_token)
-    };
-    let (poster_color, acceptor_color) = if poster_white {
-        ("white", "black")
-    } else {
-        ("black", "white")
-    };
+    // Unpack the [white, black] response back into poster/acceptor terms. Same
+    // helper, read in reverse: `seats` is its own inverse, so the unpacking
+    // cannot drift from the packing above.
+    let [poster_idx, acceptor_idx] = seats(poster_white, 0, 1);
+    let [poster_token, acceptor_token] = seats(poster_white, resp.white_token, resp.black_token);
+    let [poster_color, acceptor_color] = seats(poster_white, "white", "black");
 
     if let Some(offer) = state.0.lobby.park.lock().get_mut(&id) {
         offer.status = "matched".into();
@@ -1043,11 +1046,7 @@ async fn queue_join(
         if opp_wallet.eq_ignore_ascii_case(&my_wallet) {
             return Err(requeue_opp_then_fail(StatusCode::BAD_REQUEST));
         }
-        let (white, black) = if opp_white {
-            (&opp_wallet, &my_wallet)
-        } else {
-            (&my_wallet, &opp_wallet)
-        };
+        let [white, black] = seats(opp_white, &opp_wallet, &my_wallet);
         match build_wager(white, black, &stake) {
             Ok(w) => Some(w),
             Err(e) => return Err(requeue_opp_then_fail(e)),
@@ -1094,12 +1093,8 @@ async fn queue_join(
     // start_game creates the room, locks escrow, and DISPATCHES bot seats — and
     // aborts (escrow refunded) if an agent vanished, returning Err. On any Err
     // the claims are released and both players are put back.
-    // Both arrays are indexed [white, black], so the coin orders them.
-    let (meta, delivery) = if opp_white {
-        ([opp_meta, my_meta], [opp_delivery, my_delivery])
-    } else {
-        ([my_meta, opp_meta], [my_delivery, opp_delivery])
-    };
+    let meta = seats(opp_white, opp_meta, my_meta);
+    let delivery = seats(opp_white, opp_delivery, my_delivery);
     let resp = match state.start_game(tc, "gauntlet", wager, meta, delivery).await {
         Ok(r) => r,
         Err(e) => {
@@ -1111,11 +1106,7 @@ async fn queue_join(
     // Attribute the game's result to any gauntlet sessions involved. The colour
     // here is what the session's seat actually plays — standings are scored
     // against it, so a stale constant would credit the wrong side's result.
-    let (opp_color, my_color) = if opp_white {
-        (Color::White, Color::Black)
-    } else {
-        (Color::Black, Color::White)
-    };
+    let [opp_color, my_color] = seats(opp_white, Color::White, Color::Black);
     let mut links = Vec::new();
     if let Some(sid) = opp_session {
         links.push((sid, opp_color));
@@ -1129,23 +1120,20 @@ async fn queue_join(
 
     // Mark both tickets matched. A bot-held seat's token stays server-side (the
     // agent has it); the browser spectates.
-    let (opp_token, my_token) = if opp_white {
-        (resp.white_token, resp.black_token)
-    } else {
-        (resp.black_token, resp.white_token)
-    };
+    let [opp_token, my_token] = seats(opp_white, resp.white_token, resp.black_token);
+    let [opp_side, my_side] = seats(opp_white, "white", "black");
     let mut tickets = state.0.lobby.tickets.lock();
     if let Some(t) = tickets.get_mut(&opp_id) {
         t.status = "matched".into();
         t.game_id = Some(resp.game_id);
         t.token = (!opp_bot).then_some(opp_token);
-        t.color = Some(if opp_white { "white" } else { "black" }.into());
+        t.color = Some(opp_side.into());
     }
     if let Some(t) = tickets.get_mut(&my_id) {
         t.status = "matched".into();
         t.game_id = Some(resp.game_id);
         t.token = (!bot).then_some(my_token);
-        t.color = Some(if opp_white { "black" } else { "white" }.into());
+        t.color = Some(my_side.into());
     }
     drop(tickets);
 
@@ -2838,6 +2826,45 @@ mod tests {
         // Both agents are now busy (claimed + bound to the game).
         assert!(state.0.agents.claim(wa).is_err(), "A busy");
         assert!(state.0.agents.claim(wb).is_err(), "B busy");
+    }
+
+    #[test]
+    fn the_coin_orders_the_wager_too() {
+        // The colour↔token invariant is covered end-to-end below, but only for
+        // CASUAL games: a staked `start_game` needs a DB, so the handler tests
+        // can't reach `build_wager`. That call is the one place a wrong flip
+        // costs money rather than a flipped board — it opens escrow, and the
+        // oracle signs the EIP-712 result against exactly these two addresses.
+        // So pin the ordering at the seam both handlers share.
+        let poster = "0xaa00000000000000000000000000000000000001";
+        let acceptor = "0xbb00000000000000000000000000000000000002";
+
+        let [white, black] = seats(true, poster, acceptor);
+        let w = build_wager(white, black, "1000000").expect("wager");
+        assert_eq!(w.white, poster.parse::<Address>().unwrap());
+        assert_eq!(w.black, acceptor.parse::<Address>().unwrap());
+
+        // The losing side of the coin: escrow must follow, not stay put.
+        let [white, black] = seats(false, poster, acceptor);
+        let w = build_wager(white, black, "1000000").expect("wager");
+        assert_eq!(
+            w.white,
+            acceptor.parse::<Address>().unwrap(),
+            "escrow must be keyed on the seat actually played"
+        );
+        assert_eq!(w.black, poster.parse::<Address>().unwrap());
+    }
+
+    #[test]
+    fn seats_is_its_own_inverse() {
+        // Packing into [white, black] and unpacking back to (a, b) both go
+        // through `seats`, so this is what makes a drift between them
+        // impossible rather than merely unlikely.
+        for coin in [true, false] {
+            let packed = seats(coin, "a", "b");
+            let [a, b] = seats(coin, packed[0], packed[1]);
+            assert_eq!((a, b), ("a", "b"), "round trip at coin={coin}");
+        }
     }
 
     /// A header map carrying a distinct client IP, so each iteration of the

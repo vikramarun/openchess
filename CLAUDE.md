@@ -228,8 +228,14 @@ wallet.
   against the wrong seats. And the colour a client is TOLD
   (`ParkAcceptResp.color`, `park_get`'s `poster_color`, the queue ticket) must
   be the seat its launch token drives, or the board opens on the opponent's
-  side; `park_colour_is_a_coin_and_matches_the_launch_tokens` pins that, and
-  the web clients now error instead of defaulting to a side.
+  side; `park_colour_is_a_coin_and_matches_the_launch_tokens` pins that. But a
+  client that can't read a colour must still TAKE the seat (`lib/offers.ts
+  seatColor`): by then escrow is locked, and a seat that never attaches reaps
+  as a forfeit that hands the opponent the whole stake, where a board shown the
+  wrong way round is only a reload — `playSeat` drives off the token and the
+  server's frames, never the colour. Every parallel flip (metadata, delivery,
+  tokens, colours, wager wallets) goes through one `seats()` helper, because an
+  inverted swap at any single site fails silently.
 - **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a game
   is **rated (Elo) only if both sides made ≥1 move** (`ply >= 2`, guarded in
   `room.rs finish()`). Never ding rating for a game a player didn't play.

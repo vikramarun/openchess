@@ -14,7 +14,13 @@ import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc, profitForStake } from "@/lib/escrow";
-import { acceptFromGroup, groupOffers, joinErrorMessage, type OfferGroup } from "@/lib/offers";
+import {
+  acceptFromGroup,
+  groupOffers,
+  joinErrorMessage,
+  seatColor,
+  type OfferGroup,
+} from "@/lib/offers";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -144,20 +150,12 @@ export function Lobby() {
             setErr("Your sign-in expired while you were waiting. Sign in again to start a new game.");
             return;
           }
-          // Colour is drawn per game now, so posting no longer implies White
-          // and there is no safe default to fall back on: opening the board on
-          // the wrong side would drive the opponent's seat. The server always
-          // sends it alongside the token, so a missing one is a bug, not a
-          // colour — say so rather than guess.
-          if (j.color !== "white" && j.color !== "black") {
-            setPending(null);
-            setErr("The server didn’t say which side you drew. Reload and check your games.");
-            return;
-          }
           setActive({
             gameId: j.game_id,
             token: j.token,
-            color: j.color as "white" | "black",
+            // Posting no longer implies White — read the drawn side off the
+            // wire. Never refuse the seat over it; see `seatColor`.
+            color: seatColor(j.color),
             stake: pending.stakeBase,
             opponent: j.opponent ?? null,
             initialSecs: pending.initialSecs,
@@ -291,14 +289,11 @@ export function Lobby() {
         router.push(`/game/${j.game_id}`);
         return;
       }
-      // Same as the poster's path above: no default side is safe now.
-      if (j.color !== "white" && j.color !== "black") {
-        return setErr("The server didn’t say which side you drew. Reload and check your games.");
-      }
       setActive({
         gameId: j.game_id,
         token: j.token,
-        color: j.color as "white" | "black",
+        // Accepting no longer implies Black, same as the poster's path above.
+        color: seatColor(j.color),
         stake: o.stake,
         opponent: j.opponent ?? { name: seatLabel(o.poster_name, o.poster_addr, "casual") },
         initialSecs: o.initial_secs,
