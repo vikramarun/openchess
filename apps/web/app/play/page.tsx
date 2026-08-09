@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Chessboard } from "@/components/Chessboard";
 import { MoveList, MoveNav } from "@/components/MoveNav";
@@ -35,8 +35,19 @@ export default function PlayPage() {
     setTc(tcByLabel(q ?? DEFAULT_TC.label));
   }, []);
 
-  const pickTc = (next: TimeControl) => {
+  // Clearing the board is only half of starting over: usePlyNav remembers the
+  // ply you were viewing, and THIS page is not remounted between games (the
+  // gauntlet and tournament views key SeatGame by game id, so they are). Without
+  // re-attaching to the tip, scrubbing back in one game leaves the next one
+  // pinned at that move — it plays on while you watch move 5.
+  const followTip = nav.last;
+  const startOver = useCallback(() => {
     reset();
+    followTip();
+  }, [reset, followTip]);
+
+  const pickTc = (next: TimeControl) => {
+    startOver();
     setTc(next);
     setNonce((n) => n + 1); // restart even if the same control is re-picked
   };
@@ -50,7 +61,7 @@ export default function PlayPage() {
     const seats: { close: () => void }[] = [];
 
     const run = async () => {
-      reset();
+      startOver();
 
       const white = new BrowserEngine();
       const black = new BrowserEngine();
