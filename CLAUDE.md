@@ -281,6 +281,16 @@ wallet.
   keeps serving the old one. `lib/avatar.ts` centre-crops and re-encodes to a
   256px JPEG before upload (`pnpm test:avatar`), which is what keeps every limit
   above invisible in normal use.
+- **Every localStorage key lives in `apps/web/lib/storage.ts`.** Four keys
+  predate the `openchess.*` convention (`chess_token`, `chess_addr`,
+  `bot_uci_options`, `browser_bot_config`); `readMigrated` adopts a legacy
+  value on first read and deletes the old name. Do NOT drop that fallback until
+  well past the point where returning visitors could still hold the old pair —
+  removing it silently signs out every signed-in user, which is precisely the
+  failure `authedFetch` exists to prevent (`pnpm test:auth` pins both the
+  adoption and that a current value beats a stale legacy leftover). A test
+  harness stubbing `window` must put `localStorage` on it, not only on
+  `globalThis`: storage.ts reads `window.localStorage` to stay SSR-safe.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match
