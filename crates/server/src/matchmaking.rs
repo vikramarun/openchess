@@ -28,8 +28,8 @@ use ledger::{merkle_proof, tournament_leaf, Address, U256};
 use crate::agents::AgentUnavailable;
 use crate::ratelimit::client_ip;
 use crate::{
-    build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, SeatDelivery,
-    SeatMeta, MAX_STAKE,
+    build_wager, sanitize_label, short_addr, validate_tc, AppState, GameOutcome, Ladder,
+    SeatDelivery, SeatMeta, MAX_STAKE,
 };
 
 /// Fields larger than this settle via a Merkle root (winners claim individually)
@@ -551,7 +551,12 @@ async fn park_accept(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let acceptor_bot = is_bot_seat(&req.seat);
-    let acceptor_wallet = state.authed_wallet(&headers);
+    // Strict, like posting an offer: a stale bearer must 401 rather than seat a
+    // signed-in player anonymously. Anonymity here doesn't just lose the game
+    // from their history — it also fails the same-wallet check below open, so a
+    // poster could accept their own offer. Read before the offer is claimed, so
+    // a rejected join doesn't consume it.
+    let acceptor_wallet = state.authed_wallet_strict(&headers)?;
 
     // Claim the offer (open -> matching), capturing its terms.
     let claim = {
@@ -566,6 +571,9 @@ async fn park_accept(
             SeatMeta {
                 name: offer.poster_name.clone(),
                 engine: offer.poster_engine.clone(),
+                // Casual offers may be anonymous; when the poster signed in,
+                // this is what puts the finished game in their history.
+                wallet: offer.poster_addr.clone(),
             },
             offer.poster_seat_bot,
             offer.poster_uci_options.clone(),
@@ -699,6 +707,7 @@ async fn park_accept(
             .as_deref()
             .and_then(sanitize_label)
             .or_else(|| acceptor_agent_meta.as_ref().map(|m| m.engine.clone())),
+        wallet: acceptor_wallet.clone(),
     };
 
     // start_game creates the room, locks escrow, and DISPATCHES bot seats —
@@ -706,7 +715,11 @@ async fn park_accept(
     // Err. On any Err the claims are released and the offer reopens.
     let meta = seats(poster_white, poster_meta, acceptor_meta);
     let delivery = seats(poster_white, poster_delivery, acceptor_delivery);
-    let resp = match state.start_game(tc, "park", wager, meta, delivery).await {
+    // A staked offer is ranked via its wager; a free one is casual.
+    let resp = match state
+        .start_game(tc, "park", wager, Ladder::Casual, meta, delivery)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             release(&claimed);
@@ -863,20 +876,19 @@ async fn queue_join(
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     let bot = is_bot_seat(&req.seat);
     // Wagered tiers AND bot seats require auth; the seat (and the agent it
-    // dispatches to) is always the authed wallet's. Casual browser seats need none.
-    let addr = if req.stake.is_some() || bot {
-        Some(
-            state
-                .authed_wallet(&headers)
-                .ok_or(StatusCode::UNAUTHORIZED)?,
-        )
-    } else {
-        None
+    // dispatches to) is always the authed wallet's. A casual browser seat plays
+    // fine without one — but take it when it's offered, since a seat with no
+    // recorded wallet is a game that never reaches the player's history.
+    let addr = match state.authed_wallet_strict(&headers)? {
+        Some(w) => Some(w),
+        None if req.stake.is_some() || bot => return Err(StatusCode::UNAUTHORIZED),
+        None => None,
     };
 
     let mut my_meta = SeatMeta {
         name: req.name.as_deref().and_then(sanitize_label),
         engine: req.engine.as_deref().and_then(sanitize_label),
+        wallet: addr.clone(),
     };
     if bot {
         // The bot must be online to queue as it; default its identity from the
@@ -1095,7 +1107,11 @@ async fn queue_join(
     // the claims are released and both players are put back.
     let meta = seats(opp_white, opp_meta, my_meta);
     let delivery = seats(opp_white, opp_delivery, my_delivery);
-    let resp = match state.start_game(tc, "gauntlet", wager, meta, delivery).await {
+    // Staked tiers are ranked via their wager.
+    let resp = match state
+        .start_game(tc, "gauntlet", wager, Ladder::Casual, meta, delivery)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             release(&claimed);
@@ -2174,14 +2190,25 @@ async fn dispatch_from_current(state: &AppState, tid: Uuid) {
 /// `round_remaining` to (and returns) the number of real games created.
 async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize {
     // Snapshot pairings + tc + bot entrants (never hold the lock across .await).
-    let (pairings, tc, bots, engines) = {
+    // The buy-in comes along as a bool: a paid tournament's games are ranked
+    // even though no pairing carries a stake of its own (the pool settles
+    // separately), and this is the only place that knows it. The amount is
+    // irrelevant here, so don't clone the string every round.
+    let (pairings, tc, bots, engines, ladder) = {
         let ts = state.0.lobby.tournaments.lock();
         let Some(t) = ts.get(&tid) else { return 0 };
         let pairings = t.rounds.get(round_idx).cloned().unwrap_or_default();
         let Ok(tc) = validate_tc(t.initial_secs, t.increment_secs) else {
             return 0;
         };
-        (pairings, tc, t.entrant_bots.clone(), t.entrant_engines.clone())
+        let ladder = tournament_ladder(t.buy_in.as_deref());
+        (
+            pairings,
+            tc,
+            t.entrant_bots.clone(),
+            t.entrant_engines.clone(),
+            ladder,
+        )
     };
 
     let seat_meta = |p: &str| SeatMeta {
@@ -2193,6 +2220,12 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
         // A bot entrant's engine comes from its agent registration; a browser
         // entrant declares its own at join time.
         engine: engines.get(p).cloned(),
+        // A browser entrant IS its wallet; a bot entrant is a registered name,
+        // so its games belong to the wallet that registered the agent.
+        wallet: match bots.get(p) {
+            Some(be) => Some(be.wallet.clone()),
+            None => (p.starts_with("0x") && p.len() == 42).then(|| p.to_string()),
+        },
     };
     // Build a seat delivery for an entrant; `Err(())` = its bot is unavailable.
     // A claimed wallet is pushed onto `claimed` for rollback.
@@ -2223,7 +2256,8 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> usize 
                     .start_game(
                         tc,
                         "tournament",
-                        None,
+                        None, // the buy-in is a pool, never a per-game wager
+                        ladder,
                         [seat_meta(&white), seat_meta(&black)],
                         [wd, bd],
                     )
@@ -2353,6 +2387,21 @@ async fn settle_tournament(state: &AppState, tid: Uuid) {
 /// those rows already were; entrants recover via the contract's `claimRefund`.
 fn is_rehydratable(buy_in: Option<&str>, organizer: Option<&str>) -> bool {
     buy_in.is_none() || organizer.is_some()
+}
+
+/// Which ladder a tournament's pairings count for.
+///
+/// The entry fee is the only money in a tournament — no pairing carries a
+/// wager of its own — so this is the one place rankedness can't be inferred
+/// from the game. `buy_in` is persisted (migration 0005) and restored by
+/// `recover_tournaments`, so a tournament that survives a restart keeps
+/// dispatching ranked games rather than quietly coming back casual.
+fn tournament_ladder(buy_in: Option<&str>) -> Ladder {
+    if buy_in.is_some() {
+        Ladder::Ranked
+    } else {
+        Ladder::Casual
+    }
 }
 
 /// Recover tournaments after a restart.
@@ -3185,6 +3234,96 @@ mod tests {
         assert_eq!(tr.seat.as_deref(), Some("browser"));
     }
 
+    /// Two signed-in players, no stake anywhere: both wallets must reach the
+    /// game. They are what `create_game` writes to `games.white_wallet` /
+    /// `black_wallet`, and a game with neither is a game that never appears in
+    /// either player's history, record or rating. The live snapshot is the only
+    /// place to observe it without a DB, and it is written from the same array.
+    #[tokio::test]
+    async fn a_casual_park_game_keeps_both_players_wallets() {
+        let (state, _c, _r) = test_state();
+        let poster = "0xaa11111111111111111111111111111111111111";
+        let acceptor = "0xbb22222222222222222222222222222222222222";
+        let pt = state.0.auth.mint_session(poster);
+        let at = state.0.auth.mint_session(acceptor);
+
+        let offer = park_create(
+            State(state.clone()),
+            bearer(&pt),
+            Json(ParkCreateReq {
+                stake: None, // <- casual
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("offer posted")
+        .0;
+
+        let joined = park_accept(
+            State(state.clone()),
+            Path(offer.offer_id),
+            bearer(&at),
+            None,
+        )
+        .await
+        .expect("offer accepted")
+        .0;
+
+        let live = state.0.live_games.lock();
+        let g = live.get(&joined.game_id).expect("game exists");
+        // Which of them got White is a coin flip (`seats`), so assert on the
+        // pair rather than on the seats — what matters here is that BOTH
+        // wallets reached the game, not who moves first.
+        let mut got = [g.white.as_deref(), g.black.as_deref()];
+        got.sort();
+        assert_eq!(got, [Some(poster), Some(acceptor)], "both wallets are seated");
+        assert_eq!(g.stake, None, "and none of this needed a stake");
+    }
+
+    /// The other half of the same invariant: a stale bearer must not quietly
+    /// seat a signed-in player as a stranger.
+    #[tokio::test]
+    async fn a_dead_session_is_rejected_rather_than_seated_anonymously() {
+        let (state, _c, _r) = test_state();
+        let pt = state.0.auth.mint_session("0xaa11111111111111111111111111111111111111");
+        let offer = park_create(
+            State(state.clone()),
+            bearer(&pt),
+            Json(ParkCreateReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("offer posted")
+        .0;
+
+        let err = park_accept(
+            State(state.clone()),
+            Path(offer.offer_id),
+            bearer("not-a-live-session"),
+            None,
+        )
+        .await
+        .err();
+        assert_eq!(err, Some(StatusCode::UNAUTHORIZED));
+        // ...and the rejected join must not have consumed the offer.
+        assert_eq!(
+            state.0.lobby.park.lock().get(&offer.offer_id).map(|o| o.status.clone()),
+            Some("open".to_string())
+        );
+    }
+
     #[test]
     fn round_robin_covers_every_pair_exactly_once() {
         for n in 2..=9 {
@@ -3809,6 +3948,19 @@ mod tests {
         assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "organized buy-in row is kept");
         assert!(is_rehydratable(None, None), "a casual row needs no organizer — anyone may start it");
         assert!(is_rehydratable(None, Some("0xabc")));
+    }
+
+    #[test]
+    fn a_rehydrated_buy_in_tournament_still_dispatches_ranked_games() {
+        // The entry fee is the only money in a tournament, so it is the only
+        // thing that can make its pairings ranked — and it has to survive a
+        // restart to do it. `buy_in` is persisted and `recover_tournaments`
+        // copies it back, so a rehydrated paid tournament keeps dispatching
+        // ranked games instead of quietly coming back casual for its whole
+        // remaining schedule.
+        assert!(is_rehydratable(Some("1000000"), Some("0xabc")), "it comes back at all");
+        assert_eq!(tournament_ladder(Some("1000000")), Ladder::Ranked);
+        assert_eq!(tournament_ladder(None), Ladder::Casual, "a free tournament is casual");
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { SeatGame } from "@/components/SeatGame";
+import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
@@ -88,13 +89,13 @@ function GauntletClient() {
     (async () => {
       try {
         setSearching(true);
-        const r = await fetch(`${SERVER_HTTP}/queue`, {
+        // Always send the session when we have one. A stake or a bot seat
+        // REQUIRES it (both are wallet-bound), and a casual seat still wants
+        // it: the wallet the server records is what puts the finished game in
+        // this player's history and moves their rating.
+        const r = await authedFetch(`${SERVER_HTTP}/queue`, {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            // A bot seat is always wallet-bound, so it needs auth even casually.
-            ...((wantStake || botPlays) && token ? { authorization: `Bearer ${token}` } : {}),
-          },
+          headers: { "content-type": "application/json" },
           body: JSON.stringify({
             stake: wantStake ? parseUsdc(stake).toString() : undefined,
             initial_secs: tc.initial,
@@ -120,7 +121,12 @@ function GauntletClient() {
               ? BOT_OFFLINE_MSG
               : r.status === 503
                 ? MAINTENANCE_MSG
-                : `Couldn’t join the queue (${r.status}).`,
+                : // authedFetch has already dropped the dead session, so the
+                  // retry below goes out clean (anonymous casual, or asking for
+                  // the sign-in a staked/bot gauntlet needs).
+                  r.status === 401
+                  ? SESSION_EXPIRED
+                  : `Couldn’t join the queue (${r.status}).`,
           );
           setSearching(false);
           // Don't give up — retry shortly (the bot may reconnect, the server may

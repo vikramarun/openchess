@@ -565,11 +565,13 @@ impl Room {
             Some(game) => (game.pgn(), game.ply()),
             None => (String::new(), 0),
         };
-        // A game is only rated if it was actually contested — both sides must
-        // have made at least one move (ply >= 2). A player who never moves (a
-        // no-show, or an engine that connects then hangs and flags) still LOSES
-        // the game/stake, but their Elo is untouched. Applies to every mode.
-        let rated = ply >= 2;
+        // A rating only moves if the game was actually contested — both sides
+        // must have made at least one move (ply >= 2). A player who never moves
+        // (a no-show, or an engine that connects then hangs and flags) still
+        // LOSES the game/stake, but their Elo is untouched. Applies to every
+        // mode. Note this decides WHETHER a rating moves; `games.rated` (set at
+        // creation) decides WHICH ladder it moves.
+        let contested = ply >= 2;
         // Cryptographic commitment to the full game (move log via PGN).
         let result_hash = sha256_hex(&pgn);
         // Oracle-sign it now (before persisting) so the signature is stored with
@@ -603,9 +605,10 @@ impl Room {
                 {
                     tracing::error!(game_id = %self.game_id, "finish_and_enqueue failed: {e:#}");
                 }
-                // Update Elo for contested games with two known wallets (no-op
-                // otherwise). Skipped when a player never moved (see `rated`).
-                if rated {
+                // Move Elo for contested games with two known wallets (no-op
+                // otherwise); the row's own `rated` flag picks the ladder.
+                // Skipped when a player never moved (see `contested`).
+                if contested {
                     let _ = db.update_ratings(self.game_id).await;
                 }
             }

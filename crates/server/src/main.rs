@@ -84,12 +84,51 @@ pub struct Inner {
     pub results_tx: mpsc::Sender<GameOutcome>,
 }
 
-/// Self-declared identity for one seat: a display name and the engine the
-/// player claims to run. Informational only — never used for auth or money.
+/// Identity for one seat. `name`/`engine` are self-declared — informational
+/// only, never used for auth or money. `wallet` is not: it is the
+/// SIWE-authenticated wallet the seat was handed to, and it is what makes the
+/// finished game show up in that player's history, record and rating.
 #[derive(Clone, Default)]
 pub struct SeatMeta {
     pub name: Option<String>,
     pub engine: Option<String>,
+    /// The authenticated wallet sitting in this seat, when there is one
+    /// (anonymous casual seats have none). For a bot seat this is its owner's
+    /// wallet — the same wallet the agent registry is keyed on.
+    pub wallet: Option<String>,
+}
+
+/// Which ladder a game counts for.
+///
+/// Money is the only thing that makes a game ranked, and a per-game stake says
+/// so on its own — so this exists for the one case where the money sits
+/// upstream of the game: a tournament that charged a buy-in, whose pairings
+/// carry no stake of their own (the pool settles separately).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Ladder {
+    /// Free play. Moves the separate casual Elo, never the ranked one.
+    #[default]
+    Casual,
+    Ranked,
+}
+
+/// Resolve the wallet recorded for each seat, `[white, black]`.
+///
+/// A wagered seat takes its wallet from the escrow addresses: money is the
+/// authoritative binding, and those are the addresses settlement will pay.
+/// Everything else falls back to the authenticated wallet that took the seat.
+/// The fallback is the whole point — a casual game used to record no wallet at
+/// all, so a played game was invisible to `/players/{addr}/games`, to the
+/// win/loss record, and to the casual ladder.
+pub fn seat_wallets(wager: Option<WagerSeats>, meta: &[SeatMeta; 2]) -> [Option<String>; 2] {
+    [
+        wager
+            .map(|w| w.white.to_string())
+            .or_else(|| meta[0].wallet.clone()),
+        wager
+            .map(|w| w.black.to_string())
+            .or_else(|| meta[1].wallet.clone()),
+    ]
 }
 
 /// Clean a client-supplied display label: strip control characters, collapse
@@ -521,7 +560,8 @@ struct ConfigInfo {
 pub struct LiveGame {
     pub game_id: GameId,
     pub mode: String,
-    /// Wallets for a wagered game; `None` for casual/engine-vs-engine games.
+    /// Each seat's wallet — the escrow addresses when wagered, else whoever
+    /// signed in for the seat. `None` for anonymous engine-vs-engine games.
     pub white: Option<String>,
     pub black: Option<String>,
     /// Self-declared display names + engines (informational, sanitized).
@@ -530,6 +570,9 @@ pub struct LiveGame {
     pub white_engine: Option<String>,
     pub black_engine: Option<String>,
     pub stake: Option<String>,
+    /// Which ladder it counts for. Free-but-ranked happens (a buy-in
+    /// tournament), so a viewer keyed on `stake` alone would mislabel it.
+    pub rated: bool,
     pub initial_secs: u64,
     pub increment_secs: u64,
     pub created_ms: u64,
@@ -872,6 +915,7 @@ async fn create_game(
             tc,
             "casual",
             None,
+            Ladder::Casual,
             Default::default(),
             [SeatDelivery::Browser, SeatDelivery::Browser],
         )
@@ -924,6 +968,7 @@ impl AppState {
         tc: TimeControl,
         mode: &str,
         wager: Option<WagerSeats>,
+        ladder: Ladder,              // ranked only when money is upstream (buy-in)
         meta: [SeatMeta; 2],         // [white, black] self-declared identity
         delivery: [SeatDelivery; 2], // [white, black] seat delivery
     ) -> Result<CreateGameResp, StatusCode> {
@@ -960,6 +1005,13 @@ impl AppState {
             }
         }
 
+        // Who owns each seat, wagered or not — see `seat_wallets`.
+        let wallets = seat_wallets(wager, &meta);
+        // Which ladder it counts for. OR-ing with the wager is the fail-safe
+        // direction: a caller can forget to ask for Ranked, but a game with a
+        // stake on it can never be recorded casual by that omission.
+        let rated = wager.is_some() || ladder == Ladder::Ranked;
+
         // Persist the game row. For a wagered game this must succeed (fail-closed).
         if let Some(db) = &self.0.db {
             let pwager = wager.map(|w| PgWager {
@@ -967,16 +1019,13 @@ impl AppState {
                 black_addr: w.black.to_string(),
                 stake: Decimal::from(w.stake.to::<u128>()),
             });
-            let (ww, bw) = match &pwager {
-                Some(w) => (Some(w.white_addr.as_str()), Some(w.black_addr.as_str())),
-                None => (None, None),
-            };
             if let Err(e) = db
                 .create_game(
                     game_id,
                     mode,
-                    ww,
-                    bw,
+                    rated,
+                    wallets[0].as_deref(),
+                    wallets[1].as_deref(),
                     PgTc {
                         initial_ms: tc.initial_ms as i64,
                         increment_ms: tc.increment_ms as i64,
@@ -1011,18 +1060,18 @@ impl AppState {
         }
 
         // Resolve each seat's display identity: declared name, else shortened
-        // wallet (wagered games), else "anonymous".
-        let seat_info = |m: &SeatMeta, wallet: Option<String>| protocol::OpponentInfo {
+        // wallet, else "anonymous".
+        let seat_info = |m: &SeatMeta, wallet: Option<&String>| protocol::OpponentInfo {
             name: m
                 .name
                 .clone()
-                .or_else(|| wallet.map(|w| short_addr(&w)))
+                .or_else(|| wallet.map(|w| short_addr(w)))
                 .unwrap_or_else(|| "anonymous".into()),
             declared_engine: m.engine.clone(),
         };
         let players = [
-            seat_info(&meta[0], wager.map(|w| w.white.to_string())),
-            seat_info(&meta[1], wager.map(|w| w.black.to_string())),
+            seat_info(&meta[0], wallets[0].as_ref()),
+            seat_info(&meta[1], wallets[1].as_ref()),
         ];
 
         let handle = spawn_room(
@@ -1041,13 +1090,14 @@ impl AppState {
             LiveGame {
                 game_id,
                 mode: mode.to_string(),
-                white: wager.map(|w| w.white.to_string()),
-                black: wager.map(|w| w.black.to_string()),
+                white: wallets[0].clone(),
+                black: wallets[1].clone(),
                 white_name: meta[0].name.clone(),
                 black_name: meta[1].name.clone(),
                 white_engine: meta[0].engine.clone(),
                 black_engine: meta[1].engine.clone(),
                 stake: wager.map(|w| w.stake.to_string()),
+                rated,
                 initial_secs: tc.initial_ms / 1000,
                 increment_secs: tc.increment_ms / 1000,
                 created_ms: std::time::SystemTime::now()
@@ -1337,6 +1387,152 @@ mod tests {
         }))
     }
 
+    /// `test_state` with a real Postgres behind it, so a test can look at the
+    /// row `start_game` actually wrote. The settlement sink is a parameter
+    /// because a wagered game is refused outright unless one is onchain.
+    fn test_state_with_db(
+        db: Arc<persistence::Db>,
+        settlement: Arc<dyn ledger::SettlementSink>,
+    ) -> AppState {
+        let (cleanup_tx, _cleanup_rx) = mpsc::channel::<GameId>(8);
+        let (results_tx, _results_rx) = mpsc::channel::<GameOutcome>(8);
+        AppState(Arc::new(Inner {
+            rooms: Mutex::new(HashMap::new()),
+            live_games: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            settlement,
+            db: Some(db),
+            maintenance: AtomicBool::new(false),
+            admin_wallet: Mutex::new(None),
+            lobby: Lobby::default(),
+            auth: auth::Auth::default(),
+            agents: agents::Agents::default(),
+            limits: ratelimit::RateLimits::from_env(),
+            cleanup_tx,
+            results_tx,
+        }))
+    }
+
+    /// The join the two halves either side of this can't see: the seat wallets
+    /// have to reach the `games` row, because that row is the only thing
+    /// `/players/{addr}/games`, the W/L/D record and Elo ever read.
+    /// Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_casual_game_persists_its_seat_wallets() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
+        db.migrate().await.expect("migrate");
+        let state = test_state_with_db(db.clone(), Arc::new(ledger::LogSettlement));
+
+        let white = "0xaa11111111111111111111111111111111111111";
+        let black = "0xbb22222222222222222222222222222222222222";
+        let seat = |w: &str| SeatMeta {
+            wallet: Some(w.into()),
+            ..Default::default()
+        };
+        let resp = state
+            .start_game(
+                TC,
+                "park",
+                None, // no stake: the case that used to record nobody
+                Ladder::Casual,
+                [seat(white), seat(black)],
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("casual game starts");
+
+        let row = db
+            .game_detail(resp.game_id)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(row.white_wallet.as_deref(), Some(white));
+        assert_eq!(row.black_wallet.as_deref(), Some(black));
+        assert_eq!(row.stake, None, "wallets recorded without a wager");
+        assert!(!row.rated, "and it's a free game, so it's on the casual ladder");
+    }
+
+    /// A staked game is ranked whatever the caller asked for. The `Ladder`
+    /// argument can only ever ADD rankedness — forgetting to pass `Ranked`
+    /// must not be able to file a game with money on it under casual.
+    /// Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_staked_game_is_ranked_even_when_the_caller_says_casual() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
+        db.migrate().await.expect("migrate");
+        let state = test_state_with_db(db.clone(), Arc::new(OnchainStub));
+
+        let wager = WagerSeats {
+            white: "0x00000000000000000000000000000000000000a1"
+                .parse()
+                .unwrap(),
+            black: "0x00000000000000000000000000000000000000b2"
+                .parse()
+                .unwrap(),
+            stake: U256::from(1_000_000u64),
+        };
+        let resp = state
+            .start_game(
+                TC,
+                "park",
+                Some(wager),
+                Ladder::Casual, // deliberately wrong
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("staked game starts");
+
+        let row = db
+            .game_detail(resp.game_id)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert!(row.rated, "money on the game makes it ranked regardless");
+    }
+
+    /// The other direction: money upstream of the game (a tournament buy-in)
+    /// makes it ranked even though no stake is attached to the pairing.
+    /// Runs only when DATABASE_URL is set (local Postgres).
+    #[tokio::test]
+    async fn a_buy_in_tournament_pairing_is_ranked_without_a_wager() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let db = Arc::new(persistence::Db::connect(&url).await.expect("connect"));
+        db.migrate().await.expect("migrate");
+        let state = test_state_with_db(db.clone(), Arc::new(ledger::LogSettlement));
+
+        let resp = state
+            .start_game(
+                TC,
+                "tournament",
+                None, // the buy-in is a pool, not a per-game wager
+                Ladder::Ranked,
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("tournament game starts");
+
+        let row = db
+            .game_detail(resp.game_id)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert!(row.rated);
+        assert_eq!(row.stake, None, "ranked with nothing staked on the game");
+    }
+
     fn bearer(token: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert("authorization", format!("Bearer {token}").parse().unwrap());
@@ -1440,6 +1636,7 @@ mod tests {
                 TC,
                 "casual",
                 None,
+                Ladder::Casual,
                 Default::default(),
                 [SeatDelivery::Browser, SeatDelivery::Browser],
             )
@@ -1456,12 +1653,106 @@ mod tests {
                 TC,
                 "casual",
                 None,
+                Ladder::Casual,
                 Default::default(),
                 [SeatDelivery::Browser, SeatDelivery::Browser],
             )
             .await
             .expect("casual game should start when not paused");
         assert!(!resp.white_token.is_empty());
+    }
+
+    /// The whole point of the seat wallet: an unstaked game between two
+    /// signed-in players is still THEIR game. Recording no wallet is what kept
+    /// it out of `/players/{addr}/games`, out of the W/L/D record, and out of
+    /// Elo — every one of which reads `games.white_wallet`/`black_wallet`.
+    #[test]
+    fn a_casual_seat_keeps_the_wallet_that_took_it() {
+        let meta = [
+            SeatMeta {
+                wallet: Some("0xAAa0000000000000000000000000000000000001".into()),
+                ..Default::default()
+            },
+            SeatMeta {
+                wallet: Some("0xBbB0000000000000000000000000000000000002".into()),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            seat_wallets(None, &meta),
+            [
+                Some("0xAAa0000000000000000000000000000000000001".to_string()),
+                Some("0xBbB0000000000000000000000000000000000002".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_anonymous_seat_records_no_wallet() {
+        // Negative control: engine-vs-engine on /play authenticates nothing, and
+        // must not be attributed to anyone.
+        assert_eq!(seat_wallets(None, &Default::default()), [None, None]);
+    }
+
+    #[test]
+    fn a_wagered_seat_takes_the_escrow_address_over_the_declared_one() {
+        // Money is the authoritative binding: settlement pays the escrow
+        // addresses, so history has to name the same wallets even if a seat's
+        // metadata says otherwise.
+        let white: Address = "0x00000000000000000000000000000000000000a1"
+            .parse()
+            .unwrap();
+        let black: Address = "0x00000000000000000000000000000000000000b2"
+            .parse()
+            .unwrap();
+        let meta = [
+            SeatMeta {
+                wallet: Some("0x00000000000000000000000000000000000000ff".into()),
+                ..Default::default()
+            },
+            SeatMeta::default(),
+        ];
+        let wager = WagerSeats {
+            white,
+            black,
+            stake: U256::from(1u64),
+        };
+        assert_eq!(
+            seat_wallets(Some(wager), &meta),
+            [Some(white.to_string()), Some(black.to_string())]
+        );
+    }
+
+    /// End-to-end through `start_game`: the seat wallet reaches the live-game
+    /// snapshot (and the display identity) without a stake anywhere in sight.
+    #[tokio::test]
+    async fn a_casual_game_carries_its_seat_wallets_into_live_state() {
+        let state = test_state(false, None);
+        let addr = "0xAAa0000000000000000000000000000000000001";
+        let resp = state
+            .start_game(
+                TC,
+                "casual",
+                None,
+                Ladder::Casual,
+                [
+                    SeatMeta {
+                        wallet: Some(addr.into()),
+                        ..Default::default()
+                    },
+                    SeatMeta::default(),
+                ],
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("casual game should start");
+        let live = state.0.live_games.lock();
+        let g = live.get(&resp.game_id).expect("game is live");
+        assert_eq!(g.white.as_deref(), Some(addr));
+        assert_eq!(g.black, None);
+        // ...and an authed seat is no longer labelled "anonymous".
+        assert_eq!(resp.players[0].name, short_addr(addr));
+        assert_eq!(resp.players[1].name, "anonymous");
     }
 
     #[tokio::test]

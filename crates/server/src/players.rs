@@ -2,12 +2,12 @@
 //! behind the chess.com-style profile page).
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -67,8 +67,11 @@ struct GameDetailView {
     status: String,
     white: Option<String>,
     black: Option<String>,
-    /// Stake in USDC base units (string), None for casual games.
+    /// Stake in USDC base units (string), None for a free game.
     stake: Option<String>,
+    /// Which ladder it counted for — a buy-in tournament game is ranked with
+    /// no stake of its own, so this is not `stake.is_some()`.
+    rated: bool,
     result: Option<String>,
     reason: Option<String>,
     result_hash: Option<String>,
@@ -113,6 +116,7 @@ async fn game_detail(
         white: g.white_wallet,
         black: g.black_wallet,
         stake: g.stake.map(|d| d.to_string()),
+        rated: g.rated,
         result: g.result,
         reason: g.result_reason,
         result_hash: g.result_hash,
@@ -229,20 +233,57 @@ async fn leaderboard(
     Ok(Json(entries))
 }
 
+/// One ladder's record. Also the shape of the flat fields on `Profile`, which
+/// carry the two ladders combined.
 #[derive(Serialize)]
-struct Profile {
-    address: String,
-    rating: i64,
+struct StatBucket {
     games: i64,
     wins: i64,
     losses: i64,
     draws: i64,
     /// Net winnings in USDC base units (6dp), signed; string to avoid float loss.
+    /// Structurally always "0" for casual — free games stake nothing.
+    net: String,
+}
+
+impl From<persistence::PlayerStatsRow> for StatBucket {
+    fn from(s: persistence::PlayerStatsRow) -> Self {
+        Self {
+            games: s.games,
+            wins: s.wins,
+            losses: s.losses,
+            draws: s.draws,
+            net: s.net.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Profile {
+    address: String,
+    /// Ranked Elo: staked games and buy-in tournaments only. Note this predates
+    /// the split, so a wallet that played free games before it carries their
+    /// movement here — nothing recorded the per-game deltas, so it can't be
+    /// unwound.
+    rating: i64,
+    /// Casual Elo: every free game. A separate ladder, never mixed in, and
+    /// deliberately absent from the leaderboard.
+    casual_rating: i64,
+    /// Both ladders combined, flattened. Predates the split and keeps its
+    /// meaning, so a client that knows nothing about `casual`/`ranked` below
+    /// still renders exactly what it used to.
+    games: i64,
+    wins: i64,
+    losses: i64,
+    draws: i64,
     net: String,
     /// When this wallet's profile photo last changed (RFC 3339), or null when it
     /// has none. Doubles as the presence flag and as the cache-busting version
     /// the client appends to the image URL — the bytes are never inlined here.
     avatar_updated_at: Option<String>,
+    /// The same record split by ladder. Their sum is the flat fields above.
+    casual: StatBucket,
+    ranked: StatBucket,
 }
 
 async fn profile(
@@ -254,19 +295,23 @@ async fn profile(
         .player_stats(&address)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let (rating, avatar_at) = db
+    let card = db
         .player_card(&address)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let all: StatBucket = s.all.into();
     Ok(Json(Profile {
         address: address.to_lowercase(),
-        rating: rating.round() as i64,
-        games: s.games,
-        wins: s.wins,
-        losses: s.losses,
-        draws: s.draws,
-        net: s.net.to_string(),
-        avatar_updated_at: avatar_at.map(|t| t.to_rfc3339()),
+        rating: card.rating.round() as i64,
+        casual_rating: card.casual_rating.round() as i64,
+        games: all.games,
+        wins: all.wins,
+        losses: all.losses,
+        draws: all.draws,
+        net: all.net,
+        avatar_updated_at: card.avatar_updated_at.map(|t| t.to_rfc3339()),
+        casual: s.casual.into(),
+        ranked: s.ranked.into(),
     }))
 }
 
@@ -574,19 +619,55 @@ struct GameItem {
     black: Option<String>,
     result: Option<String>,
     reason: Option<String>,
-    /// Stake in USDC base units (string), null for casual.
+    /// Stake in USDC base units (string), null for a free game.
     stake: Option<String>,
+    /// Which ladder it counted for. Sent because the client cannot derive it:
+    /// a buy-in tournament game is ranked with a null stake, so a viewer that
+    /// keys on `stake` alone files it under casual.
+    rated: bool,
     moves: i64,
     finished_at: Option<String>,
+}
+
+/// Which ladder's games to return. An enum rather than a free string so an
+/// unrecognised value 400s in the extractor instead of silently widening to
+/// "everything".
+#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum GamesFilter {
+    #[default]
+    All,
+    Casual,
+    Ranked,
+}
+
+impl GamesFilter {
+    /// The `rated` predicate this filter maps to; `None` means "don't filter".
+    fn rated(self) -> Option<bool> {
+        match self {
+            GamesFilter::All => None,
+            GamesFilter::Casual => Some(false),
+            GamesFilter::Ranked => Some(true),
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct GamesQuery {
+    #[serde(default)]
+    filter: GamesFilter,
 }
 
 async fn games(
     State(state): State<AppState>,
     Path(address): Path<String>,
+    Query(q): Query<GamesQuery>,
 ) -> Result<Json<Vec<GameItem>>, StatusCode> {
     let db = state.0.db.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let rows = db
-        .player_games(&address, 50)
+        // The limit applies AFTER the filter, which is why this isn't done in
+        // the browser: 50 of one ladder, not one ladder's share of 50.
+        .player_games(&address, 50, q.filter.rated())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let items = rows
@@ -599,6 +680,7 @@ async fn games(
             result: r.result,
             reason: r.result_reason,
             stake: r.stake.map(|d| d.to_string()),
+            rated: r.rated,
             moves: r.moves,
             finished_at: r.finished_at.map(|t| t.to_rfc3339()),
         })

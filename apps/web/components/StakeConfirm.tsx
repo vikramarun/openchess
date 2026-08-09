@@ -113,13 +113,15 @@ export function StakeConfirm({
               stake, less a 1% fee. A draw returns yours.
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-              Rated. Locked in the escrow contract, settled onchain when the game ends.
+              Ranked. Locked in the escrow contract, settled onchain when the game ends.
             </div>
           </div>
         ) : (
           <div className="stake-callout confirm-stake">
             <div className="confirm-stake-amount">Free</div>
-            <div>Casual game. Nothing staked and your rating doesn’t move.</div>
+            <div>
+              Casual game. Nothing staked — this moves your casual Elo, not your ranked one.
+            </div>
           </div>
         )}
 

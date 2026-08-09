@@ -480,14 +480,20 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                       {o.stake ? (
                         <>
                           {fmtUsdc(o.stake)} USDC{" "}
-                          <span className="tag tag-rated" title="Rated: affects Elo">
-                            Rated
+                          <span
+                            className="tag tag-rated"
+                            title="Ranked: USDC staked, moves your ranked Elo"
+                          >
+                            Ranked
                           </span>
                         </>
                       ) : (
                         <>
                           Free{" "}
-                          <span className="tag" title="Casual: does not affect Elo">
+                          <span
+                            className="tag"
+                            title="Casual: moves your casual Elo, never your ranked one"
+                          >
                             Casual
                           </span>
                         </>
@@ -562,7 +568,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                     {g.stake ? (
                       <>
                         {fmtUsdc(g.stake)} USDC{" "}
-                        <span className="tag tag-rated">Rated</span>
+                        <span className="tag tag-rated">Ranked</span>
                       </>
                     ) : (
                       <>
@@ -620,7 +626,7 @@ export function Lobby({ onActiveChange }: { onActiveChange?: (active: boolean) =
                 Win <b>+{fmtUsdc(profitForStake(modalStakeBig))} USDC</b>. That’s your
                 opponent’s stake, less a 1% fee. A draw or a no-show returns yours.
                 <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
-                  Rated. Non-custodial, settled onchain by the escrow contract.
+                  Ranked. Non-custodial, settled onchain by the escrow contract.
                 </div>
               </div>
             )}

@@ -28,6 +28,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:gamemeta) # what a shared game link says (title + OG card text)
 (cd apps/web && pnpm test:avatar) # profile photo: the crop/shrink done before upload
 (cd apps/web && pnpm test:layout)  # header stays on screen, and under the modal
+(cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -280,9 +281,46 @@ wallet.
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match
   guard and the server's same-wallet rejection. `authed_wallet_strict` 401s a
-  present-but-invalid credential; keep it that way, and route new authed web
-  calls through `apps/web/lib/authedFetch.ts` so an expired session self-heals
-  instead of dead-ending.
+  present-but-invalid credential; keep it that way (park accept and the gauntlet
+  queue use it too), and route new authed web calls through
+  `apps/web/lib/authedFetch.ts` so an expired session self-heals instead of
+  dead-ending.
+- **A seat's wallet is the only thing that survives the game.**
+  `games.white_wallet`/`black_wallet` are what `/players/{addr}/games`, the
+  W/L/D record, net USDC and Elo all read — and they used to be written from the
+  *wager*, so an unstaked game recorded NULL seats and disappeared the moment it
+  finished. It failed perfectly silently: the game plays, settles, shows in the
+  lobby, then isn't in anyone's history. The seat wallet now rides on
+  `SeatMeta.wallet` and `seat_wallets`
+  (`main.rs`) picks the escrow address when there's a stake, else the
+  authenticated wallet — so **every mode that seats a signed-in player has to
+  fill it in** (park, queue, tournament do). Two riders. The client must *send*
+  the session on casual calls as well, not only staked ones, or the server has
+  no wallet to record. And `update_ratings` skips a game whose two seats are the
+  same wallet: nothing rejects one wallet on both casual seats the way escrow
+  does, and the two Elo writes apply in order, so the winner's would land last
+  and farm rating. Note this fix is not retroactive — games already played with
+  NULL seats can't be attributed, because nothing recorded who sat there.
+- **There are two ladders, and `games.rated` is which.** A game is RANKED when
+  money was on it — a per-game USDC stake, or a pairing in a tournament that
+  charged a buy-in — and CASUAL otherwise; the two move `users.rating` and
+  `users.casual_rating` independently and never mix. That is what makes the
+  lobby's long-standing promise ("a free game doesn't affect your Elo") true
+  again once casual games started being attributed at all. Three things to know.
+  **Ranked is not `stake IS NOT NULL`:** a tournament pairing carries no stake of
+  its own (the buy-in is a pool settled separately), so anything deriving the
+  ladder from the stake files every paid tournament under casual. The flag is
+  decided once at creation (`Ladder` → `start_game` → `create_game`, where it is
+  OR-ed with the wager so a staked game can't be recorded casual by omission) and
+  read back everywhere after, including by the client
+  (`lib/profileFilter.ts` `bucketOf`). **Two flags, two jobs:** `room.rs`'s
+  `contested` (`ply >= 2`) decides *whether* a rating moves; `games.rated`
+  decides *which*. **Casual is farmable and stays off the leaderboard** — free
+  games cost nothing, and the same-wallet guard only catches one wallet on both
+  seats, not two cooperating ones. Removing the payoff is the defence, so don't
+  put casual Elo on a public board, and never thread a seat wallet into the
+  unauthenticated `POST /games`: that would make a ladder writable with no SIWE
+  at all.
 
 ## Conventions
 - Money is `rust_decimal` / `U256`, never `f64`. USDC has 6 decimals.
@@ -319,7 +357,9 @@ wallet.
   server's frames, never the colour. Every parallel flip (metadata, delivery,
   tokens, colours, wager wallets) goes through one `seats()` helper, because an
   inverted swap at any single site fails silently.
-- **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a game
-  is **rated (Elo) only if both sides made ≥1 move** (`ply >= 2`, guarded in
-  `room.rs finish()`). Never ding rating for a game a player didn't play.
+- **Forfeit vs rating:** a no-show/forfeit loses the stake or entry, but a
+  rating moves **only if both sides made ≥1 move** (`ply >= 2`, the `contested`
+  guard in `room.rs finish()`). Never ding rating for a game a player didn't
+  play. Which of the two ratings moves is a separate question — see
+  `games.rated` above.
 - End commit messages with the `Co-Authored-By: Claude …` trailer.
