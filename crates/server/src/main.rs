@@ -595,7 +595,13 @@ pub struct LiveGame {
 /// List in-progress games so the lobby can offer them to spectate. Only games
 /// that have actually begun (both engines connected + ready) are listed — not
 /// idle rooms still waiting for connections.
-async fn live_games(State(state): State<AppState>) -> Json<Vec<LiveGame>> {
+async fn live_games(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<LiveGame>>, StatusCode> {
+    // The last of the 3s lobby polls to join the polls bucket: every hit
+    // clones + sorts the live-games map under two locks.
+    state.reject_if_rate_limited_polls(&headers)?;
     let started: std::collections::HashSet<GameId> = {
         let rooms = state.0.rooms.lock();
         rooms
@@ -614,7 +620,7 @@ async fn live_games(State(state): State<AppState>) -> Json<Vec<LiveGame>> {
         .collect();
     // Newest first.
     list.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
-    Json(list)
+    Ok(Json(list))
 }
 
 /// Publishes the onchain config the web app needs to wire deposits/wagers:
