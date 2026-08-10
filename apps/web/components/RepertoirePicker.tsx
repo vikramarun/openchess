@@ -4,17 +4,23 @@ import { useEffect, useState } from "react";
 
 import { BookTree } from "@/components/BookTree";
 import {
+  ALL_BOOKS,
   BOOKS,
   booksForSlot,
   loadRepertoire,
   PRESETS,
   selectedBookIds,
   SLOTS,
+  type BookSlot,
   type Repertoire,
 } from "@/lib/books";
 import type { BookEntry } from "@/lib/polyglot";
 
 const KB = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
+
+/** Transfer size of taking every book in a slot — what the "Everything" option
+ *  in that slot actually costs. */
+const slotBytes = (slot: BookSlot) => booksForSlot(slot).reduce((s, b) => s + b.bytes, 0);
 
 /** Pick what your bot opens with — as White, and as Black against each of the
  *  three replies that matter.
@@ -75,6 +81,10 @@ export function RepertoirePicker({
         <div className="muted" style={{ fontSize: 13, marginBottom: 6 }}>
           Start from a style
         </div>
+        {/* "No opening book" is one of these now rather than a button bolted on
+            the end — it is a choice about breadth like the others, not an
+            escape hatch, and it sat outside the active-state logic where it
+            could look selected at the same time as a style. */}
         <div className="rep-presets">
           {PRESETS.map((p) => (
             <button
@@ -87,14 +97,6 @@ export function RepertoirePicker({
               <span className="rp-blurb">{p.blurb}</span>
             </button>
           ))}
-          <button
-            className={`rep-preset${selectedBookIds(repertoire).length === 0 ? " active" : ""}`}
-            onClick={() => onChange({ white: null, vsE4: null, vsD4: null, vsOther: null })}
-            title="No book — the engine calculates from move one"
-          >
-            <span className="rp-name">No book</span>
-            <span className="rp-blurb">Engine from move one. Slower openings, zero theory.</span>
-          </button>
         </div>
       </div>
 
@@ -109,12 +111,18 @@ export function RepertoirePicker({
               value={repertoire[slot] ?? ""}
               onChange={(e) => onChange({ [slot]: e.target.value || null } as Partial<Repertoire>)}
             >
-              <option value="">— none —</option>
+              <option value={ALL_BOOKS}>
+                Everything ({KB(slotBytes(slot))})
+              </option>
               {booksForSlot(slot).map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.label} ({KB(b.bytes)})
                 </option>
               ))}
+              {/* Last, not first. It used to lead the list as "— none —", which
+                  made the emptiest option the one a reader met first and the
+                  one an unset select fell onto. */}
+              <option value="">No book here</option>
             </select>
           </label>
         ))}

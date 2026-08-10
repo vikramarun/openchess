@@ -705,7 +705,9 @@ pub struct LiveGame {
 
 /// List in-progress games so the lobby can offer them to spectate. Only games
 /// that have actually begun (both engines connected + ready) are listed — not
-/// idle rooms still waiting for connections.
+/// idle rooms still waiting for connections, and never a `TEST_MODE` game (see
+/// that constant: nobody is seated in one, so listing it is an invitation to
+/// watch a stranger's private sandbox).
 async fn live_games(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -726,7 +728,7 @@ async fn live_games(
         .live_games
         .lock()
         .values()
-        .filter(|g| started.contains(&g.game_id))
+        .filter(|g| started.contains(&g.game_id) && g.mode != TEST_MODE)
         .cloned()
         .collect();
     // Newest first.
@@ -1034,9 +1036,25 @@ pub struct CreateGameResp {
     pub players: [protocol::OpponentInfo; 2],
 }
 
-/// `/games` creates an **unwagered (casual)** game with two open seats. Wagered
-/// games go through the authenticated Park/Gauntlet matchmaking flows, where
-/// each seat is bound to the wallet that consented to stake it.
+/// The mode `/games` records, and the one mode `/games/live` hides.
+///
+/// This route has exactly one caller — the web app's Test Engine page — and what
+/// it makes is two in-browser Stockfish workers playing each other on the
+/// visitor's own CPU. Nobody is seated: it is unauthenticated, so both seat
+/// wallets are NULL and the game has always been absent from every player's
+/// history and from both Elo ladders. It appeared in the spectate lobby anyway,
+/// which advertised a private sandbox as a live table and let anyone fill "Live
+/// now" with games no player is in.
+///
+/// Named rather than left as `"casual"`, because that word now means the free
+/// half of a real ladder (`games.rated`) and a mode string reading "casual" is
+/// the wrong thing to filter a lobby on.
+pub const TEST_MODE: &str = "test";
+
+/// `/games` creates an **unwagered, unseated** test game with two open seats —
+/// the Test Engine sandbox. Real games go through the authenticated
+/// Park/Gauntlet/Tournament matchmaking flows, where each seat is bound to the
+/// wallet that consented to it.
 async fn create_game(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1049,7 +1067,7 @@ async fn create_game(
     let resp = state
         .start_game(
             tc,
-            "casual",
+            TEST_MODE,
             None,
             Ladder::Casual,
             Default::default(),
@@ -2045,6 +2063,71 @@ mod tests {
         // ...and an authed seat is no longer labelled "anonymous".
         assert_eq!(resp.players[0].name, short_addr(addr));
         assert_eq!(resp.players[1].name, "anonymous");
+    }
+
+    /// The Test Engine sandbox must not advertise itself in the spectate lobby.
+    ///
+    /// `/games` is unauthenticated and seats nobody, so its games already record
+    /// NULL wallets and never reach a history or an Elo — but they used to be
+    /// listed under "Live now" beside real staked tables, which both misreads
+    /// the room's activity and lets anyone fill it from a loop. The filter is on
+    /// the mode, so this pins BOTH halves: `/games` still records TEST_MODE, and
+    /// `live_games` still drops it.
+    #[tokio::test]
+    async fn a_test_engine_game_is_not_in_the_spectate_lobby() {
+        let state = test_state(false, None);
+        let test_game = create_game(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(CreateGameReq {
+                initial_secs: 60,
+                increment_secs: 0,
+            }),
+        )
+        .await
+        .expect("test game should start")
+        .0;
+        // A park game at the same clock, as the control: whatever hides one must
+        // not be hiding the other.
+        let park = state
+            .start_game(
+                TC,
+                "park",
+                None,
+                Ladder::Casual,
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("park game should start");
+
+        {
+            let live = state.0.live_games.lock();
+            assert_eq!(
+                live.get(&test_game.game_id).map(|g| g.mode.as_str()),
+                Some(TEST_MODE),
+                "/games must record the test mode, or the filter below matches nothing"
+            );
+            // Both rooms exist; the endpoint's own `started` gate is what keeps
+            // either of them out until two seats ready, so mark them started.
+            for h in state.0.rooms.lock().values() {
+                h.started.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        let listed = live_games(State(state.clone()), HeaderMap::new())
+            .await
+            .expect("lobby list")
+            .0;
+        let ids: Vec<_> = listed.iter().map(|g| g.game_id).collect();
+        assert!(
+            !ids.contains(&test_game.game_id),
+            "a Test Engine game reached the spectate lobby"
+        );
+        assert!(
+            ids.contains(&park.game_id),
+            "the filter took a real game with it"
+        );
     }
 
     #[tokio::test]

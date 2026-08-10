@@ -99,6 +99,36 @@ docs.
   `.github/workflows/ci.yml` runs all of them; releases in `release.yml`.
   Counts drift as tests land — trust `cargo test` / CI over this line.
 
+## Shipped 2026-08-09: the consumer-readiness pass
+
+Six changes to what a first-time visitor meets. Details and the invariants each
+one creates are in [CLAUDE.md](CLAUDE.md); this is the summary.
+
+- **You have to sign in to play.** The homepage Play card, `/lobby`, `/gauntlet`
+  and `/tournament` are behind `components/SignInGate.tsx`. **Test Engine
+  (`/play`) is the deliberate way in without an account** — two engines on your
+  own CPU, nobody seated. Still public: the marketing homepage, shared game
+  links (`/game/[id]`), profiles, terms, privacy.
+- **A Test Engine game no longer shows up in "Live now."** `POST /games` records
+  `TEST_MODE` and `/games/live` filters it out. It already recorded no seat
+  wallets, so it was never in a history or an Elo — the lobby was the last place
+  claiming otherwise. **Needs a server deploy.**
+- **A tournament entrant is a wallet, in every tournament.** The casual branch of
+  `tourney_join` used to take a display name from the request body — the same
+  impersonation hole `seat_info` closed for board seats. `JoinReq.player` is
+  gone, and the "Display name for casual tournaments" field with it. **Needs a
+  server deploy.**
+- **The header no longer overlaps.** The engine-status pill is off the chrome
+  (it reported the eval-bar worker, not anything the visitor was waiting on) and
+  lives on `/play`; the desktop-nav breakpoint moved 720px → 1100px, sized
+  against the widest signed-in actions row rather than the common one.
+- **The browser bot ships with the whole opening book.** Four slots default to
+  the new `ALL_BOOKS` sentinel (~1 MB, lazy); the six styles are narrowings of
+  it, and "No opening book" is now one of the choices rather than a button on
+  the end.
+- **The Polyglot `.bin` upload is gone.** `chess-client --book` covers it, with a
+  real engine behind it.
+
 ## Shipped 2026-08-09: the launch-eve sweep (PRs #29–#50)
 
 Nineteen PRs merged in one day, then a full-repo launch review. The short list,

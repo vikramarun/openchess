@@ -226,7 +226,7 @@ a:hover {
 .header-inner {
   display: flex;
   align-items: center;
-  gap: var(--s-8);
+  gap: var(--s-5);
   width: 100%;
   max-width: var(--content-w);
   margin: 0 auto;
@@ -249,12 +249,24 @@ a:hover {
   align-self: center;
   flex: none;
 }
+/* Three declarations, all load-bearing, because this row overlapped in
+   production and the fix has to hold for content nobody sized it against.
+   `flex: 0 1 auto` (never `flex: 1`): the links are `white-space: nowrap`, so a
+   nav told to GROW still cannot shrink below its content and simply ran under
+   .header-actions. `min-width: 0` lets it shrink past that content at all.
+   `overflow: hidden` is the backstop: the ≤1100px query below is supposed to
+   swap this for the tab bar long before it runs out of room, but the actions'
+   width is not a constant — it holds a bankroll figure and a username — so if
+   the estimate is ever wrong the nav clips itself instead of painting over the
+   Deposit and account controls. A clipped link is recoverable; a link drawn on
+   top of the money controls is not. */
 .nav {
   display: flex;
   align-items: center;
   gap: var(--s-1);
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
 }
 .nav a {
   color: var(--text);
@@ -274,23 +286,33 @@ a:hover {
   color: var(--text-strong);
   background: var(--accent-weak);
 }
+/* Pinned right and never compressed: the bankroll pill and the account chip are
+   the two controls a signed-in player reaches for, and a nav that squeezed them
+   would break the money path to keep a link visible. `margin-left: auto` holds
+   them right whether the nav is present, shrunk, or display:none. */
 .header-actions {
   display: flex;
   align-items: center;
   gap: 14px;
+  flex: none;
+  margin-left: auto;
 }
 
-/* engine status pill */
-.engine-pill {
+/* Engine readout on /play, where the header pill's contents moved to. */
+.engine-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin-top: 10px;
   padding: 5px 12px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--bg-2);
   border: 1px solid var(--border);
   font-size: 13px;
+  color: var(--text);
 }
+
+/* status dot — used by .engine-status. */
 .dot {
   width: 9px;
   height: 9px;
@@ -414,6 +436,15 @@ a:hover {
 }
 .account-chip:hover {
   border-color: var(--accent);
+}
+/* A username is up to 20 characters and the chip is the last thing in a fixed
+   row, so an un-capped label is a header that grows with whoever signed in.
+   Truncate rather than let it push the row. */
+.account-chip > span:not(.chip-av) {
+  max-width: 13ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chip-av {
   width: 22px;
@@ -846,6 +877,41 @@ a:hover {
   color: var(--accent);
   font-weight: 700;
 }
+/* ---------- sign-in gate ---------- */
+/* What a signed-out visitor gets on Play / Lobby / Gauntlet / Tournament
+   (components/SignInGate.tsx). Centred and narrow: it is the whole page, not a
+   notice on one, and a full-width paragraph at this font size runs past the
+   comfortable measure. */
+.gate {
+  max-width: 560px;
+  margin: var(--s-8) auto;
+  text-align: center;
+  padding: var(--s-8) var(--s-6);
+}
+.gate-title {
+  margin: 0;
+}
+.gate-lede {
+  margin: var(--s-3) auto 0;
+  max-width: 46ch;
+}
+.gate-cta {
+  margin-top: var(--s-5);
+  font-size: 15px;
+  padding: 11px 26px;
+}
+.gate-alt {
+  margin: var(--s-4) auto 0;
+  max-width: 46ch;
+  font-size: var(--t-sm);
+}
+/* Holds the gate's space while the session answer resolves, so the page does
+   not jump between "checking" and either outcome. No border or background —
+   a visible empty card reads as a failed load. */
+.gate-skeleton {
+  min-height: 260px;
+}
+
 /* Lobby messages. Were inline `color: "#e06c6c"` / `"#e0a96c"` at four sites. */
 .lobby-err {
   color: var(--danger);
@@ -2446,8 +2512,8 @@ select:focus-visible,
 /* ---------- mobile bottom tab bar ---------- */
 /* Everything except `display` lives here at column 0. scripts/layout.test.ts
    reads the first UNINDENTED rule for a selector, so the geometry has to be
-   visible to it — and keeping it in one place is better CSS anyway. The ≤720px
-   query below only switches it on.
+   visible to it — and keeping it in one place is better CSS anyway. The
+   ≤1000px query below only switches it on.
  *
  * z-index 30 is BELOW the header's 40, and that is deliberate rather than
  * sloppy. `.site-header` is position:sticky WITH a z-index, so it is a stacking
@@ -2527,8 +2593,24 @@ select:focus-visible,
   transform: scale(0.92);
 }
 
-/* ---------- responsive header + board (mobile) ---------- */
-@media (max-width: 720px) {
+/* ---------- responsive header + board (mobile / narrow) ---------- */
+/* 1100px, not the 720px this used to be. The desktop nav is six nowrap links
+   (~480px) in a row that also carries the wordmark, the bankroll pill and an
+   account chip, and between 721px and roughly 1000px the nav simply ran
+   underneath .header-actions — the overlap that shipped.
+   The margin over ~1000px is deliberate rather than timid: .header-actions is
+   not a fixed width. Measured at 1010px signed in, a 13-character username left
+   12px of slack — and a four-figure bankroll ("12,345.67 USDC") is 51px wider
+   than "0 USDC" and put the nav 39px INTO the actions. The breakpoint is set
+   against the widest actions row, not the common one.
+   `.nav { display: none }` and `.tabbar { display: grid }` are in ONE query on
+   purpose: split them and every width in the gap has no navigation at all. So a
+   small laptop / landscape tablet now gets the bottom bar, which is the same
+   five destinations minus Gauntlet (folded under Events, and still linked from
+   the /lobby mode cards).
+   scripts/layout.test.ts reads this query's literal text — keep the two rules
+   here, and keep the <body> clearance below inside it. */
+@media (max-width: 1100px) {
   /* The nav's links used to live here as a masked horizontal scroller, because
      a sticky header that wraps costs 167px of an 812px phone viewport
      permanently. It worked, but "Customize" still sat 77px off the right edge
@@ -2567,21 +2649,14 @@ select:focus-visible,
     overflow-y: auto;
   }
   .header-actions {
-    margin-left: auto;
     gap: 10px;
   }
-  /* 85px of status readout, in a 343px row that also has to hold the wordmark,
-     the wallet pill and Sign in — with the words in, the auth button is
-     squeezed to ~75px and "Sign in" wraps to two lines inside a 56px header.
-     The DOT stays: /game, /gauntlet and /tournament have no engine banner of
-     their own, so hiding the pill outright would leave a phone with no engine
-     status anywhere. `title` on the pill carries the words. */
-  .engine-pill-label {
-    display: none;
-  }
-  .engine-pill {
-    padding: 5px 8px;
-  }
+}
+
+/* The board's own breakpoint stays at 720px. It has nothing to do with the
+   header: the game view is a board plus a sidebar, and that pair still fits
+   side by side on a landscape tablet even though the nav no longer does. */
+@media (max-width: 720px) {
   .brand {
     font-size: 20px;
   }

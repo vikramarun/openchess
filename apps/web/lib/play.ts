@@ -3,13 +3,7 @@
 
 import { Chess } from "chessops/chess";
 
-import {
-  ensureBookLoaded,
-  ensureRepertoireLoaded,
-  getBrowserBotConfig,
-  probeRepertoire,
-  probeUserBook,
-} from "./browserBot";
+import { ensureRepertoireLoaded, getBrowserBotConfig, probeRepertoire } from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
@@ -75,26 +69,22 @@ async function retryAfterResync(
   }
 }
 
-/** A book move for `pos` — the user's uploaded Polyglot book first, then the
- *  built-in mainline set — returning the first LEGAL of the two, so a
- *  bad/illegal user-book entry falls through to the built-in book (and then to
- *  the engine) rather than suppressing it. Answers in standard UCI.
+/** A book move for `pos` — the chosen repertoire first, then the built-in
+ *  mainline set — returning the first LEGAL of the two, so a bad entry falls
+ *  through rather than suppressing the next source. Answers in standard UCI.
  *
  *  `history` must already be standard UCI: the built-in book is keyed by
  *  move-sequence PREFIX, so a history in the king-takes-rook notation would
- *  miss every entry from the castle onwards. */
+ *  miss every entry from the castle onwards.
+ *
+ *  There used to be a third source ahead of these, an arbitrary Polyglot `.bin`
+ *  the visitor uploaded, with a depth limit of its own. It is gone with the
+ *  upload control (see components/BrowserBotPanel.tsx); a downloaded
+ *  `chess-client` still takes `--book`, which is where an arbitrary book
+ *  belongs. */
 function legalBookMove(pos: Chess, history: string[]): string | null {
   const cfg = getBrowserBotConfig();
   const ply = history.length;
-
-  // Two books, two depth settings, each governed by the control next to it:
-  // `bookMaxPly` belongs to the uploaded .bin, `repertoire.maxPly` to the
-  // built-in repertoire (and to the broad fallback book, which is the same
-  // kind of thing). Sharing one of them here meant the repertoire picker's
-  // "leave book after ply" changed the preview and nothing else.
-  const user = probeUserBook(pos, ply, cfg.bookMaxPly);
-  const userStd = user ? toStandardUci(pos, user) : null;
-  if (userStd) return userStd;
 
   // The chosen repertoire. Normalized like everything else: a .bin stores
   // castling as king-takes-rook by spec, so decodeMove already converts it —
@@ -124,8 +114,7 @@ export function playSeat(
   // Reassignable: a dead engine is swapped for a replacement mid-game (below).
   let engine = engineIn;
   let onFallback = handlers.onEngineFallback ?? null;
-  // Warm both book caches; they resolve long before the first your_turn.
-  void ensureBookLoaded();
+  // Warm the repertoire; it resolves long before the first your_turn.
   void ensureRepertoireLoaded();
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);

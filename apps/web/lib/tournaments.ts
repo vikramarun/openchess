@@ -211,51 +211,35 @@ export async function fetchTournaments(): Promise<Tournament[]> {
   return rows.map(({ tournament_id, ...view }) => normalize(tournament_id, view));
 }
 
-/** Which entrant am I in this tournament?
+/** Entrant ids stored before an entrant id was always a wallet.
  *
- *  A buy-in tournament keys entrants by the authenticated wallet, so the
- *  connected address answers it. A casual one keys them by the display name the
- *  player chose, which lives only in the browser — so it is persisted here.
- *  Keeping it in React state (as this page used to) meant a reload turned an
- *  entrant into a stranger: no Start button, no games, no way back into an
- *  event they had already joined. */
+ *  A casual tournament used to key its entrants on a display name the joiner
+ *  typed, which existed nowhere but that browser — so it was persisted here,
+ *  because keeping it in React state meant a reload turned an entrant into a
+ *  stranger: no Start button, no games, no way back into an event they had
+ *  already joined.
+ *
+ *  Both kinds key on the authenticated wallet now (`tourney_join_inner`), so
+ *  this is READ-ONLY and nothing writes it. It exists to keep anyone already
+ *  seated in a name-keyed tournament from being locked out of it, and can go
+ *  once every such tournament has been started or swept — they do not outlive
+ *  their round. */
 const IDENTITY_KEY = KEYS.tournamentIdentity;
-
-type Identities = Record<string, string>;
-
-function readIdentities(): Identities {
-  try {
-    const raw = window.localStorage.getItem(IDENTITY_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? (parsed as Identities) : {};
-  } catch {
-    return {};
-  }
-}
 
 export function casualIdentity(tid: string): string | null {
   try {
-    return readIdentities()[tid] ?? null;
+    const raw = window.localStorage.getItem(IDENTITY_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return (parsed && typeof parsed === "object" ? (parsed as Record<string, string>)[tid] : null) ?? null;
   } catch {
     return null;
   }
 }
 
-/** Remember the entrant id the SERVER recorded (not the string we sent — it is
- *  sanitized and capped server-side, and a client that stored its own version
- *  would look up an entrant that doesn't exist). */
-export function rememberCasualIdentity(tid: string, player: string): void {
-  try {
-    window.localStorage.setItem(IDENTITY_KEY, JSON.stringify({ ...readIdentities(), [tid]: player }));
-  } catch {
-    /* private mode — identity just won't survive the reload */
-  }
-}
-
 /** What to call an entrant.
  *
- *  An entrant id is either a wallet (buy-in) or a chosen nickname (casual), and
- *  `labels` maps the ones whose seat has a claimed username. Falls back to a
+ *  An entrant id is a wallet (a legacy casual entry may still be a nickname),
+ *  and `labels` maps the ones whose seat has a claimed username. Falls back to a
  *  shortened address for a wallet and to the nickname itself otherwise — never
  *  to a raw 42-character id, which is what the standings printed before the
  *  server started resolving handles.

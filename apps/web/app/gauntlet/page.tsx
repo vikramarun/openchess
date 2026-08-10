@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { SeatGame } from "@/components/SeatGame";
+import { RequireSignIn } from "@/components/SignInGate";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { browserSeat } from "@/lib/browserBot";
 import { loadBotOptions, useBotStatus } from "@/lib/bot";
@@ -37,7 +38,14 @@ export default function GauntletPage() {
           balance once and every game settles against it onchain.
         </p>
       </div>
-      {mounted ? <GauntletClient /> : null}
+      {mounted ? (
+        <RequireSignIn
+          title="Sign in to run a gauntlet"
+          lede="A gauntlet queues your engine for game after game and settles them all against one locked balance. It is bound to your account from the first pairing."
+        >
+          <GauntletClient />
+        </RequireSignIn>
+      ) : null}
     </div>
   );
 }

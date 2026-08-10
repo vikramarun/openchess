@@ -3,15 +3,16 @@
 // selection, and the fact that a White book and a Black book can simply be
 // concatenated because Polyglot is keyed by position.
 //
-// The writer matters more than it looks: built-in repertoires and a user's
-// uploaded book share one probe path, so a bug here would silently mis-play
-// every built-in opening while the uploaded-book tests stayed green.
+// The writer matters more than it looks: it produces the files the whole
+// repertoire layer reads, and a bug here would silently mis-play every built-in
+// opening while the reader's spec-vector tests stayed green.
 import { readFileSync } from "node:fs";
 
 import { Chess } from "chessops/chess";
 import { parseUci } from "chessops/util";
 
 import {
+  ALL_BOOKS,
   BOOKS,
   DEFAULT_REPERTOIRE,
   PRESETS,
@@ -19,6 +20,7 @@ import {
   booksForSlot,
   concatBooks,
   normalizeRepertoire,
+  selectedBookIds,
 } from "../lib/books";
 import { bookChildren, bookMainline, positionAfter } from "../lib/bookTree";
 import { browserEngineLabel, DEFAULT_CONFIG, parseBrowserBotConfig } from "../lib/browserBot";
@@ -303,12 +305,41 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   check(
     "a valid selection survives",
     normalizeRepertoire({ white: "w-sharp", vsE4: "b-e4-sharp", maxPly: 10, pick: "best" }),
-    { white: "w-sharp", vsE4: "b-e4-sharp", vsD4: null, vsOther: null, maxPly: 10, pick: "best" },
+    { white: "w-sharp", vsE4: "b-e4-sharp", vsD4: ALL_BOOKS, vsOther: ALL_BOOKS, maxPly: 10, pick: "best" },
   );
+  // `null` is the ONE value that survives as itself, because it is the picker
+  // saying "no book in this slot" and that has to beat the default. If it fell
+  // back like every other unusable value, choosing "No opening book" would
+  // reset itself to the full book on the next read.
+  check(
+    "an explicit null stays off",
+    normalizeRepertoire({ white: null, vsE4: null, vsD4: null, vsOther: null }),
+    { white: null, vsE4: null, vsD4: null, vsOther: null, maxPly: d.maxPly, pick: d.pick },
+  );
+  check("every slot on ALL_BOOKS survives", normalizeRepertoire({ white: ALL_BOOKS }).white, ALL_BOOKS);
   // A book id in the wrong slot would fetch a real file but play the wrong
-  // color's moves, which is worse than playing no book at all.
-  check("a book in the wrong slot is rejected", normalizeRepertoire({ white: "b-e4-sharp" }).white, null);
-  check("an unknown id is rejected", normalizeRepertoire({ white: "w-nonsense" }).white, null);
+  // color's moves. What matters is that it never SURVIVES; falling back to the
+  // default is a better landing than switching the slot off, which is what it
+  // used to do.
+  check(
+    "a book in the wrong slot is rejected",
+    normalizeRepertoire({ white: "b-e4-sharp" }).white,
+    d.white,
+  );
+  check("an unknown id is rejected", normalizeRepertoire({ white: "w-nonsense" }).white, d.white);
+  // ALL_BOOKS expands to that slot's books and no others — the guarantee that
+  // makes concatenation safe (a White entry can never match a Black-to-move
+  // position, see BOOKS.md).
+  check(
+    "ALL_BOOKS expands to exactly its own slot",
+    selectedBookIds({ ...d, vsE4: null, vsD4: null, vsOther: null }),
+    booksForSlot("white").map((b) => b.id),
+  );
+  check(
+    "the default selects every book there is",
+    selectedBookIds(d).length,
+    BOOKS.length,
+  );
   check("maxPly clamps high", normalizeRepertoire({ maxPly: 9999 }).maxPly, 60);
   check("maxPly clamps negative", normalizeRepertoire({ maxPly: -5 }).maxPly, 0);
   check("NaN maxPly falls back to the default", normalizeRepertoire({ maxPly: NaN }).maxPly, d.maxPly);
@@ -329,13 +360,13 @@ function book(lines: [string[], string, number][]): BookEntry[] {
 
 // --- config migration ------------------------------------------------------
 {
-  // A blob written before repertoires existed must keep its settings — and one
-  // still carrying the `name` this bot used to declare must simply drop it. A
-  // seat is labeled by the USERNAME of the wallet in it now, resolved
-  // server-side, so there is nothing here to migrate.
+  // Two fields this bot used to carry must simply be dropped, not migrated: the
+  // `name` it declared (a seat is labeled by the USERNAME of the wallet in it,
+  // resolved server-side) and `bookMaxPly` (the depth limit for an uploaded
+  // .bin, which no longer has an upload to belong to).
   const v1 = parseBrowserBotConfig({ name: "My Bot", bookMaxPly: 12 });
-  check("v1 config keeps bookMaxPly", v1.bookMaxPly, 12);
   check("a stale bot name is not carried forward", "name" in v1, false);
+  check("a stale uploaded-book depth is not carried forward", "bookMaxPly" in v1, false);
   check("v1 config gains a default repertoire", v1.repertoire, DEFAULT_REPERTOIRE);
   check("v1 config gains a default time policy", v1.time, DEFAULT_TIME_POLICY);
 
@@ -349,19 +380,45 @@ function book(lines: [string[], string, number][]): BookEntry[] {
   // The declared label names the repertoire, and must survive the server's
   // 48-char sanitize_label cap.
   const sharp = PRESETS.find((p) => p.id === "sharp")!;
-  const label = browserEngineLabel({ bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: normalizeRepertoire(sharp.rep) });
+  const label = browserEngineLabel({ time: DEFAULT_TIME_POLICY, repertoire: normalizeRepertoire(sharp.rep) });
   check("label names the style", label, "Stockfish 18 · Sharp");
   check("label fits the 48-char cap", label.length <= 48, true);
+  // The default is every book, and naming its six styles would spend the whole
+  // 48-char budget saying "no preference".
   check(
-    "no repertoire keeps the plain label",
-    browserEngineLabel({ bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: DEFAULT_REPERTOIRE }),
+    "the full book gets one word, not six",
+    browserEngineLabel({ time: DEFAULT_TIME_POLICY, repertoire: DEFAULT_REPERTOIRE }),
+    "Stockfish 18 · Full book",
+  );
+  check(
+    "no book at all keeps the plain label",
+    browserEngineLabel({
+      time: DEFAULT_TIME_POLICY,
+      repertoire: normalizeRepertoire({ white: null, vsE4: null, vsD4: null, vsOther: null }),
+    }),
     "Stockfish 18 (browser)",
   );
   const mixed = normalizeRepertoire({ white: "w-sharp", vsE4: "b-e4-solid", vsD4: "b-d4-solid", vsOther: "b-other-solid" });
   check(
     "a mixed repertoire names both styles",
-    browserEngineLabel({ bookMaxPly: 16, time: DEFAULT_TIME_POLICY, repertoire: mixed }),
+    browserEngineLabel({ time: DEFAULT_TIME_POLICY, repertoire: mixed }),
     "Stockfish 18 · Sharp/Solid",
+  );
+  // A slot left on the full book inside an otherwise-styled repertoire must not
+  // make the label read as a six-style mix, which is what building it from the
+  // EXPANDED id list did.
+  check(
+    "one slot on the full book is named as such",
+    browserEngineLabel({
+      time: DEFAULT_TIME_POLICY,
+      repertoire: normalizeRepertoire({
+        white: ALL_BOOKS,
+        vsE4: "b-e4-solid",
+        vsD4: "b-d4-solid",
+        vsOther: "b-other-solid",
+      }),
+    }),
+    "Stockfish 18 · Full/Solid",
   );
 }
 

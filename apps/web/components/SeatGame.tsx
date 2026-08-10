@@ -7,7 +7,6 @@ import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { StakeConfirm, type ConfirmOpponent } from "@/components/StakeConfirm";
 import { autoAcceptEnabled, setAutoAccept } from "@/lib/autoAccept";
-import { ensureBookLoaded } from "@/lib/browserBot";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
 import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_WS } from "@/lib/config";
@@ -124,8 +123,6 @@ export function SeatGame({
         return;
       }
       released = false;
-      // Warm the uploaded book so it's ready before the first move.
-      await ensureBookLoaded();
 
       // The spectator socket renders the live board (shared reducer); it
       // reconnects with backoff so a dropped connection mid-game shows

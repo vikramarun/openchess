@@ -8,8 +8,8 @@
 // nothing else in the suite would notice.
 
 // Browser globals must exist before the module under test is imported. No
-// `window`: that keeps `ensureBookLoaded` on its server-side early return
-// instead of reaching for indexedDB.
+// `window`: that keeps `ensureRepertoireLoaded` on its server-side early
+// return instead of trying to fetch the built-in books.
 // `export {}` makes this file a MODULE. Without it, tsc treats every script in
 // this directory as one global scope and the `failed`/`check` helpers collide
 // with the identically-named ones in authedFetch.test.ts.
