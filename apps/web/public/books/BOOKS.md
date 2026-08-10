@@ -90,9 +90,11 @@ Checked against the GitHub API before choosing a source:
 | `gmcheems-org/free-opening-books` | **no LICENSE file** | real `.bin` | ❌ Not vendored. The only convenient source of ready-made `.bin`s, but it aggregates Komodo / Titans / Cerebellum / Perfect 2021 / Hiarcs books whose own terms are unclear. |
 | `fairy-stockfish/books` | GPL-3.0 | **EPD only** | ❌ Contains no Polyglot books at all, and is variant-focused. |
 
-Users who want one of those third-party books can still **upload it themselves**
-— that path already exists (`lib/browserBot.ts`, IndexedDB), and pointing someone
-at a link is not redistribution.
+Users who want one of those third-party books can still point the **downloadable
+client** at it (`chess-client --book <file>`), and telling someone a link is not
+redistribution. The browser used to accept an uploaded `.bin` too; that control
+is gone — it was the most advanced setting on the most beginner-facing surface,
+and the native client covers it with a real engine behind it.
 
 ## Adding a style or opening
 

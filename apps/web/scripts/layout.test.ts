@@ -168,8 +168,8 @@ check(
 );
 
 // --- half five: the mobile tab bar ---
-// Below 720px the header's `.nav` is display:none and this bar is the ONLY way
-// to reach four of the five destinations, so it fails in two silent ways.
+// Below the header's breakpoint `.nav` is display:none and this bar is the ONLY
+// way to reach four of the five destinations, so it fails in two silent ways.
 //
 // If it ever outranks `.modal-overlay`, the pre-game stake confirmation gets
 // five tappable links across its bottom edge — the same bug as a header that
@@ -256,15 +256,48 @@ check(
   "the coin would sit half an eval bar left of the board's middle",
 );
 
-// The clearance itself lives on <body> INSIDE the ≤720px query — indented, so
-// `ruleBody` cannot see it by design. Match the query's text directly.
-const mobile = css.slice(css.indexOf("@media (max-width: 720px)"));
+// The three rules that make the swap work live INSIDE one media query —
+// indented, so `ruleBody` cannot see them by design. The BREAKPOINT is not
+// pinned (it moved from 720px to 1000px when the six-link nav stopped fitting);
+// what is pinned is that all three sit in the SAME query. Hiding the nav at one
+// width and showing the bar at another leaves every width in between with no
+// navigation at all, and a fixed bar with no matching <body> padding buries the
+// last row of the footer. Both are invisible to a build and to a desktop
+// screenshot.
+const navQuery = (() => {
+  // Walk every top-level @media block and return the one that hides `.nav`.
+  const re = /@media[^{]*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(css))) {
+    // Find this query's matching close brace by depth.
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (; i < css.length && depth > 0; i++) {
+      if (css[i] === "{") depth++;
+      else if (css[i] === "}") depth--;
+    }
+    const body = css.slice(m.index, i);
+    if (/\n\s+\.nav\s*\{[^}]*display:\s*none/.test(body)) return body;
+  }
+  return null;
+})();
+
 check(
-  "phones pad the page below the bar",
+  "one media query hides the desktop nav",
+  navQuery !== null,
+  "no `@media (...) { .nav { display: none } }` anywhere in globals.css",
+);
+check(
+  "the same query turns the tab bar on",
+  /\n\s+\.tabbar\s*\{[^}]*display:\s*grid/.test(navQuery ?? ""),
+  "the nav is hidden at a width where the tab bar is not shown — that range has NO navigation",
+);
+check(
+  "the same query pads the page below the bar",
   /\n\s+body\s*\{[^}]*padding-bottom:\s*calc\([^;}]*var\(--tabbar-h\)[^;}]*env\(safe-area-inset-bottom/.test(
-    mobile,
+    navQuery ?? "",
   ),
-  "no `body { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)) }` in a ≤720px query",
+  "no `body { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)) }` beside the bar",
 );
 
 // --- half six: no route styles itself with a class that no longer exists ---

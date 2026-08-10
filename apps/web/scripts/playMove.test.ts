@@ -14,9 +14,10 @@
 //         position, with a wager on it. Nothing illegal may leave this file.
 
 // Browser globals must exist before the module under test is imported. No
-// `window`: that keeps `ensureBookLoaded` on its server-side early return
-// instead of reaching for indexedDB, and leaves the built-in book at its
-// curated lines (the histories below deliberately leave those).
+// `window`: that keeps `ensureRepertoireLoaded` on its server-side early
+// return instead of trying to fetch the built-in books, and leaves the
+// built-in book at its curated lines (the histories below deliberately leave
+// those).
 // `export {}` makes this file a MODULE, so its helpers don't collide with the
 // identically-named ones in the sibling test scripts.
 export {};
