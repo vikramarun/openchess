@@ -91,6 +91,11 @@ jobs:
           pnpm test:book
           pnpm test:books
           pnpm test:time
+          # /bench/time's clock must charge what crates/game-engine charges. A
+          # harness clock that is subtly wrong does not fail — it produces
+          # plausible Elo numbers that then decide what ships. It already caught
+          # the referee handing its lag allowance back on every move.
+          pnpm test:benchclock
           pnpm test:candidates
           # The seat engine's failure paths gate whether the lobby will stake at
           # all: a cached rejection there stopped the player posting for the rest

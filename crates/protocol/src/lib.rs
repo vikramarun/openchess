@@ -152,6 +152,16 @@ pub enum ServerMessage {
         clock: Clock,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         opponent: Option<OpponentInfo>,
+        /// The game's time control. Absent on a server that predates the field.
+        ///
+        /// A client cannot infer it from `clock`: this frame is ALSO resent to a
+        /// reconnecting player (`room::resend_state`), where the clock is
+        /// whatever is left rather than what the game started with. Both clients
+        /// scale their per-move network reserve off the initial time — the
+        /// engine withholds a multiple of it — so reading the live clock there
+        /// silently gave a reconnected seat the smallest reserve we allow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        time_control: Option<TimeControl>,
     },
     /// It is this client's turn. Authoritative position + clock + deadline.
     YourTurn {
@@ -411,7 +421,17 @@ mod tests {
                       "clock":{"white_ms":1,"black_ms":1,"increment_ms":0}}"#;
         let msg: ServerMessage = serde_json::from_str(old).unwrap();
         match msg {
-            ServerMessage::GameStart { opponent, .. } => assert!(opponent.is_none()),
+            // Both optional fields must decode as absent rather than failing.
+            // A client reading `time_control` has to cope with a server that
+            // predates it — that is the whole reason it is an Option.
+            ServerMessage::GameStart {
+                opponent,
+                time_control,
+                ..
+            } => {
+                assert!(opponent.is_none());
+                assert!(time_control.is_none());
+            }
             other => panic!("wrong variant: {other:?}"),
         }
 
@@ -428,6 +448,10 @@ mod tests {
                 name: "0x1234…abcd".into(),
                 username: None,
                 declared_engine: Some("Stockfish 17".into()),
+            }),
+            time_control: Some(TimeControl {
+                initial_ms: 600_000,
+                increment_ms: 0,
             }),
         };
         let json = serde_json::to_string(&with).unwrap();

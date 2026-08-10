@@ -20,6 +20,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
 (cd apps/web && pnpm test:seatengine) # the seat engine's prewarm/refcount lifecycle
 (cd apps/web && pnpm test:time)    # per-move clock budgeting (movetime ceilings)
+(cd apps/web && pnpm test:benchclock) # /bench/time's clock charges what the server charges
 (cd apps/web && pnpm test:candidates) # style picks never trade away a forced mate
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)
@@ -339,8 +340,98 @@ wallet.
   derives it as `initial/MOVE_BUDGET`), which rides along as a `movetime`
   ceiling on the normal clock-based `go`. It is a ceiling and not a target, so the
   engine still moves fast when it's short on time. Both clients also set
-  `Move Overhead` (250ms), since the server charges wall-clock including the
-  round trip and the engine default of 10ms assumes a local opponent.
+  `Move Overhead`, since the server charges wall-clock including the round trip
+  and the engine default of 10ms assumes a local opponent.
+- **`Move Overhead` is multiplied by ~52, so it must NOT be a constant.**
+  Stockfish's sudden-death manager takes `Move Overhead × (2 + movestogo)` off
+  the clock *before* it allocates anything, and with no `movestogo` it assumes
+  50. The flat 250ms this used to ship therefore withheld **13 seconds** — 2% of
+  a 10+0 clock and 22% of a 1+0 one — and below that the engine had nothing left
+  to allocate and answered in **~2ms**. A bullet seat fell off a cliff a rapid
+  seat never reached, and every game close at 15 seconds was thrown away.
+  Measured on the same search at 15s left: 100ms of thinking at a 250ms reserve,
+  517ms at 100ms. It is now scaled per game from the clock in `GameStart`
+  (`timePolicy.ts moveOverheadMs`, `net.rs move_overhead_for`, both `initial/1000`
+  clamped to 50–250, which pins the withheld share near 5.2% at any time
+  control). Three riders. It is **not a user setting** — too low and the seat
+  flags on latency, which reads as a loss rather than a bad preference, so it is
+  deliberately absent from the bot panel. `house-bot.sh` must **not** pass
+  `--move-overhead-ms` unless an operator pins it, or it overrides the scaling
+  (that is what `overhead_args` is for). And the browser engine is **prewarmed
+  before the time control is known**, so the seat re-sets the option on
+  `game_start` and `your_turn` waits on that — the socket invokes both handlers
+  concurrently, and without the barrier the first search of the game runs with
+  no reserve set at all. `pnpm test:move` pins the ordering, and it only has
+  teeth because the stub stalls; a harness that awaits each frame in turn cannot
+  see the race.
+- **A `movetime` alongside `wtime`/`btime` is a CEILING, never a floor.**
+  Verified: `go wtime 10000 btime 10000 movetime 1000` still spends 2ms. So
+  `--max-move-ms` works, but nothing of that shape can lift an engine off the
+  collapse above — a floor means *replacing* the command with a bare
+  `go movetime N` (which is exact: 500 → 501ms). It is why `engine`/`pace`
+  collapse where `fixed`/`fraction` never did, and why the fix is a **takeover**
+  rather than a clamp: below the threshold the seat budgets the move itself and
+  the engine's manager is not consulted at all.
+- **Where the seat stops delegating is DERIVED, not picked.**
+  `takeoverBelowMs` (and `net.rs takeover_below_ms`) is
+  `Move Overhead × (2 + movestogo) × TAKEOVER_FACTOR` — the first part is
+  exactly where Stockfish's allocation reaches zero, the factor (2) covers the
+  band just above it where the allocation is merely bad. The two clients play
+  the same games at the same time controls, so **the two must agree**;
+  `the_two_clients_agree_on_where_the_engine_dies` is the pin, and there is no
+  cross-language test, so a change to one is a change to both. Shipped result:
+  no clock value at any lobby time control produces a sub-50ms search any more
+  (1+0 delegates to 6.2s then budgets; 5+0 and 10+0 hand over below 26s).
+  The factor is **provisional** — it was chosen against measured allocations,
+  not a match result, and the time-based bench arm is what should tune it.
+  No mode can move this threshold any more, and that is the point: `pace` used
+  to state its own `movestogo`, so a knob labelled as character silently moved
+  the low-clock cliff (26s → 8s at its default, → 4.2s at its lowest). It is
+  retired, along with `fraction` (which is `tempo`'s arithmetic under an
+  implementation's name); `normalizeTimePolicy` migrates both rather than
+  resetting, since a bot that quietly became something else is worse than one
+  that kept its settings. **Nothing user-settable may reach the reserve or the
+  handover.** The other half of that rule: what `engine` mode spends once it has
+  taken over is `ENGINE_TAKEOVER_DIVISOR`, a constant — NOT `policy.divisor`,
+  which belongs to `tempo`. Wiring them together means retuning a tempo preset
+  silently retunes the low-clock behaviour of a mode the user isn't in, and it
+  nearly shipped: `divisor`'s default moved 30 → 45 with the presets, which
+  would have cut every takeover budget by a third for nothing.
+  On the native side the takeover is **opt-in** (`--min-move-ms`, off by
+  default, set by `house-bot.sh`): a connected engine's time manager belongs to
+  its author, and the threshold assumes Stockfish-style allocation.
+- **The server clock is SIGNED, and the lag allowance is a total overdraft.**
+  `white_ms`/`black_ms` are `i64` so an overrun is carried as debt. They used to
+  be `u64` charged with `saturating_sub`, which floored the balance at zero while
+  `flag_if_expired` compares against `remaining + LAG_ALLOWANCE_MS` — so the
+  150ms grace was handed back on **every move**, and a side sitting at 0ms never
+  flagged as long as each move landed inside it. Measured before the fix: a 500ms
+  clock, moves of 120ms, and after 2400ms both clocks read 0 with the game still
+  running. That is a bot on a fast link deciding never to lose on time, for real
+  money, and the per-250ms `on_tick` sweep did not catch it either (its `elapsed`
+  is measured from the turn start, so it was under the allowance too). Keep the
+  arithmetic exact: a `.max(0)` anywhere in the CHARGE re-opens it, and
+  `an_empty_clock_cannot_be_played_through` is what fails. Clamping is for the
+  WIRE only (`to_wire`) — `protocol::Clock` is unsigned and nobody should watch a
+  negative clock.
+- **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is
+  `has_insufficient_material(flagged.opposite())` — not `is_insufficient_material()`,
+  which shakmaty defines as *neither* side being able to mate. Asking the latter
+  awarded the game to a lone king whenever the flagging side still had material:
+  flag with a queen against a bare king and the bare king took the point, and in
+  a staked game the whole stake. Only reachable at low time, so it hid.
+- **Nothing may offer to make the engine weaker.** There is no strength control
+  anywhere: not `Skill Level`, not `UCI_LimitStrength`/`UCI_Elo`. `house-bot.sh`
+  used to carry a `SKILL` env var (defaulting to full, but inviting otherwise)
+  and `ConnectEngine`'s copy suggested `Skill Level` as an example option; both
+  are gone. Two reasons it stays that way: the product promise is full-strength
+  Stockfish on a surface that settles real money, and `Skill Level` below 20
+  does not play weaker chess — it picks a deliberately worse move from the top
+  few, which reads as random blunders. `apps/web/BENCH.md` prices the
+  alternatives (a 5-centipawn style window already costs ~150 Elo). A **BYO**
+  engine is the operator's own binary and cannot be constrained; the rule is
+  about what we offer and send, not a guarantee about their process, so don't
+  write copy that claims otherwise.
 - **A book move is the only genuinely free move.** Both clients consult one
   before the engine: the browser has a curated set (`apps/web/lib/openings.ts`),
   the house bot a real Polyglot book (`assets/house-book.bin`, generated by

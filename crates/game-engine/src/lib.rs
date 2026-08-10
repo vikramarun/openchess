@@ -17,7 +17,21 @@ use thiserror::Error;
 
 /// Grace added to a side's remaining time before flagging, to absorb network
 /// and IPC latency. A conservative server policy knob (see plan §clock authority).
+///
+/// It is a TOTAL overdraft, not a per-move gift. That distinction is the whole
+/// of `flag_if_expired`'s correctness: a balance that floors at zero while the
+/// flag test compares against `remaining + LAG_ALLOWANCE_MS` hands the grace
+/// back on every move, so a side sitting at 0ms never flags as long as each move
+/// lands inside it. Measured before the fix: a 500ms clock, moves of 120ms, and
+/// after 2400ms both clocks read 0 with the game still running. A bot on a fast
+/// link could simply never lose on time, in a game settling real money.
 pub const LAG_ALLOWANCE_MS: u64 = 150;
+
+/// The wire clock never shows a debt — a player who overdrew is at zero as far
+/// as anyone watching is concerned, and `protocol::Clock` is unsigned.
+fn to_wire(ms: i64) -> u64 {
+    ms.max(0) as u64
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MoveError {
@@ -53,8 +67,12 @@ pub struct Game {
     moves_uci: Vec<String>,
     san_log: Vec<String>,
     time_control: TimeControl,
-    white_ms: u64,
-    black_ms: u64,
+    /// SIGNED. A side that overran its clock carries the debt rather than
+    /// flooring at zero: the flag test adds `LAG_ALLOWANCE_MS` to this, so a
+    /// balance that could not go negative renewed the whole allowance every
+    /// move. See `LAG_ALLOWANCE_MS`.
+    white_ms: i64,
+    black_ms: i64,
     /// Server time (ms) at which the side-to-move's clock started ticking.
     turn_started_ms: u64,
     ply: u32,
@@ -77,8 +95,8 @@ impl Game {
             moves_uci: Vec::new(),
             san_log: Vec::new(),
             time_control,
-            white_ms: time_control.initial_ms,
-            black_ms: time_control.initial_ms,
+            white_ms: time_control.initial_ms as i64,
+            black_ms: time_control.initial_ms as i64,
             turn_started_ms: now_ms,
             ply: 0,
             status: Status::Ongoing,
@@ -108,6 +126,22 @@ impl Game {
 
     pub fn ply(&self) -> u32 {
         self.ply
+    }
+
+    pub fn time_control(&self) -> TimeControl {
+        self.time_control
+    }
+
+    /// Absolute server time by which the side to move must have moved.
+    ///
+    /// Derived from the SIGNED balance on purpose. Building it from the wire
+    /// clock (which clamps at zero) tells a side that has overdrawn it has the
+    /// whole lag allowance left when it may have almost none — and this field is
+    /// what a client budgets against, so it must not promise time that does not
+    /// exist.
+    pub fn move_deadline_ms(&self) -> u64 {
+        let left = self.remaining_for_turn() + LAG_ALLOWANCE_MS as i64;
+        self.turn_started_ms.saturating_add(left.max(0) as u64)
     }
 
     pub fn start_fen(&self) -> &str {
@@ -144,14 +178,14 @@ impl Game {
     /// The live clock, accounting for time elapsed on the side to move since
     /// its turn began.
     pub fn clock(&self, now_ms: u64) -> Clock {
-        let elapsed = now_ms.saturating_sub(self.turn_started_ms);
+        let elapsed = now_ms.saturating_sub(self.turn_started_ms) as i64;
         let (white_ms, black_ms) = match self.pos.turn() {
-            shakmaty::Color::White => (self.white_ms.saturating_sub(elapsed), self.black_ms),
-            shakmaty::Color::Black => (self.white_ms, self.black_ms.saturating_sub(elapsed)),
+            shakmaty::Color::White => (self.white_ms - elapsed, self.black_ms),
+            shakmaty::Color::Black => (self.white_ms, self.black_ms - elapsed),
         };
         Clock {
-            white_ms,
-            black_ms,
+            white_ms: to_wire(white_ms),
+            black_ms: to_wire(black_ms),
             increment_ms: self.time_control.increment_ms,
         }
     }
@@ -162,12 +196,23 @@ impl Game {
         if self.is_over() {
             return self.result();
         }
-        let elapsed = now_ms.saturating_sub(self.turn_started_ms);
+        let elapsed = now_ms.saturating_sub(self.turn_started_ms) as i64;
         let remaining = self.remaining_for_turn();
-        if elapsed > remaining + LAG_ALLOWANCE_MS {
+        if elapsed > remaining + LAG_ALLOWANCE_MS as i64 {
             // The side to move flagged. Opponent wins unless they cannot mate.
+            //
+            // The question is about the OPPONENT's material alone (FIDE 6.9:
+            // a flag is a draw when the other side cannot checkmate by any
+            // series of legal moves), which is what `has_insufficient_material`
+            // answers. `is_insufficient_material` is a different question — it
+            // is `has_insufficient_material(White) && …(Black)`, i.e. neither
+            // side can mate — and asking it here awarded the game to a lone
+            // king whenever the flagging side still had material. Flagging with
+            // a queen against a bare king handed that king the win, and in a
+            // staked game the whole stake with it.
             let flagged = self.turn();
-            let result = if self.pos.is_insufficient_material() {
+            let opponent = self.pos.turn().other();
+            let result = if self.pos.has_insufficient_material(opponent) {
                 GameResult {
                     winner: None,
                     reason: GameEndReason::Timeout,
@@ -235,16 +280,14 @@ impl Game {
         self.pos = new_pos;
 
         // Charge the clock: deduct elapsed, add increment.
-        let elapsed = now_ms.saturating_sub(self.turn_started_ms);
+        // Exact, and allowed to go negative. Saturating here was the bug: it
+        // erased the overdraft, so the next move's flag test started from a
+        // clean zero and the allowance was granted again.
+        let elapsed = now_ms.saturating_sub(self.turn_started_ms) as i64;
+        let inc = self.time_control.increment_ms as i64;
         match mover {
-            shakmaty::Color::White => {
-                self.white_ms =
-                    self.white_ms.saturating_sub(elapsed) + self.time_control.increment_ms;
-            }
-            shakmaty::Color::Black => {
-                self.black_ms =
-                    self.black_ms.saturating_sub(elapsed) + self.time_control.increment_ms;
-            }
+            shakmaty::Color::White => self.white_ms = self.white_ms - elapsed + inc,
+            shakmaty::Color::Black => self.black_ms = self.black_ms - elapsed + inc,
         }
         self.turn_started_ms = now_ms;
         self.ply += 1;
@@ -267,7 +310,7 @@ impl Game {
 
     // -- internals ---------------------------------------------------------
 
-    fn remaining_for_turn(&self) -> u64 {
+    fn remaining_for_turn(&self) -> i64 {
         match self.pos.turn() {
             shakmaty::Color::White => self.white_ms,
             shakmaty::Color::Black => self.black_ms,
@@ -278,8 +321,8 @@ impl Game {
     /// a move is applied / the game is frozen.
     fn frozen_clock(&self) -> Clock {
         Clock {
-            white_ms: self.white_ms,
-            black_ms: self.black_ms,
+            white_ms: to_wire(self.white_ms),
+            black_ms: to_wire(self.black_ms),
             increment_ms: self.time_control.increment_ms,
         }
     }
@@ -394,6 +437,146 @@ mod tests {
             .unwrap();
         assert_eq!(result.reason, GameEndReason::Timeout);
         assert_eq!(result.winner, Some(Color::White));
+    }
+
+    /// Drop a position in directly. There is no FEN constructor on `Game` (a
+    /// real game always starts from the initial position), and reaching a bare
+    /// king by legal moves would take fifty of them.
+    fn at(fen: &str) -> Chess {
+        fen.parse::<Fen>()
+            .expect("valid fen")
+            .into_position(shakmaty::CastlingMode::Standard)
+            .expect("legal position")
+    }
+
+    #[test]
+    fn flagging_against_a_bare_king_is_a_draw() {
+        // FIDE 6.9: running out of time only loses if the OPPONENT can still
+        // deliver mate. White is to move and up a queen; Black has a bare king
+        // and cannot mate by any series of legal moves, so this is a draw —
+        // and in a staked game, a refund rather than a payout to the bare king.
+        let mut g = Game::new(TC, 0);
+        g.pos = at("8/8/8/4k3/8/8/3Q4/4K3 w - - 0 1");
+
+        let result = g.flag_if_expired(60_000 + LAG_ALLOWANCE_MS + 1).unwrap();
+        assert_eq!(result.reason, GameEndReason::Timeout);
+        assert_eq!(result.winner, None);
+    }
+
+    #[test]
+    fn flagging_against_mating_material_still_loses() {
+        // The other half: the guard asks about the opponent's material only,
+        // so a bare king that flags against a queen loses exactly as before.
+        let mut g = Game::new(TC, 0);
+        g.pos = at("8/8/8/4k3/8/8/1q6/4K3 w - - 0 1");
+
+        let result = g.flag_if_expired(60_000 + LAG_ALLOWANCE_MS + 1).unwrap();
+        assert_eq!(result.reason, GameEndReason::Timeout);
+        assert_eq!(result.winner, Some(Color::Black));
+    }
+
+    #[test]
+    fn an_empty_clock_cannot_be_played_through() {
+        // The bug this exists for: the balance floored at zero while the flag
+        // test compared against `remaining + LAG_ALLOWANCE_MS`, so the grace was
+        // handed back on every move and a side at 0ms never flagged as long as
+        // each move landed inside it. Nothing about that is rare — it is a bot
+        // on a fast link deciding never to lose on time, for real money.
+        //
+        // 500ms each, moves of 120ms (comfortably under the allowance). Twenty
+        // plies is 1200ms a side against a 500ms clock, so somebody has to flag.
+        let tc = TimeControl {
+            initial_ms: 500,
+            increment_ms: 0,
+        };
+        let mut g = Game::new(tc, 0);
+        let moves = [
+            "e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d3", "f8c5", "c1g5", "d7d6", "b1c3",
+            "c8g4", "h2h3", "g4h5", "g5f6", "d8f6", "c3d5", "f6d8", "c2c3", "a7a6",
+        ];
+        let mut now = 0u64;
+        let mut ended_at = None;
+        for (i, m) in moves.iter().enumerate() {
+            now += 120;
+            match g.play_move(m, now) {
+                Ok(a) => {
+                    if a.result.is_some() {
+                        ended_at = Some(i);
+                        break;
+                    }
+                }
+                // Once the game is over the room stops accepting moves; either
+                // shape counts as "the clock was enforced".
+                Err(MoveError::GameOver) => {
+                    ended_at = Some(i);
+                    break;
+                }
+                Err(e) => panic!("unexpected rejection at ply {i}: {e:?}"),
+            }
+        }
+        assert!(
+            ended_at.is_some(),
+            "nobody flagged after {now}ms of a 500ms clock",
+        );
+        assert_eq!(g.result().map(|r| r.reason), Some(GameEndReason::Timeout));
+    }
+
+    #[test]
+    fn the_lag_allowance_is_a_total_overdraft_not_a_per_move_gift() {
+        // It still absorbs a single late arrival, which is what it is for...
+        let tc = TimeControl {
+            initial_ms: 1_000,
+            increment_ms: 0,
+        };
+        let mut g = Game::new(tc, 0);
+        g.play_move("e2e4", 1_100).expect("100ms over is forgiven");
+        assert!(!g.is_over());
+
+        // ...and the overdraft is now CARRIED, so the next move starts from a
+        // debt rather than a fresh zero. White is 100ms down with 50ms of
+        // allowance left, so a second 100ms overrun ends it. Before the fix the
+        // allowance reset here and White could do this forever.
+        g.play_move("e7e5", 1_200).expect("black still has time");
+        let result = g.flag_if_expired(1_200 + 60).expect("white is out of road");
+        assert_eq!(result.reason, GameEndReason::Timeout);
+        assert_eq!(result.winner, Some(Color::Black));
+    }
+
+    #[test]
+    fn the_move_deadline_never_promises_time_that_is_gone() {
+        // The client budgets against this field, so it must come from the
+        // signed balance. Built from the wire clock (which clamps at zero) it
+        // would tell a side that has overdrawn by 100ms that it still has the
+        // whole 150ms allowance.
+        let tc = TimeControl {
+            initial_ms: 1_000,
+            increment_ms: 0,
+        };
+        let mut g = Game::new(tc, 0);
+        // A clean game: White started at t=0 with 1000ms, so the wall is
+        // 1000 + 150.
+        assert_eq!(g.move_deadline_ms(), 1_000 + LAG_ALLOWANCE_MS);
+
+        // White overdraws by 100ms; Black moves instantly at t=1100.
+        g.play_move("e2e4", 1_100).unwrap();
+        g.play_move("e7e5", 1_100).unwrap();
+        // White is now 100ms down, so it has 50ms from the turn start — not the
+        // 1_100 + 150 that a zero-clamped clock would have produced.
+        assert_eq!(g.move_deadline_ms(), 1_100 + 50);
+    }
+
+    #[test]
+    fn a_wire_clock_never_reports_a_debt() {
+        // `protocol::Clock` is unsigned and a spectator should never see a
+        // negative number; the debt is internal bookkeeping only.
+        let tc = TimeControl {
+            initial_ms: 1_000,
+            increment_ms: 0,
+        };
+        let mut g = Game::new(tc, 0);
+        let applied = g.play_move("e2e4", 1_100).unwrap();
+        assert_eq!(applied.clock.white_ms, 0);
+        assert_eq!(g.clock(1_100).white_ms, 0);
     }
 
     #[test]

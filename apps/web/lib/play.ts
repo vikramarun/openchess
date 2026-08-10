@@ -7,7 +7,7 @@ import { ensureRepertoireLoaded, getBrowserBotConfig, probeRepertoire } from "./
 import { SERVER_WS } from "./config";
 import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
-import { budgetMs, goCommand } from "./timePolicy";
+import { budgetMs, goCommand, MAX_MOVE_OVERHEAD_MS, moveOverheadMs } from "./timePolicy";
 import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
@@ -127,6 +127,15 @@ export function playSeat(
   // Reassignable: a dead engine is swapped for a replacement mid-game (below).
   let engine = engineIn;
   let onFallback = handlers.onEngineFallback ?? null;
+  // The per-move network reserve, scaled to this game's time control once
+  // `game_start` tells us what it is. Until then the engine keeps the cautious
+  // handshake default — it was prewarmed before this game existed.
+  let overheadMs: number | null = null;
+  // Resolved once that reserve has reached the engine. `your_turn` waits on it
+  // before searching: both handlers are async and the socket invokes them
+  // concurrently, so without an explicit barrier the first search of the game
+  // could race ahead of the `setoption` and be budgeted at the old reserve.
+  let overheadApplied: Promise<void> = Promise.resolve();
   // Warm the repertoire; it resolves long before the first your_turn. Skipped
   // for the Test Engine sandbox, which is the whole point of the flag — the
   // fetch is what costs, not the probe.
@@ -187,8 +196,30 @@ export function playSeat(
           send({ type: "ready", game_id: gameId });
           break;
         }
+        case "game_start": {
+          // Read from the server rather than a caller-supplied prop: four call
+          // sites reach playSeat and not all of them know the initial time, but
+          // every one of them gets this frame.
+          //
+          // It must be `time_control`, NOT the clock. This frame is also resent
+          // to a RECONNECTING player, where the clock is whatever is left rather
+          // than what the game started with — so reading it there handed a seat
+          // rejoining a 10+0 game at 12s the smallest reserve we allow (50ms
+          // instead of 250ms), halving its network tolerance and dragging the
+          // handover point down with it. The clock is kept only as a fallback
+          // for a server too old to send the field, where it is right on the
+          // first `game_start` and wrong only on a reconnect; drop it once the
+          // deployed server is past this change.
+          const initialMs = m.time_control?.initial_ms ?? m.clock?.white_ms;
+          overheadMs = moveOverheadMs(typeof initialMs === "number" ? initialMs : NaN);
+          // A failure here is not worth losing the game over — the engine
+          // simply keeps the cautious default.
+          overheadApplied = engine.setMoveOverhead(overheadMs).catch(() => {});
+          break;
+        }
         case "your_turn": {
           try {
+            await overheadApplied;
             // Replay the server's history ourselves. Two things come out of it:
             // the position (for the book), and the history rewritten to standard
             // UCI. The server accepts castling in EITHER notation from any
@@ -224,15 +255,20 @@ export function playSeat(
                 ? m.deadline_server_ms - serverOffsetMs - Date.now()
                 : undefined;
             const policy = getBrowserBotConfig().time;
+            const remainingMs = ourMs ?? movetimeMs * 20;
             const plan = goCommand(policy, {
               clock: c
                 ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 }
                 : null,
               budgetMs: budgetMs(policy, {
-                remainingMs: ourMs ?? movetimeMs * 20,
+                remainingMs,
                 incrementMs: c?.increment_ms ?? 0,
                 deadlineInMs,
               }),
+              remainingMs,
+              // What the engine actually has set: the scaled value once
+              // `game_start` has landed, else the cautious handshake default.
+              overheadMs: overheadMs ?? MAX_MOVE_OVERHEAD_MS,
             });
             // The seat's eval bar rides on the search it is already running for
             // its own move (#39), so it has to survive the time policy taking
@@ -255,6 +291,11 @@ export function playSeat(
                 const swap = onFallback;
                 onFallback = null;
                 engine = await swap();
+                // A replacement arrives with the handshake default, so it needs
+                // this game's reserve too — otherwise surviving a dead worker
+                // silently reintroduces the low-clock collapse for the rest of
+                // the game.
+                if (overheadMs !== null) await engine.setMoveOverhead(overheadMs).catch(() => {});
                 played = await engine.bestMoveWithPlan(history, plan, onInfo);
               }
             }

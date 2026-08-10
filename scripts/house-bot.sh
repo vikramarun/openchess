@@ -24,12 +24,7 @@
 #   SERVER                default https://openchess.fly.dev
 #   ENGINE                default stockfish (must be on PATH or a path)
 #   NAME                  default "House Bot"
-#   SKILL                 default 20: Stockfish "Skill Level" 0..20. 20 is
-#                         full strength (and Stockfish's own default). Below 20
-#                         the engine picks a deliberately worse move from the
-#                         top few, which reads as random blunders rather than
-#                         weaker play; if you ever want a beatable house bot
-#                         again, UCI_LimitStrength + UCI_Elo is the honest knob.
+#   (no strength knob, on purpose — see the note above the invocation)
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
 #   SEATS                 default 2: concurrent house games per time control.
@@ -37,8 +32,20 @@
 #                         the server's RL_MAX_OPEN_OFFERS (default 16).
 #   MOVE_BUDGET           default 80: plan each game as this many moves; the
 #                         per-move search ceiling is initial/MOVE_BUDGET
-#   MOVE_OVERHEAD_MS      default 250: clock reserved per move for the round
-#                         trip to the server
+#   MIN_MOVE_MS           default 150: floor on a search once the clock is too
+#                         low for Stockfish's own manager to allocate from. It
+#                         reserves a fixed slice up front and then answers in
+#                         ~2ms below it, throwing away won games; under that
+#                         point the client budgets the move itself. Set 0 to
+#                         always delegate.
+#   MOVE_OVERHEAD_MS      clock reserved per move for the round trip to the
+#                         server. UNSET BY DEFAULT, and it should stay that
+#                         way: the client scales it to each time control,
+#                         because Stockfish reserves a MULTIPLE of this value
+#                         (~52x) and a number tuned for a 10-minute game holds
+#                         back a fifth of a bullet clock — which is what made
+#                         the bot answer in ~2ms below 13 seconds. Set it only
+#                         if you know this host's latency to the server.
 #   BOOK                  Polyglot .bin played before the engine; defaults to
 #                         the one shipped in the image, else the repo's
 #                         assets/house-book.bin. Set BOOK= (empty) to disable.
@@ -50,11 +57,10 @@ set -euo pipefail
 SERVER="${SERVER:-https://openchess.fly.dev}"
 ENGINE="${ENGINE:-stockfish}"
 NAME="${NAME:-House Bot}"
-SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
 SEATS="${SEATS:-2}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
-MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
+MIN_MOVE_MS="${MIN_MOVE_MS:-150}"
 BOOK_MAX_PLY="${BOOK_MAX_PLY:-16}"
 
 # Opening book. `${BOOK+set}` (no colon) distinguishes "not set" from
@@ -114,6 +120,13 @@ for tc in $TCS; do
   fi
 done
 
+# 0 is meaningful here (always delegate), so only the shape is checked. A
+# non-numeric value would reach clap and abort every seat at once.
+if [[ ! "$MIN_MOVE_MS" =~ ^[0-9]+$ ]]; then
+  echo "MIN_MOVE_MS must be a non-negative integer (ms; 0 disables the floor)." >&2
+  exit 1
+fi
+
 if [[ ! "$MOVE_BUDGET" =~ ^[0-9]+$ ]] || ((MOVE_BUDGET == 0)); then
   echo "MOVE_BUDGET must be a positive integer (moves to plan each game for)." >&2
   exit 1
@@ -129,7 +142,7 @@ if [[ -n "${BOOK:-}" && ! -f "$BOOK" ]]; then
   exit 1
 fi
 
-echo "house bot: $NAME (skill $SKILL) on $SERVER; time controls: $TCS (${SEATS} seat(s) each)"
+echo "house bot: $NAME (full strength) on $SERVER; time controls: $TCS (${SEATS} seat(s) each)"
 echo "book: ${BOOK:-none (every opening move is a full search)}"
 
 # SEATS autopilots per time control. Same wallet across instances is fine — and
@@ -155,6 +168,11 @@ run_tc() {
   # Empty BOOK means "no book"; --book with an empty value would be an error.
   local book_args=()
   [[ -n "${BOOK:-}" ]] && book_args=(--book "$BOOK" --book-max-ply "$BOOK_MAX_PLY")
+  # Pass the reserve ONLY when it was pinned. Passing a value unconditionally
+  # is what this used to do, and it defeated the per-time-control scaling the
+  # client now does for itself — a flat 250ms is a fifth of the 1+0 clock.
+  local overhead_args=()
+  [[ -n "${MOVE_OVERHEAD_MS:-}" ]] && overhead_args=(--move-overhead-ms "$MOVE_OVERHEAD_MS")
   # Expanded below as ${book_args[@]+"${book_args[@]}"}: bash 3.2 (still the
   # /bin/bash on macOS) treats "${empty[@]}" as an unset variable under `set -u`
   # and aborts. Only the BOOK= opt-out path hits it — i.e. the path least likely
@@ -162,13 +180,21 @@ run_tc() {
   while true; do
     # The client's own output already names the game/opponent; the autopilot
     # retries transient errors internally, so an exit here is unusual.
+    #
+    # There is deliberately NO strength option here. This used to pass
+    # `--uci-option "Skill Level=$SKILL"`, defaulting to 20 (full) but inviting
+    # a weaker house bot — and "Skill Level" below 20 does not play weaker
+    # chess, it picks a deliberately worse move from the top few, which reads as
+    # random blunders. The product promise is full-strength Stockfish, this is
+    # the opponent most players actually face, and it settles real money. Don't
+    # add one back: not Skill Level, not UCI_LimitStrength/UCI_Elo.
     "$CLIENT" connect --auto \
       --server "$SERVER" \
       --engine "$ENGINE" \
       --name "$NAME" \
-      --uci-option "Skill Level=$SKILL" \
       --max-move-ms "$max_move_ms" \
-      --move-overhead-ms "$MOVE_OVERHEAD_MS" \
+      --min-move-ms "$MIN_MOVE_MS" \
+      ${overhead_args[@]+"${overhead_args[@]}"} \
       ${book_args[@]+"${book_args[@]}"} \
       --initial-secs "$initial" --increment-secs "$increment" || true
     echo "[${initial}+${increment} #${seat}] autopilot exited; restarting in ${delay}s"

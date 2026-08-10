@@ -14,6 +14,7 @@
     "test:book": "tsx scripts/polyglot.test.ts",
     "test:books": "tsx scripts/books.test.ts",
     "test:time": "tsx scripts/time.test.ts",
+    "test:benchclock": "tsx scripts/benchClock.test.ts",
     "test:candidates": "tsx scripts/candidates.test.ts",
     "test:seatengine": "tsx scripts/playerEngine.test.ts",
     "test:openings": "tsx scripts/book.test.ts",

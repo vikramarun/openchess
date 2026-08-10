@@ -47,9 +47,28 @@ function checkThat(name: string, ok: boolean, detail = "") {
 class StubEngine {
   seenHistory: string[][] = [];
   resyncs = 0;
-  constructor(private answers: string[]) {}
+  /** Every reserve the seat has set, in order. */
+  overheads: number[] = [];
+  /** What the seat asked of the engine, in order — the reserve has to be set
+   *  before the first search, and counting the two separately can't tell. */
+  calls: string[] = [];
+  /** Every `go` command the seat built, in order. */
+  plans: string[] = [];
+  constructor(
+    private answers: string[],
+    /** Ticks to stall inside `setMoveOverhead`, standing in for the real
+     *  engine's `await this.ready`. Without a stall the option lands in the
+     *  first microtask and no ordering bug can be observed. */
+    private setupTicks = 0,
+  ) {}
+  async setMoveOverhead(ms: number) {
+    for (let i = 0; i < this.setupTicks; i++) await new Promise((r) => setTimeout(r, 0));
+    this.overheads.push(ms);
+    this.calls.push("overhead");
+  }
   private next(history: string[]) {
     this.seenHistory.push([...history]);
+    this.calls.push("search");
     return this.answers.length > 1 ? this.answers.shift()! : this.answers[0];
   }
   async bestMoveWithClock(history: string[]) {
@@ -58,7 +77,8 @@ class StubEngine {
   /** The seat now builds its own `go` command from the configured time policy
    *  (lib/timePolicy.ts) and hands it over, so this is the method the move loop
    *  actually calls. `bestMove` stays because retryAfterResync still uses it. */
-  async bestMoveWithPlan(history: string[]) {
+  async bestMoveWithPlan(history: string[], plan?: { cmd: string }) {
+    if (plan) this.plans.push(plan.cmd);
     return this.next(history);
   }
   async bestMove(history: string[]) {
@@ -92,6 +112,54 @@ async function oneTurn(answers: string[], history = HISTORY_KTR) {
     clock: { white_ms: 60_000, black_ms: 60_000, increment_ms: 0 },
   });
   return { ws, engine };
+}
+
+/** Play a game at a given time control, through `game_start`, and report what
+ *  network reserve the engine was given.
+ *
+ *  `clockMs` defaults to the initial time — a fresh game — but can differ, which
+ *  is what a RECONNECT looks like: the server resends `game_start` with the time
+ *  that is LEFT. */
+async function reserveFor(initialMs: number, clockMs = initialMs) {
+  const engine = new StubEngine(["f8c5"]);
+  playSeat("game-1", "tok", engine as never, 400);
+  const ws = FakeSocket.last!;
+  ws.onopen?.();
+  await ws.deliver({ type: "welcome" });
+  await ws.deliver({
+    type: "game_start",
+    time_control: { initial_ms: initialMs, increment_ms: 0 },
+    clock: { white_ms: clockMs, black_ms: clockMs, increment_ms: 0 },
+  });
+  await ws.deliver({
+    type: "your_turn",
+    ply: HISTORY_KTR.length,
+    moves_uci: HISTORY_KTR,
+    clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
+  });
+  return engine;
+}
+
+/** The `go` this seat builds at a given time control with `remainingMs` on its
+ *  own clock. HISTORY_KTR is 7 plies, so we are Black — put the low clock
+ *  there, or the seat reads the healthy one and nothing is being tested. */
+async function goAt(initialMs: number, remainingMs: number) {
+  const engine = new StubEngine(["f8c5"]);
+  playSeat("game-1", "tok", engine as never, 400);
+  const ws = FakeSocket.last!;
+  ws.onopen?.();
+  await ws.deliver({ type: "welcome" });
+  await ws.deliver({
+    type: "game_start",
+    clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
+  });
+  await ws.deliver({
+    type: "your_turn",
+    ply: HISTORY_KTR.length,
+    moves_uci: HISTORY_KTR,
+    clock: { white_ms: initialMs, black_ms: remainingMs, increment_ms: 0 },
+  });
+  return engine.plans[0] ?? "";
 }
 
 const movesSent = (ws: FakeSocket) =>
@@ -166,6 +234,85 @@ async function main() {
   {
     const pos = Chess.default();
     checkThat("the fallback finds a move in the start position", isLegal(pos, anyLegalUci(pos)));
+  }
+
+  // --- the network reserve reaches the engine, scaled to the game --------------
+  // Stockfish withholds ~52x this number before allocating anything, so a value
+  // left at the rapid default is a fifth of a bullet clock: the seat answered in
+  // ~2ms below 13 seconds and threw away won games. The seat has to re-set it
+  // per game, because the engine is prewarmed before the time control is known.
+  {
+    check("a 1+0 seat reserves 60ms", (await reserveFor(60_000)).overheads, [60]);
+    check("a 10+0 seat keeps the cap", (await reserveFor(600_000)).overheads, [250]);
+
+    // A RECONNECT resends `game_start` with the time LEFT, not the time
+    // control. Reading the clock there gave a seat rejoining a 10+0 game at 12s
+    // a 50ms reserve — the floor — which halves its network tolerance and drags
+    // the handover point from 26s down to 5.2s, in the one situation where the
+    // connection is already suspect.
+    check(
+      "a seat rejoining a 10+0 game at 12s still reserves 250ms",
+      (await reserveFor(600_000, 12_000)).overheads,
+      [250],
+    );
+    check(
+      "and one rejoining a 1+0 game at 8s still reserves 60ms",
+      (await reserveFor(60_000, 8_000)).overheads,
+      [60],
+    );
+  }
+  {
+    // A server too old to send `time_control` still gets the scaling from the
+    // clock, which is correct on a fresh game. Losing that would put every web
+    // seat back on a flat 250ms until the Fly server is deployed — the two do
+    // not ship together.
+    const engine = new StubEngine(["f8c5"]);
+    playSeat("game-1", "tok", engine as never, 400);
+    const ws = FakeSocket.last!;
+    ws.onopen?.();
+    await ws.deliver({ type: "welcome" });
+    await ws.deliver({
+      type: "game_start",
+      clock: { white_ms: 60_000, black_ms: 60_000, increment_ms: 0 },
+    });
+    check("an older server still scales from the clock", engine.overheads, [60]);
+  }
+  {
+    // And it must land BEFORE the first search, not after it. Both handlers are
+    // async and the socket invokes them concurrently, so this is a real race:
+    // losing it would budget move one at the old reserve.
+    // A real socket does NOT wait for one handler before invoking the next, and
+    // `setMoveOverhead` waits on the engine's handshake — so deliver both frames
+    // without awaiting in between, which is the shape the barrier exists for.
+    const engine = new StubEngine(["f8c5"], 2);
+    playSeat("game-1", "tok", engine as never, 400);
+    const ws = FakeSocket.last!;
+    ws.onopen?.();
+    await ws.deliver({ type: "welcome" });
+    const clock = { white_ms: 60_000, black_ms: 60_000, increment_ms: 0 };
+    const started = ws.onmessage!({ data: JSON.stringify({ type: "game_start", clock }) });
+    const turned = ws.onmessage!({
+      data: JSON.stringify({
+        type: "your_turn",
+        ply: HISTORY_KTR.length,
+        moves_uci: HISTORY_KTR,
+        clock,
+      }),
+    });
+    await Promise.all([started, turned]);
+    check("the reserve is set before the first search", engine.calls, ["overhead", "search"]);
+  }
+
+  // --- and the seat stops delegating once the clock is low --------------------
+  // The unit tests pin the threshold; this pins that the seat is actually wired
+  // to it, with the scaled reserve rather than a constant. A 10+0 reserve is
+  // 250ms (dead at 13s, handover at 26s); a 1+0 reserve is 60ms (handover at
+  // 6.2s), which is the whole reason bullet can keep delegating at 10s.
+  {
+    checkThat("a 10+0 seat delegates with a healthy clock", (await goAt(600_000, 400_000)).startsWith("go wtime"));
+    checkThat("a 10+0 seat takes over at 20s", (await goAt(600_000, 20_000)).startsWith("go movetime"));
+    checkThat("a 1+0 seat still delegates at 10s", (await goAt(60_000, 10_000)).startsWith("go wtime"));
+    checkThat("a 1+0 seat takes over at 5s", (await goAt(60_000, 5_000)).startsWith("go movetime"));
   }
 
   console.log(failed === 0 ? "\nall checks passed" : `\n${failed} check(s) failed`);

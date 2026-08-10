@@ -8,7 +8,13 @@ import {
   timePolicyLabel,
   DEFAULT_TIME_POLICY,
   MAX_CLOCK_FRACTION,
+  MAX_MOVE_OVERHEAD_MS,
   MIN_BUDGET_MS,
+  MIN_MOVE_OVERHEAD_MS,
+  takeoverBelowMs,
+  TEMPO_PRESETS,
+  previewAt,
+  moveOverheadMs,
   OVERHEAD_MS,
   PANIC_MS,
   type TimePolicy,
@@ -44,9 +50,15 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
   check("a string number is accepted", normalizeTimePolicy({ divisor: "40" }).divisor, 40);
   check("an object is rejected", normalizeTimePolicy({ divisor: {} }).divisor, DEFAULT_TIME_POLICY.divisor);
   check("incFactor clamps to 0..1", normalizeTimePolicy({ incFactor: 5 }).incFactor, 1);
-  // movestogo must never reach 1: Stockfish then assumes a new time control is
-  // coming and spends nearly the whole clock on one move.
-  check("movestogo floors at 2", normalizeTimePolicy({ movestogo: 1 }).movestogo, 2);
+  // Retired modes migrate rather than resetting. `pace` folds into plain
+  // delegation because its `movestogo` fed the takeover threshold — a taste
+  // label editing a safety cliff — and `fraction` is `tempo`'s arithmetic under
+  // its old name, so it keeps the divisor it was set to.
+  check("pace folds into engine", normalizeTimePolicy({ mode: "pace", movestogo: 15 }).mode, "engine");
+  check("fraction becomes tempo", normalizeTimePolicy({ mode: "fraction", divisor: 40 }).mode, "tempo");
+  check("and keeps its divisor", normalizeTimePolicy({ mode: "fraction", divisor: 40 }).divisor, 40);
+  check("a retired mode's stray field is simply dropped",
+    "movestogo" in normalizeTimePolicy({ mode: "pace", movestogo: 15 }), false);
   check("switching mode keeps other fields", normalizeTimePolicy({ mode: "fixed", nodes: 5000 }).nodes, 5000);
 }
 
@@ -110,8 +122,8 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
 // --- per-mode budgets ------------------------------------------------------
 {
   check(
-    "fraction spends remaining/divisor plus part of the increment",
-    budgetMs(P({ mode: "fraction", divisor: 40, incFactor: 0.8 }), { remainingMs: 120_000, incrementMs: 1_000 }),
+    "tempo spends remaining/divisor plus part of the increment",
+    budgetMs(P({ mode: "tempo", divisor: 40, incFactor: 0.8 }), { remainingMs: 120_000, incrementMs: 1_000 }),
     3_800,
   );
   check(
@@ -136,46 +148,90 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
 // --- go commands -----------------------------------------------------------
 {
   const clock = { whiteMs: 60_000, blackMs: 59_000, incMs: 1_000 };
+  // A healthy clock: well above the takeover point at every reserve below, so
+  // these pin delegation rather than the handover.
+  const go = (
+    policy: TimePolicy,
+    ctx: { clock: typeof clock | null; budgetMs: number; remainingMs?: number; overheadMs?: number },
+  ) =>
+    goCommand(policy, {
+      clock: ctx.clock,
+      budgetMs: ctx.budgetMs,
+      remainingMs: ctx.remainingMs ?? 600_000,
+      overheadMs: ctx.overheadMs ?? 250,
+    });
 
   // The default must be byte-identical to what the engine sent before this
   // existed, or every existing game changes strength silently.
   check(
     "engine mode reproduces today's command exactly",
-    goCommand(P({ mode: "engine" }), { clock, budgetMs: 1234 }),
+    go(P({ mode: "engine" }), { clock, budgetMs: 1234 }),
     { cmd: "go wtime 60000 btime 59000 winc 1000 binc 1000" },
   );
-  check(
-    "pace appends a constant movestogo",
-    goCommand(P({ mode: "pace", movestogo: 18 }), { clock, budgetMs: 1234 }).cmd,
-    "go wtime 60000 btime 59000 winc 1000 binc 1000 movestogo 18",
-  );
-  check("fixed uses movetime", goCommand(P({ mode: "fixed" }), { clock, budgetMs: 300 }).cmd, "go movetime 300");
-  check("fraction uses movetime", goCommand(P({ mode: "fraction" }), { clock, budgetMs: 900 }).cmd, "go movetime 900");
+  check("fixed uses movetime", go(P({ mode: "fixed" }), { clock, budgetMs: 300 }).cmd, "go movetime 300");
+  check("tempo uses movetime", go(P({ mode: "tempo" }), { clock, budgetMs: 900 }).cmd, "go movetime 900");
 
-  const nodes = goCommand(P({ mode: "nodes", nodes: 250_000 }), { clock, budgetMs: 2_500 });
+  const nodes = go(P({ mode: "nodes", nodes: 250_000 }), { clock, budgetMs: 2_500 });
   check("nodes uses go nodes", nodes.cmd, "go nodes 250000");
   // Without the wall a slow device would search 250k nodes past its flag.
   check("nodes carries a wall-clock stop", nodes.hardStopMs, 2_500);
-  check("clock modes need no wall", goCommand(P({ mode: "engine" }), { clock, budgetMs: 1 }).hardStopMs, undefined);
+  check("clock modes need no wall", go(P({ mode: "engine" }), { clock, budgetMs: 1 }).hardStopMs, undefined);
 
   // Clockless games (the /play page can run without one).
   check(
     "engine mode degrades to movetime with no clock",
-    goCommand(P({ mode: "engine" }), { clock: null, budgetMs: 400 }).cmd,
-    "go movetime 400",
-  );
-  check(
-    "pace degrades to movetime with no clock",
-    goCommand(P({ mode: "pace" }), { clock: null, budgetMs: 400 }).cmd,
+    go(P({ mode: "engine" }), { clock: null, budgetMs: 400 }).cmd,
     "go movetime 400",
   );
 
   // We must never report a clock we don't have.
   check(
     "a near-zero clock is floored, never inflated",
-    goCommand(P({ mode: "engine" }), { clock: { whiteMs: 3, blackMs: 0, incMs: -5 }, budgetMs: 50 }).cmd,
+    go(P({ mode: "engine" }), {
+      clock: { whiteMs: 3, blackMs: 0, incMs: -5 },
+      budgetMs: 50,
+      // Above the takeover point, so this still pins the clock command itself.
+      remainingMs: 600_000,
+    }).cmd,
     "go wtime 50 btime 50 winc 0 binc 0",
   );
+}
+
+// --- the takeover ----------------------------------------------------------
+// Below `Move Overhead × (2 + movestogo)` Stockfish has nothing left to
+// allocate and answers in ~2ms, so the seat stops delegating and spends its own
+// budget. It must be a REPLACEMENT: a `movetime` appended to a `wtime` command
+// is only a ceiling, so the collapsed search would survive it.
+{
+  const clock = { whiteMs: 12_000, blackMs: 12_000, incMs: 0 };
+  const at = (remainingMs: number, overheadMs: number, policy = P({ mode: "engine" })) =>
+    goCommand(policy, { clock, budgetMs: 400, remainingMs, overheadMs });
+
+  // 250ms reserve → dead at 13.0s, handover at 26.0s.
+  check("a healthy clock still delegates", at(30_000, 250).cmd.startsWith("go wtime"), true);
+  check("the collapse zone is taken over", at(20_000, 250).cmd, "go movetime 400");
+  check("and so is everything below it", at(5_000, 250).cmd, "go movetime 400");
+
+  // 60ms (1+0) → dead at 3.1s, handover at 6.2s. The whole point of scaling the
+  // reserve is that a bullet seat delegates far further down than a rapid one.
+  check("a bullet seat still delegates at 10s", at(10_000, 60).cmd.startsWith("go wtime"), true);
+  check("a bullet seat takes over at 5s", at(5_000, 60).cmd, "go movetime 400");
+
+  // The threshold is now a property of the ENGINE alone. No mode states its own
+  // movestogo any more, which is what stops a taste knob moving a safety cliff.
+  check("the threshold assumes 50 moves to go", takeoverBelowMs(P({ mode: "engine" }), 100), 10_400);
+  check(
+    "and no mode can change it",
+    new Set(
+      (["engine", "tempo", "fixed", "nodes"] as const).map((mode) =>
+        takeoverBelowMs(P({ mode }), 100),
+      ),
+    ).size,
+    1,
+  );
+
+  // The modes that already spend their own budget are unaffected either way.
+  check("fixed is unchanged in the takeover zone", at(1_000, 250, P({ mode: "fixed" })).cmd, "go movetime 400");
 }
 
 // --- labels ----------------------------------------------------------------
@@ -183,8 +239,81 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
   check("engine mode has no label", timePolicyLabel(P({ mode: "engine" })), "");
   check("a low fixed time reads as Blitzer", timePolicyLabel(P({ mode: "fixed", fixedMs: 250 })), "Blitzer");
   check("a high fixed time shows seconds", timePolicyLabel(P({ mode: "fixed", fixedMs: 2500 })), "2.5s/move");
-  check("a low movestogo reads as a deep thinker", timePolicyLabel(P({ mode: "pace", movestogo: 15 })), "Deep thinker");
+  check("a tempo preset reads by name", timePolicyLabel(P({ mode: "tempo", divisor: TEMPO_PRESETS.blitzer })), "Blitzer");
+  check("a hand-set pace reads as a fraction", timePolicyLabel(P({ mode: "tempo", divisor: 33 })), "1/33 clock");
   check("nodes reads in thousands", timePolicyLabel(P({ mode: "nodes", nodes: 250_000 })), "250k nodes");
+}
+
+// --- the network reserve ---------------------------------------------------
+// Not a preference: Stockfish holds back ~52x this number before it allocates
+// anything, so a flat value is a flat fraction of a rapid clock and a fifth of
+// a bullet one. Measured at 15s left on the shipped search: 100ms of thinking
+// at a 250ms reserve, 517ms at 100ms.
+{
+  check("1+0 scales down hard", moveOverheadMs(60_000), 60);
+  check("3+0 scales", moveOverheadMs(180_000), 180);
+  check("5+0 reaches the cap", moveOverheadMs(300_000), MAX_MOVE_OVERHEAD_MS);
+  check("10+0 stays at the cap", moveOverheadMs(600_000), MAX_MOVE_OVERHEAD_MS);
+
+  // The reserve Stockfish actually withholds is `overhead × (2 + 50)`. Pinning
+  // it as a SHARE of the clock is the property that matters — it is what keeps
+  // the collapse inside the range where instant moves are right anyway.
+  for (const initial of [60_000, 180_000]) {
+    const share = (moveOverheadMs(initial) * 52) / initial;
+    check(`${initial / 1000}s reserves about a twentieth of the clock`, share < 0.06, true);
+  }
+
+  // An absent clock means "not known yet", which calls for the most cautious
+  // value, not the smallest. Taking the floor here would risk flagging on
+  // latency in exactly the case where we know least.
+  check("an unknown clock takes the cap", moveOverheadMs(NaN), MAX_MOVE_OVERHEAD_MS);
+  check("a zero clock takes the cap", moveOverheadMs(0), MAX_MOVE_OVERHEAD_MS);
+  check("a tiny clock still reserves something", moveOverheadMs(1_000), MIN_MOVE_OVERHEAD_MS);
+}
+
+// --- the panel's preview ----------------------------------------------------
+// The honesty mechanism: the old panel previewed every mode EXCEPT the default,
+// and described that one in prose as having "nothing to lose" — while it was the
+// mode that answered in 2ms below 13 seconds. Every mode must now produce
+// numbers, including at the low clock where the bug lived.
+{
+  const bullet = { initialSecs: 60, incSecs: 0 };
+  const rapid = { initialSecs: 600, incSecs: 0 };
+
+  const e = previewAt(P({ mode: "engine" }), rapid);
+  check("engine mode previews a real handover point", e.handoverMs, 26_000);
+  check("a 10+0 seat delegates at full clock", e.delegatesAtFullClock, true);
+  check("and has taken over by 15s left", e.delegatesAtLowClock, false);
+  check("so the low-clock number is the seat's own budget", e.atLowClockMs > 0, true);
+
+  // Bullet reserves less, so it delegates much further down — the whole reason
+  // the reserve is scaled rather than flat.
+  const b = previewAt(P({ mode: "engine" }), bullet);
+  check("a 1+0 seat hands over far lower", b.handoverMs, 6_240);
+  // The low-clock sample follows the handover when that comes first. A fixed
+  // 15s sits ABOVE bullet's handover, so the row would have read "Stockfish" in
+  // both columns and never shown what the seat itself does — the one case this
+  // whole change is about. The cell reports the clock it sampled, so a sample
+  // that moves per row stays honest.
+  check("so bullet samples at its own handover", b.lowClockMs, 6_240);
+  check("and shows the seat's budget there, not the engine's", b.delegatesAtLowClock, false);
+  check("a longer control still samples at 15s", e.lowClockMs, 15_000);
+
+  // A mode that never delegates says so, at every time control.
+  const t = previewAt(P({ mode: "tempo" }), rapid);
+  check("tempo never delegates", [t.delegatesAtFullClock, t.delegatesAtLowClock], [false, false]);
+  // Floored, like every budget — a fractional ms would reach the engine as one.
+  check("tempo's first move is remaining/divisor", t.atFullClockMs, Math.floor(600_000 / TEMPO_PRESETS.steady));
+
+  // Every preset, every lobby time control, must produce a usable number rather
+  // than a zero or a NaN — this table is the only thing the user sees.
+  const sane = (["blitzer", "steady", "deliberate"] as const).every((k) =>
+    [60, 180, 300, 600].every((initialSecs) => {
+      const p = previewAt(P({ mode: "tempo", divisor: TEMPO_PRESETS[k] }), { initialSecs, incSecs: 0 });
+      return p.atFullClockMs >= MIN_BUDGET_MS && p.atLowClockMs >= MIN_BUDGET_MS;
+    }),
+  );
+  check("every preset previews a playable budget everywhere", sane, true);
 }
 
 process.exit(failed === 0 ? 0 : 1);

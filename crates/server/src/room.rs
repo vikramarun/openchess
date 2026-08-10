@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use game_engine::{Game, MoveApplied, MoveError, LAG_ALLOWANCE_MS};
+use game_engine::{Game, MoveApplied, MoveError};
 use ledger::{Address, SettlementSink};
 use persistence::Db;
 use protocol::{Color, GameEndReason, GameResult, ServerMessage, TimeControl};
@@ -69,6 +69,9 @@ pub struct Snapshot {
     pub clock: protocol::Clock,
     /// Milliseconds left in `START_WINDOW`; `None` once the game has begun.
     pub start_deadline_ms: Option<u64>,
+    /// The game's time control, so a spectator's replayed `GameStart` carries
+    /// the same field a player's does.
+    pub time_control: protocol::TimeControl,
 }
 
 pub struct RoomHandle {
@@ -326,6 +329,7 @@ impl Room {
                         moves_uci: g.moves_uci().to_vec(),
                         clock: g.clock(self.now_ms()),
                         start_deadline_ms: None,
+                        time_control: self.tc,
                     },
                     None => Snapshot {
                         started: false,
@@ -337,6 +341,7 @@ impl Room {
                             increment_ms: self.tc.increment_ms,
                         },
                         start_deadline_ms: Some(self.start_deadline_ms()),
+                        time_control: self.tc,
                     },
                 };
                 let _ = resp.send(snap);
@@ -366,6 +371,7 @@ impl Room {
                 your_color: Color::White,
                 clock,
                 opponent: Some(self.players[1].clone()),
+                time_control: Some(self.tc),
             },
         )
         .await;
@@ -377,6 +383,7 @@ impl Room {
                 your_color: Color::Black,
                 clock,
                 opponent: Some(self.players[0].clone()),
+                time_control: Some(self.tc),
             },
         )
         .await;
@@ -386,6 +393,7 @@ impl Room {
             your_color: Color::White,
             clock,
             opponent: None,
+            time_control: Some(self.tc),
         });
 
         self.prompt_turn().await;
@@ -410,14 +418,11 @@ impl Room {
                 your_color: color,
                 clock,
                 opponent: Some(self.players[opp_idx].clone()),
+                time_control: Some(game.time_control()),
             },
         )
         .await;
         if game.turn() == color {
-            let remaining = match color {
-                Color::White => clock.white_ms,
-                Color::Black => clock.black_ms,
-            };
             self.send_to(
                 color,
                 ServerMessage::YourTurn {
@@ -426,7 +431,7 @@ impl Room {
                     position_fen: game.fen(),
                     moves_uci: game.moves_uci().to_vec(),
                     clock,
-                    deadline_server_ms: now + remaining + LAG_ALLOWANCE_MS,
+                    deadline_server_ms: game.move_deadline_ms(),
                 },
             )
             .await;
@@ -444,17 +449,13 @@ impl Room {
         }
         let turn = game.turn();
         let clock = game.clock(now);
-        let remaining = match turn {
-            Color::White => clock.white_ms,
-            Color::Black => clock.black_ms,
-        };
         let msg = ServerMessage::YourTurn {
             game_id: self.game_id,
             ply: game.ply(),
             position_fen: game.fen(),
             moves_uci: game.moves_uci().to_vec(),
             clock,
-            deadline_server_ms: now + remaining + LAG_ALLOWANCE_MS,
+            deadline_server_ms: game.move_deadline_ms(),
         };
         self.send_to(turn, msg).await;
     }

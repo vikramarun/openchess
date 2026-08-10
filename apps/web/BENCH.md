@@ -1,3 +1,10 @@
+This file covers two harnesses:
+
+- **`/bench`** — what a playing *style* costs, at fixed nodes. The original, below.
+- **`/bench/time`** — what *clock management* is worth, at a real time control.
+  Written to close this file's own caveat ("Fixed nodes, not fixed time"), and
+  documented at the end.
+
 # What a playing style actually costs
 
 Measured, not modelled. Run the harness at `/bench` (development only —
@@ -103,3 +110,110 @@ over a game.
   handshake starts timing out), give the handshake a long timeout, stagger slot
   startup, and never let one failed game reject the run — an early version
   froze silently with no error anywhere because `Promise.all` rejected.
+
+---
+
+# What clock management is worth
+
+Measured, not modelled. Run the harness at `/bench/time` (development only —
+the route 404s in production, and inherits `/bench`'s `noindex`):
+
+```
+/bench/time?tc=1+0&pairs=8&arms=scaled,t2&rtt=80
+```
+
+This exists because the harness above says of itself: *"Fixed nodes, not fixed
+time. Time-based play adds clock-management effects this does not capture."*
+Those effects turned out to be where the real bug was — a flat `Move Overhead`
+made Stockfish answer in ~2ms below 13 seconds of clock — so they needed a
+harness of their own.
+
+## What it does differently, and why each matters
+
+**Concurrency 1, always.** The style bench runs six engines at once because a
+node is a node whatever else the CPU is doing. Here the unit of measurement *is*
+wall-clock, so a second engine on the same core changes the thing being
+measured. Copying `?conc=` across is the easiest way to get numbers that look
+fine and mean nothing.
+
+**A simulated round trip (`?rtt=`, default 80ms).** The whole purpose of a
+`Move Overhead` reserve is to pay for a network the harness does not have.
+Without charging one, every arm that reserved less would win by construction and
+the bench would confidently recommend a reserve of zero. Charging a trip the
+searches don't actually pay puts the real trade-off back: reserve too little and
+the flag becomes reachable.
+
+**Flagging is a real loss**, since it is most of what clock management is for.
+An arm that thinks beautifully and flags has lost.
+
+**The clock is charged from the ENGINE's own reported `time`, not from wall
+time.** This is the subtlest thing in the harness and it was got wrong first.
+A browser tab that isn't visible is throttled, so worker-to-main-thread delivery
+stretches — and billing that stretch to the player's clock pushes every arm
+deeper into the low-clock regime, which is exactly the regime under test. The
+bias is systematic, not noise, and it is silent: the run completes and the
+numbers look plausible. Charging `info … time` instead makes a run reproducible
+whether or not anyone is looking at the tab. The real per-move cost that wall
+time was standing in for is then modelled explicitly by `?rtt=`, which is a
+constant you control rather than a property of your window manager. Each arm
+still reports `overhead Nms/move` (wall minus engine time) — small on an idle
+foreground tab, large if the environment was busy. It no longer corrupts the
+result, but it tells you how much to trust it.
+
+**Both sides run the shipped code.** Arms differ only in `Move Overhead` and the
+takeover factor threaded through `goCommand`; the budget itself is
+`lib/timePolicy`'s. The bench measures what players get, not a paraphrase.
+
+The baseline is what shipped **before** any of this work: a flat 250ms reserve
+and full delegation to the engine's own manager. So an arm's Elo reads as
+"versus the bot players actually had".
+
+| arm | reserve | handover |
+|---|---|---|
+| `flat250/delegate` (baseline) | 250ms | never |
+| `scaled` | scaled to the TC | never |
+| `t1` / `t2` / `t4` | scaled | `overhead × 52 × factor` |
+
+## Results
+
+**Not yet run.** The harness is built and its clock is pinned, but no arm has
+been measured — the runs so far were smoke tests that validated the harness (and
+found two bugs in the process: a time-control label read as seconds, and the
+referee's renewable lag allowance).
+
+A real run needs a **foreground tab on an otherwise idle machine**: a hidden tab
+is throttled, and while the clock is now charged from the engine's own reported
+`time` rather than wall-clock, throttling still stretches a run to roughly ten
+minutes a game. Budget a couple of hours for a set with meaningful *n*.
+
+```
+pnpm -C apps/web dev
+# then, in a visible window:
+/bench/time?tc=1+0&pairs=8&arms=scaled,t1,t2,t4
+```
+
+Until that exists, **`TAKEOVER_FACTOR` is unmeasured**. It was chosen against
+measured *allocations* (at a 250ms reserve the engine allocates 209ms at 20s and
+100ms at 15s, where the seat's own budget gives 666ms and 500ms) rather than
+against a match result, and tuning it is the first thing this harness is for.
+
+## Harness gotchas, in the spirit of the ones above
+
+- **A time-control label is MINUTES.** `tc=1+0` is one minute; reading it as
+  seconds is silent, not fatal — the run completes, prints "1+0", and measures a
+  one-second game. It happened on the first run here. The tell was the reserve
+  line reading 50ms where a real 1+0 scales to 60. It now resolves through
+  `lib/timeControls` `tcByLabel` rather than parsing the label locally.
+- **The clock is pinned by a test** (`pnpm test:benchclock`). A harness clock
+  that is subtly wrong does not fail; it produces plausible Elo numbers that
+  decide what ships.
+- **The clock mirrors the referee exactly, including the sign.** Balances go
+  negative; an overrun is carried as debt and `remainingFor` clamps only what
+  the *seat* is shown, matching `to_wire` in `crates/game-engine`. Do not add a
+  `Math.max(0, …)` back into the charge. That clamp is precisely the bug this
+  harness found: with it, the 150ms lag allowance was handed back on every move
+  and a side sitting at 0ms never flagged. The 2-second smoke run that surfaced
+  it played 129 plies with neither side flagging — arithmetically impossible,
+  and the only reason it was visible at all is that a tiny clock makes the
+  budgets smaller than the allowance. A harness kinder than the referee measures
+  a game nobody plays; so does a harsher one.
