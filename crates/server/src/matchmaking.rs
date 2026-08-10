@@ -1995,6 +1995,19 @@ async fn tourney_join(
     headers: HeaderMap,
     Json(req): Json<JoinReq>,
 ) -> Result<Json<JoinResp>, StatusCode> {
+    // Guard BEFORE the admission gate, not after. The invite path below reserves
+    // a code under the lobby lock and — on every outcome, including failure —
+    // writes the tournament's whole snapshot back to Postgres. `tourney_join_inner`
+    // is where the drain check and the throttle used to live, which is after all
+    // of that: one valid unused invite code was then an unlimited lever for
+    // lock-taking and full-row upserts, since the code is handed back each time.
+    // `matchmaking::routes()` carries no `route_layer`, so this handler is the
+    // only place that can stop it. Charged once here rather than in both, so a
+    // single join still costs a single token.
+    if state.maintenance_on() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    state.reject_if_rate_limited_create(&headers)?;
     let (admission, already_in) = {
         let ts = state.0.lobby.tournaments.lock();
         let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2080,11 +2093,14 @@ async fn tourney_join_inner(
     req: JoinReq,
 ) -> Result<Json<JoinResp>, StatusCode> {
     // Drain: reject before locking a buy-in onchain for a tournament that
-    // couldn't be started.
+    // couldn't be started. Kept as a backstop even though `tourney_join` (this
+    // function's only caller) already checked — a money path should not depend on
+    // its caller for fail-closed behaviour. The THROTTLE is deliberately not
+    // repeated here: it is charged once, in the caller, above the invite
+    // reservation that would otherwise happen before it.
     if state.maintenance_on() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    state.reject_if_rate_limited_create(&headers)?;
     // Read the tournament's terms + whether this entrant is already in.
     let (buy_in, status, full) = {
         let t = state.0.lobby.tournaments.lock();
@@ -2504,8 +2520,16 @@ async fn tourney_request_decide(
 
 /// Whether an entrant id is itself a wallet (a buy-in entrant) rather than a
 /// chosen nickname (a casual one).
+///
+/// Case-insensitive on the `0x`, like every other address-shape test in the
+/// codebase (`username::is_address_shape`, the web's `isUsernameShape`). A
+/// case-sensitive version let `0X…` through the casual-nickname refusal: it
+/// bound nothing (this same predicate gates the read), but the WEB's fallback
+/// label path lowercases before matching, so it rendered as a bare, undecorated
+/// address in the standings instead of a `~`-prefixed guest.
 fn is_wallet_id(p: &str) -> bool {
-    p.starts_with("0x") && p.len() == 42
+    let b = p.as_bytes();
+    p.len() == 42 && b[0] == b'0' && (b[1] | 0x20) == b'x'
 }
 
 /// The wallet a tournament seat is bound to.
@@ -3557,6 +3581,67 @@ fn is_rehydratable(buy_in: Option<&str>, organizer: Option<&str>) -> bool {
     buy_in.is_none() || organizer.is_some()
 }
 
+/// The entrant field of a rehydrated tournament, after re-gating.
+pub struct Rehydrated {
+    players: Vec<String>,
+    entrant_bots: HashMap<String, BotEntry>,
+    entrant_wallets: HashMap<String, String>,
+}
+
+/// Re-apply the entrant rules to a field restored from Postgres.
+///
+/// `recover_tournaments` is a writer into the lobby that never passes through
+/// `tourney_join_inner`, so every rule the join enforces has to be re-asserted
+/// here or a row written before that rule existed comes back live. Two rules:
+///
+/// 1. **A casual id may not be an unbound address.** `entrant_wallet` reads an
+///    address-shaped id as that wallet only when the id is bound by neither
+///    `entrant_bots` nor `entrant_wallets` — so that, exactly, is the dangerous
+///    set, and the predicate here mirrors it rather than dropping every
+///    address-shaped id. The difference is not academic: a casual BOT entrant
+///    that registered under its own wallet address resolves to the agent's own
+///    registered wallet (nobody is impersonated), and a blanket filter would
+///    eject it from the field — permanently, since `players` is in
+///    `upsert_tournament`'s DO UPDATE set and the next join persists the pruned
+///    list.
+/// 2. **A pooled tournament has no `entrant_wallets` at all.** Its ids ARE the
+///    SIWE wallets (`tourney_join_inner`'s buy-in branch never writes that map),
+///    and `entrant_wallet` prefers a `wallets` entry over the id — so a single
+///    stored entry would rebind a paid seat, its onchain-settled identity and
+///    its ranked Elo to an arbitrary address. No writer can produce one today;
+///    this asserts it rather than trusting it, which is the difference that
+///    caused every other bug in this family.
+///
+/// Bindings for dropped ids are dropped with them, so nothing is left keyed on
+/// an entrant who is no longer in the field.
+fn rehydrated_entrants(
+    buy_in: Option<&str>,
+    players: Vec<String>,
+    bots: HashMap<String, BotEntry>,
+    wallets: HashMap<String, String>,
+) -> Rehydrated {
+    if has_pool(buy_in) {
+        return Rehydrated {
+            players,
+            entrant_bots: bots,
+            entrant_wallets: HashMap::new(),
+        };
+    }
+    let kept: Vec<String> = players
+        .into_iter()
+        .filter(|p| !is_wallet_id(p) || bots.contains_key(p) || wallets.contains_key(p))
+        .collect();
+    let mut bots = bots;
+    let mut wallets = wallets;
+    bots.retain(|k, _| kept.contains(k));
+    wallets.retain(|k, _| kept.contains(k));
+    Rehydrated {
+        players: kept,
+        entrant_bots: bots,
+        entrant_wallets: wallets,
+    }
+}
+
 /// The admission a stored row comes back with.
 ///
 /// Normally exactly what was stored — a tournament that came back `Open` would
@@ -3755,28 +3840,26 @@ pub async fn recover_tournaments(state: &AppState) {
                 // function exists to prevent.
                 let age = Duration::from_secs(r.age_secs.max(0) as u64).min(TOURNEY_TTL);
                 let created_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
-                let mut players: Vec<String> =
+                let stored_players: Vec<String> =
                     serde_json::from_value(r.players).unwrap_or_default();
-                // A CASUAL entrant id is a nickname, so an address-shaped one is
-                // a row written before `tourney_join_inner` refused that shape.
-                // `entrant_wallet` already declines to read it as a wallet, so it
-                // is inert — but it would still be RENDERED as the victim's
-                // address in the standings and on the board, and whoever reads it
-                // there can pull its launch token. An `open` row has no schedule
-                // yet (`rounds` is rebuilt at start), so nothing references the
-                // entrant list and dropping the id is safe. Buy-in ids are
-                // wallets by construction and must never be touched here.
-                if r.buy_in.is_none() {
-                    let before = players.len();
-                    players.retain(|p| !is_wallet_id(p));
-                    if players.len() != before {
-                        tracing::warn!(
-                            tournament = %r.id,
-                            dropped = before - players.len(),
-                            "dropped address-shaped entrant id(s) from a casual tournament: a \
-                             nickname may not impersonate a wallet"
-                        );
-                    }
+                let before = stored_players.len();
+                let Rehydrated {
+                    players,
+                    entrant_bots,
+                    entrant_wallets,
+                } = rehydrated_entrants(
+                    r.buy_in.as_deref(),
+                    stored_players,
+                    bots_from_json(&r.bots),
+                    serde_json::from_value(r.entrant_wallets).unwrap_or_default(),
+                );
+                if players.len() != before {
+                    tracing::warn!(
+                        tournament = %r.id,
+                        dropped = before - players.len(),
+                        "dropped unbound address-shaped entrant id(s) from a casual tournament: \
+                         a nickname may not impersonate a wallet"
+                    );
                 }
                 // The prize structure has to come back exactly, or the field is
                 // paid a table it never agreed to — silently, since the money
@@ -3843,11 +3926,12 @@ pub async fn recover_tournaments(state: &AppState) {
                     current_round: 0,
                     round_remaining: 0,
                     forfeits: Vec::new(),
-                    entrant_bots: bots_from_json(&r.bots),
+                    entrant_bots,
                     entrant_engines: serde_json::from_value(r.entrant_engines).unwrap_or_default(),
-                    // Restored: attribution is NOT cosmetic — a casual entrant's
-                    // games dispatched after a restart still belong to them.
-                    entrant_wallets: serde_json::from_value(r.entrant_wallets).unwrap_or_default(),
+                    // Restored (attribution is NOT cosmetic — a casual entrant's
+                    // games dispatched after a restart still belong to them), but
+                    // re-gated first; see `rehydrated_entrants`.
+                    entrant_wallets,
                     payout_leaves: Vec::new(),
                     created_at,
                 });
@@ -6615,27 +6699,98 @@ mod tests {
         assert_eq!(rehydrated_admission(Open, Some("not-a-number")), Approval);
     }
 
-    /// A casual entrant id may not be address-shaped, and rehydration is the one
-    /// writer that can still introduce one (rows predate the join guard).
-    /// `entrant_wallet` already refuses to READ it as a wallet, but leaving it in
-    /// the field would still render the victim's address in the standings.
+    /// Rehydration re-applies the entrant rules the join door enforces.
+    ///
+    /// Calls the REAL `rehydrated_entrants` that `recover_tournaments` uses — an
+    /// earlier version of this test re-implemented the filter inline, so deleting
+    /// the production call would have left it green.
     #[test]
-    fn rehydration_drops_address_shaped_casual_entrants() {
+    fn rehydration_re_gates_the_entrant_field() {
         let victim = "0xdead222222222222222222222222222222222222";
-        let stored = vec!["Alice".to_string(), victim.to_string(), "Bob".to_string()];
+        let botid = "0xb0770000000000000000000000000000000000bb";
+        let signed = "0x5161ed00000000000000000000000000000000ff";
+        let owner = "0xaa11111111111111111111111111111111111111";
+        let mk = |players: Vec<&str>, bots: Vec<&str>, wallets: Vec<(&str, &str)>| {
+            (
+                players.into_iter().map(String::from).collect::<Vec<_>>(),
+                bots.into_iter()
+                    .map(|b| {
+                        (
+                            b.to_string(),
+                            BotEntry {
+                                wallet: owner.into(),
+                                uci_options: Vec::new(),
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>(),
+                wallets
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
 
-        // Casual: the poisoned id is dropped, honest nicknames survive in order.
-        let mut casual = stored.clone();
-        casual.retain(|p| !is_wallet_id(p));
-        assert_eq!(casual, vec!["Alice".to_string(), "Bob".to_string()]);
+        // CASUAL: an UNBOUND address-shaped id is the dangerous one — that is
+        // exactly when entrant_wallet would read it as that wallet. Dropped.
+        let (p, b, w) = mk(vec!["Alice", victim, "Bob"], vec![], vec![]);
+        let out = rehydrated_entrants(None, p, b, w);
+        assert_eq!(out.players, vec!["Alice".to_string(), "Bob".to_string()]);
 
-        // Buy-in: ids ARE wallets by construction — dropping them would empty
-        // the field of every paying entrant, so the filter must not run there.
-        // (Guarded by `r.buy_in.is_none()` at the call site.)
+        // CASUAL: an address-shaped id that IS bound impersonates nobody — it
+        // resolves to the binding, not to itself — so it must be KEPT. Dropping
+        // it would eject a legitimate entrant, permanently (players is
+        // re-persisted). Both binding kinds.
+        let (p, b, w) = mk(vec![botid, "Bob"], vec![botid], vec![]);
+        let out = rehydrated_entrants(None, p, b, w);
         assert!(
-            is_wallet_id(victim),
-            "the filter's predicate must match entrant_wallet's fallback exactly"
+            out.players.contains(&botid.to_string()),
+            "a bound bot entrant must survive rehydration"
         );
+        let (p, b, w) = mk(vec![signed, "Bob"], vec![], vec![(signed, owner)]);
+        let out = rehydrated_entrants(None, p, b, w);
+        assert!(
+            out.players.contains(&signed.to_string()),
+            "a wallet-bound casual entrant must survive rehydration"
+        );
+
+        // CASUAL: bindings for a DROPPED id go with it — nothing stays keyed on
+        // an entrant who is no longer in the field.
+        let (p, b, w) = mk(vec!["Alice"], vec![victim], vec![(victim, owner)]);
+        let out = rehydrated_entrants(None, p, b, w);
+        assert!(out.entrant_bots.is_empty() && out.entrant_wallets.is_empty());
+
+        // POOLED: ids ARE wallets, so none is ever dropped...
+        let (p, b, w) = mk(vec![victim, owner], vec![], vec![]);
+        let out = rehydrated_entrants(Some("1000000"), p, b, w);
+        assert_eq!(out.players.len(), 2, "a paid field is never pruned");
+        // ...and entrant_wallets must be empty, because entrant_wallet prefers a
+        // wallets entry over the id: one stored row would rebind a paid seat's
+        // settled identity and ranked Elo to an arbitrary address.
+        let (p, b, w) = mk(vec![victim], vec![], vec![(victim, owner)]);
+        let out = rehydrated_entrants(Some("1000000"), p, b, w);
+        assert!(
+            out.entrant_wallets.is_empty(),
+            "a pooled tournament must carry no entrant_wallets"
+        );
+        // Free entry is pooled too (its ids are SIWE wallets).
+        let (p, b, w) = mk(vec![victim], vec![], vec![(victim, owner)]);
+        assert!(rehydrated_entrants(Some("0"), p, b, w)
+            .entrant_wallets
+            .is_empty());
+    }
+
+    #[test]
+    fn is_wallet_id_is_case_insensitive_like_every_other_address_test() {
+        let lower = "0xdead222222222222222222222222222222222222";
+        let upper = "0Xdead222222222222222222222222222222222222";
+        assert!(is_wallet_id(lower));
+        assert!(is_wallet_id(upper), "0X must not slip past the guard");
+        assert!(!is_wallet_id("Alice"));
+        assert!(!is_wallet_id("0xshort"));
+        // Multibyte input must not panic on the byte indexing.
+        assert!(!is_wallet_id("é"));
+        assert!(!is_wallet_id(""));
     }
 
     #[test]
