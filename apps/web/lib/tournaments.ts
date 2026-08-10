@@ -239,17 +239,26 @@ export function casualIdentity(tid: string): string | null {
 /** What to call an entrant.
  *
  *  An entrant id is a wallet (a legacy casual entry may still be a nickname),
- *  and `labels` maps the ones whose seat has a claimed username. Falls back to a
- *  shortened address for a wallet and to the nickname itself otherwise — never
- *  to a raw 42-character id, which is what the standings printed before the
- *  server started resolving handles.
+ *  and the server resolves a label for every one of them: a claimed username, a
+ *  short address, or a `~`-decorated legacy nickname. That map is the authority
+ *  — prefer it always.
+ *
+ *  The fallback below only fires when the server sent none (an old server, or a
+ *  DB hiccup). Even then a bare nickname must not be printed: a legacy entry
+ *  could hold a real user's handle, and rendering it undecorated would read as
+ *  that user. So it gets the same `~` the server's `guest_label` applies (`~` is
+ *  outside the username charset, so it cannot collide with a real handle).
  *
  *  Shared so the crosstable, the pairings and the organizer's request list all
  *  say the same thing about the same person. */
 export function entrantLabel(t: Pick<Tournament, "labels">, id: string): string {
   const named = t.labels[id] ?? t.labels[id.toLowerCase()];
   if (named) return named;
-  return isAddress(id.toLowerCase()) ? shortAddress(id) : id;
+  if (isAddress(id.toLowerCase())) return shortAddress(id);
+  // Prefix unconditionally, exactly as the server's `guest_label` does. Skipping
+  // it for an id that already starts with `~` would render guest `~alice` and
+  // guest `alice` identically — the collision this decoration exists to stop.
+  return `~${id}`;
 }
 
 /** Entrant ids are compared case-insensitively everywhere on the server. */

@@ -79,6 +79,17 @@ export default function TournamentPage() {
 /** Sentinel for the "type your own percentages" option in the prizes picker. */
 const CUSTOM_PAYOUT = "custom";
 
+/** Smallest entry fee (USDC base units — so 1 USDC) that lets a POOLED event be
+ *  open to anyone. Below it the organizer must gate admission, because a pool
+ *  can be topped up by sponsors and near-free seats let throwaway entrants take
+ *  a prize far larger than they paid for.
+ *
+ *  Hand-synced with `MIN_OPEN_ENTRY_FEE` in crates/server/src/matchmaking.rs,
+ *  which is the real boundary — this copy only buys a sentence instead of a bare
+ *  400. Divergence fails soft in both directions (a server 400 the client didn't
+ *  predict, or a refusal the server would have allowed). */
+const MIN_OPEN_ENTRY_FEE = 1_000_000n;
+
 /** A tournament's prize structure, by preset name when it matches one. */
 const payoutLabel = (t: Tournament) => presetLabel(t.payout.bps) ?? formatPayout(t.payout.bps);
 
@@ -320,7 +331,17 @@ function TournamentClient() {
         ? `${SERVER_HTTP}/tournaments/${tid}/my-games`
         : `${SERVER_HTTP}/tournaments/${tid}/my-games?player=${encodeURIComponent(me)}`;
       try {
-        const r = await fetch(url, { headers: buyIn && token ? { authorization: `Bearer ${token}` } : {} });
+        // authedFetch, always — casual included. A signed-in casual entrant's
+        // seat is WALLET-BOUND, and the server requires the matching wallet
+        // before handing out that seat's launch token (otherwise anyone could
+        // read the entrant's nickname off the standings and drive their seat).
+        // Sending no header there 401s, `load` bails, no token ever arrives, and
+        // the entrant sits on "Taking your seat…" until the round reaps them as
+        // a no-show — every round. authedFetch rather than a bare bearer so an
+        // expired session self-heals mid-tournament instead of silently
+        // forfeiting: it drops the dead token, the header re-prompts, and the
+        // auto-sign effect re-establishes the session.
+        const r = await authedFetch(url);
         if (!r.ok || !alive) return;
         const games: MyGame[] = await r.json();
         setMyTokens((prev) => {
@@ -365,10 +386,42 @@ function TournamentClient() {
     if (buyIn.trim()) {
       if (!token)
         return setErr("Sign in (top right) to create a tournament with an entry fee.");
+      // viem's parseUnits accepts `-`, `.`, `-0` and friends (its regex allows
+      // an empty integer AND fraction), all of which come back as 0n — so a
+      // stray keypress or a half-typed negative would otherwise be read as a
+      // deliberate free event. Require an actual digit before trusting it.
+      if (!/[0-9]/.test(buyIn)) return setErr("Enter a valid USDC entry fee.");
+      let base: bigint;
       try {
-        buyInBase = parseUsdc(buyIn).toString();
+        base = parseUsdc(buyIn);
       } catch {
         return setErr("Enter a valid USDC entry fee.");
+      }
+      // parseUsdc happily parses a negative, and the server's `entry_fee` reads
+      // it back with an unsigned parse that fails to 0 — so "-5" would land in
+      // the free-entry branch rather than being refused.
+      if (base < 0n) return setErr("Enter a positive USDC entry fee.");
+      // parseUsdc ROUNDS to the 6-decimal base unit, so a sub-micro fee like
+      // "0.0000001" silently becomes 0 — turning a paid event the creator
+      // intended into a free, sponsor-funded one. Only a deliberate zero means
+      // free entry; test the INPUT for a significant digit rather than the
+      // string being exactly "0", or "0.00" gets scolded for a typo it isn't.
+      if (base === 0n && /[1-9]/.test(buyIn)) {
+        return setErr(
+          "That entry fee rounds to nothing (the minimum is 0.000001 USDC). Enter a larger amount, or 0 for a free, sponsor-funded event.",
+        );
+      }
+      buyInBase = base.toString();
+      // A pooled event with a ~free entry must be gated: the pool can be topped
+      // up by sponsors, so an Open one lets throwaway entrants take a prize far
+      // bigger than their seats cost. Mirrors the server (MIN_OPEN_ENTRY_FEE),
+      // so the creator gets a sentence instead of a bare 400.
+      if (base < MIN_OPEN_ENTRY_FEE && admission === "open") {
+        return setErr(
+          base === 0n
+            ? "A free-entry event needs an invite or approval gate — otherwise anyone could join for nothing and split the sponsored pool. Set “Who can join” to invite or approval."
+            : "An entry fee under 1 USDC needs an invite or approval gate — otherwise anyone could join for almost nothing and split the pool. Raise the fee, or set “Who can join” to invite or approval.",
+        );
       }
     }
     try {
@@ -475,9 +528,13 @@ function TournamentClient() {
     setErr(null);
     if (t.buy_in && !token) return setErr("Sign in (top right) to start your tournament.");
     try {
-      const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/start`, {
+      // authedFetch, not a bare bearer: starting is organizer-authenticated, and
+      // a session that lapsed (every server redeploy voids them) would otherwise
+      // 401 with no way to recover — the dead token stays in storage and a
+      // reload reproduces it. This drops it and re-prompts instead. Sent for a
+      // casual tournament too; anyone may start one, so the header is ignored.
+      const r = await authedFetch(`${SERVER_HTTP}/tournaments/${t.id}/start`, {
         method: "POST",
-        headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
       });
       if (!r.ok)
         setErr(
@@ -485,9 +542,11 @@ function TournamentClient() {
             ? MAINTENANCE_MSG
             : r.status === 409
               ? "Need at least 2 entrants."
-              : r.status === 403
-                ? "Only the organizer can start this tournament."
-                : `Couldn’t start (${r.status}).`,
+              : r.status === 401
+                ? SESSION_EXPIRED
+                : r.status === 403
+                  ? "Only the organizer can start this tournament."
+                  : `Couldn’t start (${r.status}).`,
         );
       else setOpenTid(t.id);
     } catch {

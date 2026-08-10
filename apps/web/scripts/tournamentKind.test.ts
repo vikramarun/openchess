@@ -78,11 +78,16 @@ check(
   "0xAAaa…0001",
 );
 check(
-  "a casual nickname is its own label",
+  "an unlabelled casual nickname is ~-decorated (never shown bare — a guest could type a real handle)",
   entrantLabel(lab({}), "alice"),
-  "alice",
+  "~alice",
 );
-check("no labels at all still renders something", entrantLabel(lab({}), "bob"), "bob");
+check(
+  "a nickname that already starts with ~ is still prefixed — matching the server's guest_label, so guest `~alice` can't render as guest `alice`",
+  entrantLabel(lab({}), "~alice"),
+  "~~alice",
+);
+check("no labels at all still renders something", entrantLabel(lab({}), "bob"), "~bob");
 
 console.log(failed === 0 ? "\nall tournament-kind checks passed" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);

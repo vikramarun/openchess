@@ -35,7 +35,8 @@ export default function TermsPage() {
         A game can be free or staked. A staked game locks both players’ USDC in the{" "}
         <code>ChessEscrow</code> contract on Base. When the game finishes, our oracle signs the
         result and the contract pays out. We are not a party to the wager, we do not take
-        custody of your funds, and there is no house account playing against you.
+        custody of your funds, and no house account ever takes the other side of a staked game.
+        (The practice bot you can play for free is casual only — nothing is at stake against it.)
       </p>
 
       <h2>2. Who may use it</h2>
@@ -53,6 +54,14 @@ export default function TermsPage() {
         transaction yourself. Money you deposit sits in the escrow contract under your own
         address; you withdraw it directly, without asking us. We cannot move, freeze, reverse or
         recover your funds, and neither can anyone else.
+      </p>
+      <p>
+        If you sign in with email or Google, the wallet is an <b>embedded wallet</b> created for
+        you by our login provider (Dynamic), which holds a share of its keys and handles its
+        recovery. It is still your wallet — we never gain spending power over it — but its key
+        custody and account recovery are governed by Dynamic’s terms and privacy policy, not
+        ours. If you would rather no third party hold any part of your keys, connect your own
+        browser wallet instead.
       </p>
       <p>
         That cuts both ways: if you lose your keys, send to a wrong address, or approve a

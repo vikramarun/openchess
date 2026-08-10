@@ -41,7 +41,7 @@ function check(name: string, ok: boolean, detail = "") {
 
 /** The declaration block of the first TOP-LEVEL rule whose selector matches.
  *
- *  Column-0 only, which is what keeps the `.site-header` inside the ≤720px
+ *  Column-0 only, which is what keeps the `.site-header` inside the ≤1100px
  *  media query (indented) from being read as the base rule. The flip side is
  *  that this reads the SOURCE, not the cascade: a second top-level
  *  `.site-header` added later would win in a browser and be invisible here.
@@ -258,7 +258,7 @@ check(
 
 // The three rules that make the swap work live INSIDE one media query —
 // indented, so `ruleBody` cannot see them by design. The BREAKPOINT is not
-// pinned (it moved from 720px to 1000px when the six-link nav stopped fitting);
+// pinned (it moved from 720px to 1100px when the six-link nav stopped fitting);
 // what is pinned is that all three sit in the SAME query. Hiding the nav at one
 // width and showing the bar at another leaves every width in between with no
 // navigation at all, and a fixed bar with no matching <body> padding buries the

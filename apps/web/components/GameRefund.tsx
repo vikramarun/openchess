@@ -76,7 +76,14 @@ export function GameRefund({
   // when rather than showing nothing, so a missing stake isn't a mystery.
   const pending = exists && !settled && settleTimeout != null && now <= windowOpensAt;
 
-  const hasAction = ready || pending;
+  // A successful refund sets `settled` onchain, which clears BOTH `ready` and
+  // `pending` — so without this the row unmounts the moment it succeeds, and
+  // `onResolved(false)` lets the parent hide the whole "Payouts & refunds" panel
+  // if this was the only item. The user approves a 25 USDC refund, the tx
+  // confirms, and the button plus the panel simply vanish with no confirmation,
+  // which reads as failure. Keep the row for this session so it can say so.
+  const [justRefunded, setJustRefunded] = useState(false);
+  const hasAction = ready || pending || justRefunded;
   useEffect(() => {
     onResolved?.(hasAction);
   }, [hasAction, onResolved]);
@@ -89,12 +96,18 @@ export function GameRefund({
     try {
       await ensureChain(expected);
       const hash = await writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "claimTimeout",
         args: [idHex],
       });
-      await publicClient!.waitForTransactionReceipt({ hash });
+      // waitForTransactionReceipt RESOLVES for a reverted tx, so check the
+      // status — a reverted claim otherwise refetches and looks like success.
+      const receipt = await publicClient!.waitForTransactionReceipt({ hash });
+      if (receipt.status === "reverted") throw new Error("The refund reverted onchain.");
+      setJustRefunded(true); // keep the row alive to confirm what landed
       refetch();
     } catch (e: any) {
       setError(e?.shortMessage ?? e?.message ?? "Transaction failed.");
@@ -109,6 +122,12 @@ export function GameRefund({
         <button className="ghost" onClick={doRefund} disabled={busy}>
           {busy ? "Refunding…" : `Refund unsettled game · ${fmtUsdc(stake)} USDC`}
         </button>
+      ) : justRefunded ? (
+        // `settled` is now true onchain, so neither branch below applies — this
+        // is the confirmation of the refund the user just took.
+        <span className="muted" style={{ fontSize: 13 }}>
+          {`Refunded ${fmtUsdc(stake)} USDC ✓`}
+        </span>
       ) : (
         <span className="muted" style={{ fontSize: 13 }}>
           {`Unsettled game · ${fmtUsdc(stake)} USDC · refundable in ${hoursUntil(windowOpensAt)}`}
