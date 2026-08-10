@@ -4,7 +4,10 @@
 
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
-use protocol::{ClientCapabilities, ClientMessage, Color, Envelope, ServerEnvelope, ServerMessage};
+use protocol::{
+    ClientCapabilities, ClientMessage, Clock, Color, Envelope, ServerEnvelope, ServerMessage,
+    TimeControl,
+};
 use shakmaty::uci::UciMove;
 use shakmaty::{Chess, Position};
 use tokio_tungstenite::connect_async;
@@ -95,6 +98,18 @@ pub fn move_overhead_for(initial_ms: Option<u64>) -> u64 {
         Some(ms) if ms > 0 => (ms / 1000).clamp(MIN_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS),
         _ => MAX_MOVE_OVERHEAD_MS,
     }
+}
+
+/// Which number to scale the reserve from, given a `GameStart`.
+///
+/// A named function because the obvious reading is wrong: `clock` is the time
+/// control only on the FIRST send. The same frame is resent to a reconnecting
+/// player with whatever time is LEFT, so scaling off it gave a seat rejoining a
+/// 10+0 game at 12s the smallest reserve we allow. `time_control` is `None` only
+/// on a server predating the field, where the clock is right on a fresh game and
+/// wrong on a reconnect — strictly better than giving up the scaling entirely.
+pub fn initial_ms_from(time_control: Option<TimeControl>, clock: &Clock) -> u64 {
+    time_control.map(|tc| tc.initial_ms).unwrap_or(clock.white_ms)
 }
 
 /// Moves Stockfish assumes remain when a `go` carries no `movestogo`, and how
@@ -288,8 +303,7 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                 // is correct on the first `GameStart` and wrong only on a
                 // reconnect.
                 if opts.time.move_overhead_ms.is_none() && engine.supports_option("Move Overhead") {
-                    let initial_ms = time_control.map(|tc| tc.initial_ms).unwrap_or(clock.white_ms);
-                    overhead_ms = move_overhead_for(Some(initial_ms));
+                    overhead_ms = move_overhead_for(Some(initial_ms_from(time_control, &clock)));
                     engine
                         .set_option("Move Overhead", &overhead_ms.to_string())
                         .await?;
@@ -537,6 +551,36 @@ mod tests {
         // blunders in one client and not the other.
         assert_eq!(takeover_below_ms(250), 26_000);
         assert_eq!(takeover_below_ms(60), 6_240);
+    }
+
+    #[test]
+    fn the_reserve_is_scaled_from_the_time_control_not_the_clock() {
+        // `GameStart` is resent on RECONNECT with the time that is LEFT, so
+        // scaling off `clock` handed a seat rejoining a 10+0 game at 12s the
+        // floor (50ms) instead of 250ms — halving its network tolerance and
+        // dragging its handover from 26s down to 5.2s.
+        let tc = TimeControl {
+            initial_ms: 600_000,
+            increment_ms: 0,
+        };
+        let mid_game = Clock {
+            white_ms: 12_000,
+            black_ms: 30_000,
+            increment_ms: 0,
+        };
+        assert_eq!(initial_ms_from(Some(tc), &mid_game), 600_000);
+        assert_eq!(move_overhead_for(Some(initial_ms_from(Some(tc), &mid_game))), 250);
+
+        // A server too old to send the field still gets the scaling from the
+        // clock, which is right on a fresh game. Losing that would put every
+        // seat back on a flat reserve until the server is deployed — the two do
+        // not ship together.
+        let fresh = Clock {
+            white_ms: 60_000,
+            black_ms: 60_000,
+            increment_ms: 0,
+        };
+        assert_eq!(move_overhead_for(Some(initial_ms_from(None, &fresh))), 60);
     }
 
     #[test]
