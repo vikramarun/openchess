@@ -225,7 +225,12 @@ function AuthButtonInner() {
             onClick={() => {
               // A direct click IS the gesture — mark it so an account switch
               // later in this flow can auto-complete like the modal path does.
-              markSignInIntent();
+              // This handler starts the sign-in itself, so it must also CLAIM
+              // the gesture's attempt key: the auto-complete effect skips while
+              // `busy`, and an unclaimed key after a rejected signature would
+              // make that effect fire a second prompt the user just declined.
+              const gesture = markSignInIntent();
+              signTried.current = `${gesture}:${address!.toLowerCase()}`;
               runSignIn();
             }}
           >

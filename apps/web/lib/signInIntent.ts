@@ -31,10 +31,16 @@ let intentCount = 0;
 
 const INTENT_EVENT = "openchess:sign-in-intent";
 
-/** Record an explicit sign-in gesture. Call from click handlers ONLY. */
-export function markSignInIntent() {
+/** Record an explicit sign-in gesture. Call from click handlers ONLY.
+ *
+ *  Returns the new count so a handler that ALSO starts the sign-in itself can
+ *  claim this gesture's attempt key up front — without that, the auto-complete
+ *  effect (which skips while the sign-in is busy) would find the gesture
+ *  unclaimed after a rejected signature and fire a second prompt. */
+export function markSignInIntent(): number {
   intentCount += 1;
   if (typeof window !== "undefined") window.dispatchEvent(new Event(INTENT_EVENT));
+  return intentCount;
 }
 
 function subscribe(cb: () => void): () => void {
