@@ -121,30 +121,69 @@ check(
     "anything gated on a fetch hangs the page when the server is down",
 );
 
-// --- the gate is a DOOR, not a fence ---
-// The most expensive thing in this file. <SeatGame> renders under RequireSignIn,
-// so a gate that RETRACTS unmounts a live board and closes its socket — and a
-// seat that is gone (rather than idle) hands the opponent a forfeit win and the
-// whole stake, per room.rs reap_forfeit_winner. Every ordinary way a token
-// disappears would then confiscate a stake from someone sitting right there
-// playing: authedFetch dropping a stale token on a 401, the 24h session TTL
-// lapsing mid-game, a wallet disconnect or account switch firing clearAuth.
+// --- the latch guards BOARDS, not sessions ---
+// The most expensive thing in this file, in both directions. <SeatGame> renders
+// under RequireSignIn, so a gate that retracts while a game is live unmounts the
+// board and closes its socket — and a seat that is gone (rather than idle) hands
+// the opponent a forfeit win and the whole stake, per room.rs
+// reap_forfeit_winner. Every ordinary way a token dies mid-game would then
+// confiscate a stake from someone sitting right there playing: authedFetch
+// dropping a stale token on a 401, the 24h TTL lapsing, a wallet disconnect or
+// account switch firing clearAuth.
 //
-// So once admitted, it stays admitted for the life of the mount. Nothing is lost
-// — the server re-checks the session on every route these pages call, and a
-// fresh visit remounts. Grepped rather than rendered, like the rest of this
-// file: what matters is that the latch is still there.
+// But with NO board open, staying "admitted" is just a stale answer — signing
+// out of /lobby and still seeing the lobby shipped once. And the sign-out users
+// actually reach for (Dynamic's profile widget) is indistinguishable from a
+// wallet-side disconnect at our layer, so there is no safe "the user chose
+// this" signal. The design therefore keys on the BOARD: SeatGame takes a hold
+// (lib/liveSeat.ts useLiveSeatHold), and the gate re-walls on any auth loss
+// exactly when no hold is open. Four checks, one per load-bearing piece.
 check(
-  "admission latches",
+  "admission latches while a board could be live",
   /admitted/.test(gate) && /state === "in" \|\| admitted/.test(gate),
-  "RequireSignIn must keep rendering children once it has admitted someone — " +
-    "retracting unmounts a live board and forfeits its stake",
+  "RequireSignIn must keep rendering children once it has admitted someone, " +
+    "until the unlatch below says otherwise",
 );
 check(
   "the latch is set during render, not in an effect",
   /if \(state === "in" && !admitted\) setAdmitted\(true\)/.test(gate) &&
     !/useEffect\([^)]*setAdmitted/.test(gate),
   "an effect runs after paint, so the wall would flash over a live board first",
+);
+check(
+  "signing out re-walls the page — unless a live board holds the latch",
+  /if \(state === "out" && admitted && liveSeats === 0\) setAdmitted\(false\)/.test(gate),
+  "RequireSignIn must unlatch on auth loss when (and only when) no live seat " +
+    "is mounted — drop the liveSeats guard and a mid-game token expiry " +
+    "confiscates a stake; drop the unlatch and signing out of /lobby leaves " +
+    "the lobby on screen",
+);
+check(
+  "the gate SUBSCRIBES to the hold count",
+  /useLiveSeats\(\)/.test(gate),
+  "reading a snapshot isn't enough: a signed-out player finishing a game must " +
+    "see the wall return when the board unmounts, and only a subscription " +
+    "re-renders the gate at that moment",
+);
+
+// The other half of the contract lives in the board and the hold module. If
+// SeatGame ever stops declaring itself, the guard above is vacuously zero and
+// every auth loss unmounts live games again — silently, since the unlatch keeps
+// "working". So the hold is pinned at both ends.
+const seatGame = read("components/SeatGame.tsx");
+check(
+  "SeatGame holds the latch open for the life of its mount",
+  /useLiveSeatHold\(\)/.test(seatGame),
+  "components/SeatGame.tsx must call useLiveSeatHold() — without the hold, " +
+    "the gate's unlatch fires with a live board mounted and forfeits its stake",
+);
+const liveSeat = read("lib/liveSeat.ts");
+check(
+  "a hold is taken in an effect and released exactly once",
+  /useEffect\(\(\) => acquireLiveSeat\(\), \[\]\)/.test(liveSeat) &&
+    /if \(released\) return/.test(liveSeat),
+  "lib/liveSeat.ts must pair acquire with a once-only release per mount, or " +
+    "Strict Mode's double-invoke drifts the count and wedges the gate",
 );
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");

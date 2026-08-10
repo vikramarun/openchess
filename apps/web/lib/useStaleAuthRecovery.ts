@@ -73,6 +73,12 @@ export function useStaleAuthRecovery() {
     window.location.reload();
   }, []);
 
+  // NOTE: this must stay on plain `clearAuth`, never lib/escrow's explicit
+  // sign-out announcer — the 30s auto-logout timer below invokes this same
+  // function with no user behind it, and the explicit-sign-out event retracts
+  // RequireSignIn's admission latch (unmounting whatever lives under it). The
+  // escape-hatch BUTTON's onClick in AuthButton is where the announcement
+  // belongs; test:gate greps this file to keep it out of here.
   const manualLogout = useCallback(async () => {
     clearTimers();
     try {

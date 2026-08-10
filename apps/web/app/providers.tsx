@@ -2,6 +2,7 @@
 
 import { EthereumWalletConnectors } from "@dynamic-labs/ethereum";
 import { DynamicContextProvider } from "@dynamic-labs/sdk-react-core";
+import type { EvmNetwork } from "@dynamic-labs/types";
 import { DynamicWagmiConnector } from "@dynamic-labs/wagmi-connector";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -16,6 +17,45 @@ import { EngineProvider } from "@/lib/engineContext";
 // installed. Those logins provision an embedded MPC wallet — an ordinary EOA
 // whose signatures are indistinguishable from MetaMask's, so lib/siwe.ts and the
 // server's ecrecover check work on it unchanged.
+
+// This app settles on Base and nowhere else, so Dynamic's network set is pinned
+// HERE with `overrides.evmNetworks` — an array override REPLACES whatever the
+// dashboard has enabled (which today is only Ethereum mainnet, i.e. wrong).
+// Without the override, the dashboard is a second source of truth this repo
+// can't see or test, and it drifts: embedded wallets get provisioned pointed at
+// a chain the escrow doesn't live on, and the SDK refuses `switchNetwork` calls
+// to chains it wasn't told about. Keep this list agreeing with lib/wagmi.ts's
+// `chains` — same rule, same testnet flag, one entry each.
+//
+// Module-level constants on purpose: Dynamic uses `evmNetworks` in a dependency
+// array (its own docs warn it must be memoized), and these never change.
+// The RPC/explorer origins are already in the CSP (next.config.mjs pins
+// https://mainnet.base.org and https://sepolia.base.org in connect-src for
+// wagmi's transports — same endpoints); the icon comes off Dynamic's own asset
+// host, covered by img-src's `https:`.
+const BASE_MAINNET: EvmNetwork = {
+  chainId: 8453,
+  networkId: 8453,
+  name: "Base",
+  vanityName: "Base",
+  iconUrls: ["https://app.dynamic.xyz/assets/networks/base.svg"],
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://mainnet.base.org"],
+  blockExplorerUrls: ["https://basescan.org"],
+};
+const BASE_SEPOLIA: EvmNetwork = {
+  chainId: 84532,
+  networkId: 84532,
+  name: "Base Sepolia",
+  vanityName: "Base Sepolia",
+  isTestnet: true,
+  iconUrls: ["https://app.dynamic.xyz/assets/networks/base.svg"],
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://sepolia.base.org"],
+  blockExplorerUrls: ["https://sepolia.basescan.org"],
+};
+const EVM_NETWORKS: EvmNetwork[] =
+  process.env.NEXT_PUBLIC_ENABLE_TESTNET === "1" ? [BASE_MAINNET, BASE_SEPOLIA] : [BASE_MAINNET];
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
@@ -35,6 +75,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
     () => ({
       environmentId: DYNAMIC_ENV_ID ?? "",
       walletConnectors: [EthereumWalletConnectors],
+      // Base only (see EVM_NETWORKS above). The connect flow and the
+      // `ensureChain` switch inside runSignIn are what put a wallet ON Base —
+      // this is what makes Base a chain the SDK will switch an embedded wallet
+      // to at all, regardless of dashboard state.
+      overrides: { evmNetworks: EVM_NETWORKS },
       // Namespaces Dynamic's localStorage per environment, so moving a browser
       // between the sandbox and live environment ids doesn't leave one env
       // reading the other's half-written session.
