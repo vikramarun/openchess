@@ -115,6 +115,28 @@ pub fn takeover_below_ms(overhead_ms: u64) -> u64 {
     overhead_ms * (2 + SUDDEN_DEATH_MOVESTOGO) * TAKEOVER_FACTOR
 }
 
+/// How to ask the engine for this move.
+///
+/// A named decision rather than an `if` inside the socket loop, so the choice
+/// itself can be tested: the loop below is a hundred lines of async I/O with no
+/// harness, and "which branch did it take" is the part that matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchPlan {
+    /// `go movetime N`, alone. The clock is ours for this move.
+    Takeover { movetime_ms: u64 },
+    /// The normal clock-based `go`, with an optional `movetime` ceiling.
+    Delegate { cap_ms: Option<u64> },
+}
+
+pub fn search_plan(policy: &TimePolicy, overhead_ms: u64, remaining_ms: Option<u64>) -> SearchPlan {
+    match takeover_ms(policy, overhead_ms, remaining_ms) {
+        Some(movetime_ms) => SearchPlan::Takeover { movetime_ms },
+        None => SearchPlan::Delegate {
+            cap_ms: move_cap_ms(policy, overhead_ms, remaining_ms),
+        },
+    }
+}
+
 /// The `movetime` to spend INSTEAD of delegating, or `None` to hand the clock
 /// to the engine as usual.
 ///
@@ -251,15 +273,23 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                 your_color,
                 opponent,
                 clock,
+                time_control,
                 ..
             } => {
                 my_color = Some(your_color);
-                // The clock at game start IS the time control, and it is the
-                // server's own number rather than a flag that could disagree
-                // with the game we were actually seated in. An operator who
-                // pinned a reserve keeps it.
+                // The server's own number, rather than a flag that could
+                // disagree with the game we were actually seated in. An operator
+                // who pinned a reserve keeps it.
+                //
+                // `time_control`, NOT the clock: this frame is also resent to a
+                // RECONNECTING player with whatever time is left, so reading the
+                // clock gave a rejoining seat the smallest reserve we allow. The
+                // clock stays only as a fallback for an older server, where it
+                // is correct on the first `GameStart` and wrong only on a
+                // reconnect.
                 if opts.time.move_overhead_ms.is_none() && engine.supports_option("Move Overhead") {
-                    overhead_ms = move_overhead_for(Some(clock.white_ms));
+                    let initial_ms = time_control.map(|tc| tc.initial_ms).unwrap_or(clock.white_ms);
+                    overhead_ms = move_overhead_for(Some(initial_ms));
                     engine
                         .set_option("Move Overhead", &overhead_ms.to_string())
                         .await?;
@@ -303,12 +333,12 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                     // Too little clock left for the engine's own manager to
                     // allocate from — spend our own budget instead of letting
                     // it answer in ~2ms. A REPLACEMENT, not an added ceiling.
-                    None => match takeover_ms(&opts.time, overhead_ms, my_clock) {
-                        Some(ms) => {
-                            println!("ply {ply}: low clock, searching {ms}ms");
-                            engine.best_move_movetime(&moves_uci, ms).await?
+                    None => match search_plan(&opts.time, overhead_ms, my_clock) {
+                        SearchPlan::Takeover { movetime_ms } => {
+                            println!("ply {ply}: low clock, searching {movetime_ms}ms");
+                            engine.best_move_movetime(&moves_uci, movetime_ms).await?
                         }
-                        None => {
+                        SearchPlan::Delegate { cap_ms } => {
                             engine
                                 .best_move_with_clock(
                                     &moves_uci,
@@ -316,7 +346,7 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                                     clock.black_ms,
                                     inc,
                                     inc,
-                                    move_cap_ms(&opts.time, overhead_ms, my_clock),
+                                    cap_ms,
                                 )
                                 .await?
                         }
@@ -466,6 +496,38 @@ mod tests {
         // are in the collapse zone. Taking over on a guess would spend a floor
         // every move of a game that may have plenty of clock.
         assert_eq!(takeover_ms(&with_floor(150), 250, None), None);
+    }
+
+    #[test]
+    fn the_plan_switches_command_shape_at_the_handover() {
+        // What the socket loop actually branches on. A `movetime` next to a
+        // `wtime` is only a ceiling, so these two are different COMMANDS, not
+        // different numbers — getting the branch wrong reintroduces the ~2ms
+        // search with every unit test below still passing.
+        let p = with_floor(150);
+        assert_eq!(
+            search_plan(&p, 250, Some(30_000)),
+            SearchPlan::Delegate { cap_ms: None },
+            "a healthy clock delegates",
+        );
+        assert_eq!(
+            search_plan(&p, 250, Some(20_000)),
+            SearchPlan::Takeover { movetime_ms: 666 },
+            "below the handover the seat spends its own budget",
+        );
+        // A bot that never asked for a floor delegates all the way down, since
+        // its engine's time manager is its author's business.
+        assert_eq!(
+            search_plan(&TimePolicy::default(), 250, Some(1_000)),
+            SearchPlan::Delegate { cap_ms: None },
+        );
+        // And an explicit ceiling still rides along on the delegated command.
+        assert_eq!(
+            search_plan(&capped(7_500), 250, Some(600_000)),
+            SearchPlan::Delegate {
+                cap_ms: Some(7_500)
+            },
+        );
     }
 
     #[test]

@@ -128,6 +128,22 @@ impl Game {
         self.ply
     }
 
+    pub fn time_control(&self) -> TimeControl {
+        self.time_control
+    }
+
+    /// Absolute server time by which the side to move must have moved.
+    ///
+    /// Derived from the SIGNED balance on purpose. Building it from the wire
+    /// clock (which clamps at zero) tells a side that has overdrawn it has the
+    /// whole lag allowance left when it may have almost none — and this field is
+    /// what a client budgets against, so it must not promise time that does not
+    /// exist.
+    pub fn move_deadline_ms(&self) -> u64 {
+        let left = self.remaining_for_turn() + LAG_ALLOWANCE_MS as i64;
+        self.turn_started_ms.saturating_add(left.max(0) as u64)
+    }
+
     pub fn start_fen(&self) -> &str {
         &self.start_fen
     }
@@ -524,6 +540,29 @@ mod tests {
         let result = g.flag_if_expired(1_200 + 60).expect("white is out of road");
         assert_eq!(result.reason, GameEndReason::Timeout);
         assert_eq!(result.winner, Some(Color::Black));
+    }
+
+    #[test]
+    fn the_move_deadline_never_promises_time_that_is_gone() {
+        // The client budgets against this field, so it must come from the
+        // signed balance. Built from the wire clock (which clamps at zero) it
+        // would tell a side that has overdrawn by 100ms that it still has the
+        // whole 150ms allowance.
+        let tc = TimeControl {
+            initial_ms: 1_000,
+            increment_ms: 0,
+        };
+        let mut g = Game::new(tc, 0);
+        // A clean game: White started at t=0 with 1000ms, so the wall is
+        // 1000 + 150.
+        assert_eq!(g.move_deadline_ms(), 1_000 + LAG_ALLOWANCE_MS);
+
+        // White overdraws by 100ms; Black moves instantly at t=1100.
+        g.play_move("e2e4", 1_100).unwrap();
+        g.play_move("e7e5", 1_100).unwrap();
+        // White is now 100ms down, so it has 50ms from the turn start — not the
+        // 1_100 + 150 that a zero-clamped clock would have produced.
+        assert_eq!(g.move_deadline_ms(), 1_100 + 50);
     }
 
     #[test]

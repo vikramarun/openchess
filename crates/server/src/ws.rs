@@ -217,6 +217,7 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
                     your_color: Color::White,
                     clock: snap.clock,
                     opponent: None,
+                    time_control: Some(snap.time_control),
                 }];
                 for (i, uci) in snap.moves_uci.into_iter().enumerate() {
                     replay.push(ServerMessage::OpponentMoved {

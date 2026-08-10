@@ -192,11 +192,20 @@ export function playSeat(
           break;
         }
         case "game_start": {
-          // The clock at game start IS the time control. Read it from the
-          // server rather than a caller-supplied prop: four call sites reach
-          // playSeat and not all of them know the initial time, but every one
-          // of them gets this frame.
-          const initialMs = m.clock?.white_ms;
+          // Read from the server rather than a caller-supplied prop: four call
+          // sites reach playSeat and not all of them know the initial time, but
+          // every one of them gets this frame.
+          //
+          // It must be `time_control`, NOT the clock. This frame is also resent
+          // to a RECONNECTING player, where the clock is whatever is left rather
+          // than what the game started with — so reading it there handed a seat
+          // rejoining a 10+0 game at 12s the smallest reserve we allow (50ms
+          // instead of 250ms), halving its network tolerance and dragging the
+          // handover point down with it. The clock is kept only as a fallback
+          // for a server too old to send the field, where it is right on the
+          // first `game_start` and wrong only on a reconnect; drop it once the
+          // deployed server is past this change.
+          const initialMs = m.time_control?.initial_ms ?? m.clock?.white_ms;
           overheadMs = moveOverheadMs(typeof initialMs === "number" ? initialMs : NaN);
           // A failure here is not worth losing the game over — the engine
           // simply keeps the cautious default.

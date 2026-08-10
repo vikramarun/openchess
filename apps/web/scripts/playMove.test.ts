@@ -114,8 +114,12 @@ async function oneTurn(answers: string[], history = HISTORY_KTR) {
 }
 
 /** Play a game at a given time control, through `game_start`, and report what
- *  network reserve the engine was given. */
-async function reserveFor(initialMs: number) {
+ *  network reserve the engine was given.
+ *
+ *  `clockMs` defaults to the initial time — a fresh game — but can differ, which
+ *  is what a RECONNECT looks like: the server resends `game_start` with the time
+ *  that is LEFT. */
+async function reserveFor(initialMs: number, clockMs = initialMs) {
   const engine = new StubEngine(["f8c5"]);
   playSeat("game-1", "tok", engine as never, 400);
   const ws = FakeSocket.last!;
@@ -123,7 +127,8 @@ async function reserveFor(initialMs: number) {
   await ws.deliver({ type: "welcome" });
   await ws.deliver({
     type: "game_start",
-    clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
+    time_control: { initial_ms: initialMs, increment_ms: 0 },
+    clock: { white_ms: clockMs, black_ms: clockMs, increment_ms: 0 },
   });
   await ws.deliver({
     type: "your_turn",
@@ -238,6 +243,38 @@ async function main() {
   {
     check("a 1+0 seat reserves 60ms", (await reserveFor(60_000)).overheads, [60]);
     check("a 10+0 seat keeps the cap", (await reserveFor(600_000)).overheads, [250]);
+
+    // A RECONNECT resends `game_start` with the time LEFT, not the time
+    // control. Reading the clock there gave a seat rejoining a 10+0 game at 12s
+    // a 50ms reserve — the floor — which halves its network tolerance and drags
+    // the handover point from 26s down to 5.2s, in the one situation where the
+    // connection is already suspect.
+    check(
+      "a seat rejoining a 10+0 game at 12s still reserves 250ms",
+      (await reserveFor(600_000, 12_000)).overheads,
+      [250],
+    );
+    check(
+      "and one rejoining a 1+0 game at 8s still reserves 60ms",
+      (await reserveFor(60_000, 8_000)).overheads,
+      [60],
+    );
+  }
+  {
+    // A server too old to send `time_control` still gets the scaling from the
+    // clock, which is correct on a fresh game. Losing that would put every web
+    // seat back on a flat 250ms until the Fly server is deployed — the two do
+    // not ship together.
+    const engine = new StubEngine(["f8c5"]);
+    playSeat("game-1", "tok", engine as never, 400);
+    const ws = FakeSocket.last!;
+    ws.onopen?.();
+    await ws.deliver({ type: "welcome" });
+    await ws.deliver({
+      type: "game_start",
+      clock: { white_ms: 60_000, black_ms: 60_000, increment_ms: 0 },
+    });
+    check("an older server still scales from the clock", engine.overheads, [60]);
   }
   {
     // And it must land BEFORE the first search, not after it. Both handlers are

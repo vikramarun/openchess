@@ -290,7 +290,14 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
   // the reserve is scaled rather than flat.
   const b = previewAt(P({ mode: "engine" }), bullet);
   check("a 1+0 seat hands over far lower", b.handoverMs, 6_240);
-  check("and is still delegating at 15s", b.delegatesAtLowClock, true);
+  // The low-clock sample follows the handover when that comes first. A fixed
+  // 15s sits ABOVE bullet's handover, so the row would have read "Stockfish" in
+  // both columns and never shown what the seat itself does — the one case this
+  // whole change is about. The cell reports the clock it sampled, so a sample
+  // that moves per row stays honest.
+  check("so bullet samples at its own handover", b.lowClockMs, 6_240);
+  check("and shows the seat's budget there, not the engine's", b.delegatesAtLowClock, false);
+  check("a longer control still samples at 15s", e.lowClockMs, 15_000);
 
   // A mode that never delegates says so, at every time control.
   const t = previewAt(P({ mode: "tempo" }), rapid);

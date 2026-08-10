@@ -362,8 +362,8 @@ export type TimePreview = {
 export function previewAt(
   policy: TimePolicy,
   tc: { initialSecs: number; incSecs: number },
-  /** The clock to describe the low-time case at. 15s is not arbitrary: it is
-   *  where the reported blundering started. */
+  /** Where to describe the low-time case. 15s is not arbitrary: it is where the
+   *  reported blundering started. */
   lowClockMs = 15_000,
 ): TimePreview {
   const initialMs = tc.initialSecs * 1000;
@@ -371,15 +371,21 @@ export function previewAt(
   const overheadMs = moveOverheadMs(initialMs);
   const delegated = policy.mode === "engine";
   const handoverMs = delegated ? takeoverBelowMs(policy, overheadMs) : 0;
+  // Sample at the handover when that comes first. A fixed 15s is above the
+  // handover at 1+0 (6.2s), so a bullet row would read "Stockfish" in both
+  // columns and never show what the seat itself does — which is the case the
+  // whole change is about. The cell reports the clock it sampled, so a sample
+  // that moves per row stays honest.
+  const lowAt = Math.min(lowClockMs, handoverMs > 0 ? handoverMs : lowClockMs, initialMs);
   const at = (remainingMs: number) => budgetMs(policy, { remainingMs, incrementMs });
   return {
     initialMs,
     overheadMs,
     handoverMs,
     atFullClockMs: at(initialMs),
-    atLowClockMs: at(Math.min(lowClockMs, initialMs)),
-    lowClockMs: Math.min(lowClockMs, initialMs),
+    atLowClockMs: at(lowAt),
+    lowClockMs: lowAt,
     delegatesAtFullClock: delegated && initialMs > handoverMs,
-    delegatesAtLowClock: delegated && Math.min(lowClockMs, initialMs) > handoverMs,
+    delegatesAtLowClock: delegated && lowAt > handoverMs,
   };
 }

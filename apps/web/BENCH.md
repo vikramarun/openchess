@@ -174,6 +174,29 @@ and full delegation to the engine's own manager. So an arm's Elo reads as
 | `scaled` | scaled to the TC | never |
 | `t1` / `t2` / `t4` | scaled | `overhead × 52 × factor` |
 
+## Results
+
+**Not yet run.** The harness is built and its clock is pinned, but no arm has
+been measured — the runs so far were smoke tests that validated the harness (and
+found two bugs in the process: a time-control label read as seconds, and the
+referee's renewable lag allowance).
+
+A real run needs a **foreground tab on an otherwise idle machine**: a hidden tab
+is throttled, and while the clock is now charged from the engine's own reported
+`time` rather than wall-clock, throttling still stretches a run to roughly ten
+minutes a game. Budget a couple of hours for a set with meaningful *n*.
+
+```
+pnpm -C apps/web dev
+# then, in a visible window:
+/bench/time?tc=1+0&pairs=8&arms=scaled,t1,t2,t4
+```
+
+Until that exists, **`TAKEOVER_FACTOR` is unmeasured**. It was chosen against
+measured *allocations* (at a 250ms reserve the engine allocates 209ms at 20s and
+100ms at 15s, where the seat's own budget gives 666ms and 500ms) rather than
+against a match result, and tuning it is the first thing this harness is for.
+
 ## Harness gotchas, in the spirit of the ones above
 
 - **A time-control label is MINUTES.** `tc=1+0` is one minute; reading it as

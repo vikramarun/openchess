@@ -142,19 +142,11 @@ export function TimeControls({
               />
               of the clock
             </label>
-            <label className="muted" style={{ fontSize: 13, display: "flex", gap: 8, alignItems: "center" }}>
-              plus
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step={0.1}
-                value={time.incFactor}
-                onChange={(e) => onChange({ incFactor: Number(e.target.value) })}
-                style={{ width: 72 }}
-              />
-              of the increment
-            </label>
+            {/* No `incFactor` control. Every entry in TIME_CONTROLS is
+                zero-increment, so it is a dial that cannot affect any playable
+                game — the same "setting that does nothing" the hardcoded 3+2
+                preview used to be. The field and its arithmetic stay in
+                lib/timePolicy, so an increment time control would just work. */}
           </div>
         </details>
       )}
@@ -172,10 +164,16 @@ export function TimeControls({
   );
 }
 
-function Cell({ delegated, ms }: { delegated: boolean; ms: number }) {
+function Cell({ delegated, ms, at }: { delegated: boolean; ms: number; at?: number }) {
   return (
     <td style={{ paddingRight: 14, color: delegated ? undefined : "var(--text-strong)" }}>
       {delegated ? "Stockfish" : secs(ms)}
+      {/* The low-clock column samples wherever the handover falls, which differs
+          per row, so the cell states its own clock rather than the header
+          promising one for everybody. */}
+      {!delegated && at !== undefined && (
+        <span className="muted" style={{ fontWeight: 400 }}> at {secs(at)}</span>
+      )}
     </td>
   );
 }
@@ -212,7 +210,7 @@ function Preview({ time }: { time: TimePolicy }) {
             <tr style={{ textAlign: "left" }}>
               <th style={{ paddingRight: 14, fontWeight: 500 }}>Time control</th>
               <th style={{ paddingRight: 14, fontWeight: 500 }}>First move</th>
-              <th style={{ paddingRight: 14, fontWeight: 500 }}>With 15s left</th>
+              <th style={{ paddingRight: 14, fontWeight: 500 }}>When the clock is low</th>
             </tr>
           </thead>
           <tbody>
@@ -229,7 +227,7 @@ function Preview({ time }: { time: TimePolicy }) {
                 {p.initialMs <= p.lowClockMs ? (
                   <td style={{ paddingRight: 14 }}>—</td>
                 ) : (
-                  <Cell delegated={p.delegatesAtLowClock} ms={p.atLowClockMs} />
+                  <Cell delegated={p.delegatesAtLowClock} ms={p.atLowClockMs} at={p.lowClockMs} />
                 )}
               </tr>
             ))}
