@@ -266,16 +266,15 @@ The sponsor signs `sponsorTournament` from their own wallet, exactly like
 the pool by reading `tournaments(tid).pool` (the same call Part 1 adds) and can
 list sponsors from `TournamentSponsored` events for display.
 
-### The solvency invariant is currently blind to pools
+### The solvency invariant was blind to pools — **DONE**
 
-`Invariant.t.sol`'s handler only does deposit / withdraw / openGame /
-settleGame — **no tournament path is fuzzed at all**, so `t.pool` is always zero
-and the asserted invariant (`balanceOf == sum(bankroll)`) holds trivially. Any
-pool-mutating code lands with no invariant coverage.
+`Invariant.t.sol`'s handler used to do only deposit / withdraw / openGame /
+settleGame — no tournament path was fuzzed at all, so `t.pool` was always zero
+and the asserted invariant (`balanceOf == sum(bankroll)`) held trivially.
 
-Before shipping v2: extend the handler with `enterTournament`,
-`sponsorTournament`, `settleTournament`, `claimTournament`, `claimRefund`,
-`refundSponsorship`, and correct the invariant to
+Shipped with v2: the handler now exercises `enterTournament`,
+`sponsorTournament`, `settleTournament` (direct and root/`claimTournament`),
+`claimRefund` and `refundSponsorship`, and the invariant accounts
 
 ```
 token.balanceOf(escrow) == sum(bankroll) + sum(tournament pools)
@@ -342,7 +341,7 @@ New routes: `POST /tournaments/{id}/invites` (organizer, mint), the three
 request routes above, and `GET /tournaments/{id}` gains the caller's own
 admission status.
 
-Persistence (same migration `0017`, and all restored by `recover_tournaments` —
+Persistence (migration `0020`, and all restored by `recover_tournaments` —
 an open tournament that rehydrates with its door open is a gate that silently
 stopped existing):
 
@@ -354,24 +353,25 @@ ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS approvals JSONB NOT NULL DEFAUL
 
 ---
 
-## Ladder: free entry should be casual
+## Ladder: free entry is casual — **IMPLEMENTED**
 
-`tournament_ladder` currently returns `Ranked` for any buy-in tournament, on the
-rule that **money at risk** is what makes a game ranked. Free entry breaks that:
-two cooperating wallets can enter a free sponsored event and trade wins to farm
-ranked Elo at zero cost, which is precisely why casual Elo is kept off the
+`tournament_ladder` used to return `Ranked` for any buy-in tournament, on the
+rule that **money at risk** is what makes a game ranked. Free entry broke that:
+two cooperating wallets could enter a free sponsored event and trade wins to
+farm ranked Elo at zero cost, which is precisely why casual Elo is kept off the
 leaderboard.
 
-Recommendation: **`Ranked` iff `entry_fee > 0`**, else `Casual`. The creator
-already sets the fee, so a nominal 1 USDC buys both sybil resistance and a
-ranked event — the incentives line up on their own. Prizes are real either way.
+Implemented as: **`Ranked` iff `entry_fee > 0`**, else `Casual`
+(`tournament_ladder` in `matchmaking.rs`). The creator already sets the fee, so
+a nominal 1 USDC buys both sybil resistance and a ranked event — the incentives
+line up on their own. Prizes are real either way.
 
 ---
 
 ## Rollout
 
 **Phase 1 — live contract, no redeploy.** Creator-defined weights, validation,
-renormalization, `tournament_pool` read, prize table in views, migration `0017`
+renormalization, `tournament_pool` read, prize table in views, migration `0019`
 for `payout`, rehydration. Independently shippable and useful on its own.
 
 **Phase 2 — contract v2.** Sponsorship, free entry, admission control. Requires:

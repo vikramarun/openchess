@@ -87,10 +87,14 @@ The default experience is a free, in-browser casual lobby (`apps/web` +
   replays the full move history to that socket (a `Snapshot` command → `GameStart`
   + one `OpponentMoved` per move) so a **mid-game** spectator rebuilds the board,
   then streams live.
-- **Leaderboard.** `GET /leaderboard` ranks wallets with ≥1 finished rated game
-  by Elo (updated by `update_ratings` as games finish; one overall rating today).
-  A game is **rated only if both sides made ≥1 move** (`room.rs finish()`), so a
-  no-show / hung engine loses the game and stake but not its rating.
+- **Leaderboard.** `GET /leaderboard` ranks wallets with ≥1 finished ranked game
+  by Elo (updated by `update_ratings` as games finish). There are **two ladders**:
+  `games.rated` marks a game RANKED when money was on it (a stake, or a buy-in
+  tournament pairing) and CASUAL otherwise, moving `users.rating` or
+  `users.casual_rating` respectively — and the leaderboard is ranked-only on
+  purpose (free games are farmable). Separately, a rating moves **only if both
+  sides made ≥1 move** (`room.rs finish()`), so a no-show / hung engine loses
+  the game and stake but not its rating.
 
 ## Abuse guardrails (rate limiting)
 
