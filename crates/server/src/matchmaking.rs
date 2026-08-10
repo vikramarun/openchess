@@ -7332,8 +7332,12 @@ mod tests {
         .0;
         // The seat exists (it was rehydrated), but it is a GUEST seat: whoever
         // holds the nickname drives it, and it attributes to nobody.
-        eprintln!("PROBE mine.len()={} tokens={:?}", mine.len(), mine.iter().map(|g| (g.seat.clone(), g.token.is_empty())).collect::<Vec<_>>());
-        assert!(!mine.is_empty(), "PROBE: mine is empty -> the all() is vacuous");
+        // Non-vacuity first: `all()` on an empty list is true, so without this
+        // the assertion below would pass on a round that never dispatched.
+        assert!(
+            !mine.is_empty(),
+            "the rehydrated entrant should still have a round-0 game"
+        );
         assert!(
             mine.iter().all(|g| g.seat == "browser"),
             "the poisoned id must resolve as a plain guest seat"
