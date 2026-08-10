@@ -2513,7 +2513,7 @@ select:focus-visible,
 /* Everything except `display` lives here at column 0. scripts/layout.test.ts
    reads the first UNINDENTED rule for a selector, so the geometry has to be
    visible to it — and keeping it in one place is better CSS anyway. The
-   ≤1000px query below only switches it on.
+   ≤1100px query below only switches it on.
  *
  * z-index 30 is BELOW the header's 40, and that is deliberate rather than
  * sloppy. `.site-header` is position:sticky WITH a z-index, so it is a stacking
