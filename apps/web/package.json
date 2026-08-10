@@ -37,7 +37,8 @@
     "test:demo": "tsx scripts/demoReel.test.ts",
     "test:profile": "tsx scripts/profileFilter.test.ts",
     "test:username": "tsx scripts/username.test.ts",
-    "test:csp": "tsx scripts/csp.test.ts"
+    "test:csp": "tsx scripts/csp.test.ts",
+    "test:gate": "tsx scripts/gate.test.ts"
   },
   "dependencies": {
     "@dynamic-labs/assert-package-version": "4.84.0",

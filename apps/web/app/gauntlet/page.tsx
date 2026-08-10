@@ -227,7 +227,9 @@ function GauntletClient() {
 
   const start = async () => {
     setErr(null);
-    if (wantStake && !token) return setErr("Sign in (top right) to run a staked gauntlet.");
+    // Every gauntlet needs a session now, staked or not (the page is gated too,
+    // so this only fires on one that expired while the tab was open).
+    if (!token) return setErr(SESSION_EXPIRED);
     let stakeBase: string | undefined;
     if (wantStake) {
       try {
@@ -239,12 +241,12 @@ function GauntletClient() {
       }
     }
     try {
-      const r = await fetch(`${SERVER_HTTP}/gauntlet/start`, {
+      // authedFetch, not a bare fetch with the bearer spliced in when staked:
+      // the server requires a session for every gauntlet now, and this is also
+      // what self-heals an expired one instead of dead-ending on a 401.
+      const r = await authedFetch(`${SERVER_HTTP}/gauntlet/start`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(wantStake && token ? { authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           stake: stakeBase,
           initial_secs: tc.initial,
@@ -253,7 +255,11 @@ function GauntletClient() {
       });
       if (!r.ok)
         return setErr(
-          r.status === 503 ? MAINTENANCE_MSG : `Couldn’t start (${r.status}).`,
+          r.status === 401
+            ? SESSION_EXPIRED
+            : r.status === 503
+              ? MAINTENANCE_MSG
+              : `Couldn’t start (${r.status}).`,
         );
       const j = await r.json();
       setSession(j.session_id);

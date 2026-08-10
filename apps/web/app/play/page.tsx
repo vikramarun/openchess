@@ -96,8 +96,13 @@ export default function PlayPage() {
       spectator.onmessage = (ev) => applyFrame(ev.data, () => setStatus("finished"));
 
       // Two browser engines play the two seats.
-      seats.push(playSeat(game.game_id, game.white_token, white, 300, {}, canceledFn));
-      seats.push(playSeat(game.game_id, game.black_token, black, 300, {}, canceledFn));
+      // `skipRepertoire`: this is the one route a signed-out visitor can reach,
+      // and the default repertoire is ~1 MB of books on top of the engine that
+      // neither of these two engines gives the viewer anything for. The bundled
+      // opening set still answers, so the opening is still instant.
+      const opts = { skipRepertoire: true };
+      seats.push(playSeat(game.game_id, game.white_token, white, 300, opts, canceledFn));
+      seats.push(playSeat(game.game_id, game.black_token, black, 300, opts, canceledFn));
     };
 
     run().catch(() => {

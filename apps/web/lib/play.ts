@@ -33,6 +33,19 @@ export type PlayHandlers = {
    *  Returning a working engine lets the seat play on instead of resigning,
    *  which matters because a resignation forfeits a real stake. */
   onEngineFallback?: () => Promise<BrowserEngine>;
+  /** Don't fetch the configured opening repertoire for this seat.
+   *
+   *  For `/play`, the Test Engine sandbox — the ONE route a signed-out visitor
+   *  can reach, and therefore the whole top of the funnel. The default
+   *  repertoire is every book (`ALL_BOOKS`), which is ~1 MB over 24 requests on
+   *  top of a 7 MB engine, and two engines playing each other get nothing from
+   *  it that the visitor can see. Same reasoning as the landing reel never
+   *  touching the engine: the try-it surfaces stay cheap.
+   *
+   *  The seat is NOT bookless — `lib/openings.ts` is bundled JS and still
+   *  answers, so the opening is still played instantly rather than searched.
+   *  Only the downloaded half is skipped. */
+  skipRepertoire?: boolean;
 };
 
 /** Reset the engine and ask once more, for a seat whose engine just answered
@@ -82,7 +95,7 @@ async function retryAfterResync(
  *  upload control (see components/BrowserBotPanel.tsx); a downloaded
  *  `chess-client` still takes `--book`, which is where an arbitrary book
  *  belongs. */
-function legalBookMove(pos: Chess, history: string[]): string | null {
+function legalBookMove(pos: Chess, history: string[], useRepertoire: boolean): string | null {
   const cfg = getBrowserBotConfig();
   const ply = history.length;
 
@@ -90,7 +103,7 @@ function legalBookMove(pos: Chess, history: string[]): string | null {
   // castling as king-takes-rook by spec, so decodeMove already converts it —
   // this is the belt to that braces.
   const repMaxPly = cfg.repertoire.maxPly;
-  const rep = probeRepertoire(pos, ply, repMaxPly, cfg.repertoire.pick);
+  const rep = useRepertoire ? probeRepertoire(pos, ply, repMaxPly, cfg.repertoire.pick) : null;
   const repStd = rep ? toStandardUci(pos, rep) : null;
   if (repStd) return repStd;
 
@@ -114,8 +127,11 @@ export function playSeat(
   // Reassignable: a dead engine is swapped for a replacement mid-game (below).
   let engine = engineIn;
   let onFallback = handlers.onEngineFallback ?? null;
-  // Warm the repertoire; it resolves long before the first your_turn.
-  void ensureRepertoireLoaded();
+  // Warm the repertoire; it resolves long before the first your_turn. Skipped
+  // for the Test Engine sandbox, which is the whole point of the flag — the
+  // fetch is what costs, not the probe.
+  const useRepertoire = !handlers.skipRepertoire;
+  if (useRepertoire) void ensureRepertoireLoaded();
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
@@ -193,7 +209,7 @@ export function playSeat(
             }
             // Opening book first: play known lines instantly instead of burning
             // clock on move 1. Falls through to the engine once out of book.
-            const booked = replay ? legalBookMove(replay.pos, history) : null;
+            const booked = replay ? legalBookMove(replay.pos, history, useRepertoire) : null;
             // Play to the authoritative clock when the server provides one, so
             // the time control is real (the engine self-allocates and can
             // flag). Fall back to a fixed think time if no clock is present.

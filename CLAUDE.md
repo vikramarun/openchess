@@ -14,7 +14,7 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
 (cd contracts && forge test)       # Foundry: 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
-(cd apps/web && pnpm test:books)   # every uploadable book walks clean (incl. castling)
+(cd apps/web && pnpm test:books)   # every built-in book walks clean (incl. castling)
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
 (cd apps/web && pnpm test:move)   # what a seat sends: never an illegal move
 (cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
@@ -40,6 +40,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 (cd apps/web && pnpm test:username) # a username's shape, and what a player is called
 (cd apps/web && pnpm test:csp)     # the CSP origins sign-in depends on
+(cd apps/web && pnpm test:gate)    # which routes need an account, and the one that must not
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -81,8 +82,9 @@ crates/book-gen      dev tool: builds assets/house-book.bin (Polyglot) from a
                      SAN repertoire; not part of any deployed artifact
 contracts/           ChessEscrow.sol (Foundry): pooled balances + EIP-712 settlement
 apps/web             Next.js: landing demo reel (lib/demoReel.ts) + quick play at /, browse at
-                     /lobby, in-browser Stockfish 18 (WASM/NNUE) + uploadable
-                     Polyglot book (lib/polyglot.ts), wallet/SIWE, bot control, spectator, profiles,
+                     /lobby, in-browser Stockfish 18 (WASM/NNUE) + built-in Polyglot
+                     repertoires (lib/books.ts, lib/polyglot.ts), sign-in gate
+                     (components/SignInGate.tsx), wallet/SIWE, bot control, spectator, profiles,
                      board/piece themes (lib/boardPrefs.ts + app/board.css),
                      mobile tab bar (components/TabBar.tsx)
 ```
@@ -178,23 +180,40 @@ wallet.
   trailing slash: `"/player/0xabc".startsWith("/play")` is true, so a bare
   prefix lights "Engine" on every profile. `pnpm test:layout` pins the CSS,
   `pnpm test:tabs` the routing.
-- **Signing in is required to play anything for real; Test Engine is the only
-  way in without one.** `components/SignInGate.tsx` (`useAuthState` +
-  `RequireSignIn`) gates the homepage Play card, `/lobby`, `/gauntlet` and
-  `/tournament`. Public on purpose and not to be gated: the marketing homepage
-  itself (hero, demo reel, "How stakes work" — a wall in front of them is a wall
-  in front of the only thing explaining the product), `/play`, `/game/[id]`,
-  `/player/[ident]`, `/terms`, `/privacy`. A shared game link is a finished,
-  verifiable record and the growth loop; it is not a door.
+- **Signing in is required to play anything for real, and it is enforced on BOTH
+  sides.** `components/SignInGate.tsx` (`useAuthState` + `RequireSignIn`) gates
+  the homepage Play card, `/lobby`, `/gauntlet` and `/tournament`; `pnpm
+  test:gate` pins which routes are wrapped. Public on purpose and not to be
+  gated: the marketing homepage itself (hero, demo reel, "How stakes work" — a
+  wall in front of them is a wall in front of the only thing explaining the
+  product), `/play`, `/game/[id]`, `/player/[ident]`, `/terms`, `/privacy`. A
+  shared game link is a finished, verifiable record and the growth loop; it is
+  not a door.
+  **The gate is UX; the server is the authority, and every free door now
+  requires a session too** — `park_create`, `park_accept`, `queue_join`,
+  `gauntlet_start` and `tourney_join`, not just the staked/bot paths they used
+  to check (`every_free_matchmaking_door_needs_a_session`). Enforcing it in the
+  browser alone left a hole the gate cannot close: anything scripting
+  `POST /park/offers` still put an anonymous free challenge in the same "Open
+  challenges" table every signed-in player reads, as a row none of them could
+  have created — and a seat with no wallet records no history and moves no Elo,
+  so the finished game never happened for one of its two players. Nothing
+  legitimate lost the right: `chess-client` is wallet-bound by design, and the
+  house bot posts under `HOUSE_WALLET`. **`POST /games` is the one door that
+  stays open** (see `TEST_MODE` below). A client that talks to any of the five
+  must send the bearer unconditionally — `apps/web` routes them all through
+  `authedFetch`, and `chess-client gauntlet` now resolves a session up front
+  rather than sending one only when staked.
   Two traps in the hook. It **must not block on `/config`**:
   `useOnchainConfig` retries a failed fetch forever with backoff, so a version
   that answered "checking" until the config landed turned an unreachable game
   server into a permanently blank page on every gated route. Unknown config
-  reads as the production truth (wagering on, session required). And a held
-  token answers "in" with no round trip at all, or every returning player waits
-  on a fetch before their own lobby renders. The one honest "checking" is
-  `!mounted`: localStorage is client-only, so neither the server render nor the
-  first client render can see a session that exists.
+  reads as the production truth (wagering on, session required); `test:gate`
+  pins that exactly one branch returns `"checking"`. And a held token answers
+  "in" with no round trip at all, or every returning player waits on a fetch
+  before their own lobby renders. The one honest "checking" is `!mounted`:
+  localStorage is client-only, so neither the server render nor the first client
+  render can see a session that exists.
 - **There is no engine-status pill in the header.** It read the SINGLETON eval
   engine (`lib/engineContext`), which most routes never load — so it said
   "Engine ready" on a page with an eval bar and a dim "Engine" everywhere else,

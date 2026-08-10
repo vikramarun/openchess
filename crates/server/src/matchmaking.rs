@@ -406,24 +406,24 @@ async fn park_create(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let bot = is_bot_seat(&req.seat);
-    // Wagered offers AND bot seats require auth: the seat (and the agent it
-    // dispatches to) is always the authed wallet's. For casual offers the
-    // wallet is recorded when known — clients rely on `poster_addr` to avoid
-    // accepting their own offers (e.g. a restarted autopilot vs its stale
-    // offer), so an authed poster must never appear anonymous.
-    let poster_addr = if req.stake.is_some() || bot {
-        Some(
-            state
-                .authed_wallet(&headers)
-                .ok_or(StatusCode::UNAUTHORIZED)?,
-        )
-    } else {
-        // Strict: a *present but stale* bearer must 401 rather than post an
-        // anonymous offer, or the invariant above ("an authed poster must
-        // never appear anonymous") quietly breaks and self-match guards that
-        // key on `poster_addr` fail open. No header at all is still fine.
-        state.authed_wallet_strict(&headers)?
-    };
+    // EVERY offer needs a session, free ones included. Wagered offers and bot
+    // seats always did; a free offer used to be postable anonymously, which is
+    // now the wrong shape for three reasons. The web app gates the whole lobby
+    // (components/SignInGate.tsx), so an anonymous free offer can only come
+    // from a script — and it lands in the same "Open challenges" table as
+    // everyone else's, rendered as "Anonymous", a row no user of the site could
+    // have created. A seat with no wallet records no history and moves no Elo,
+    // so it is a game that never happened for one of its two players. And the
+    // same-wallet guard keys on `poster_addr`, so a `None` fails it open.
+    // Nothing legitimate loses: `chess-client` is wallet-bound by design (no
+    // anonymous bots), and the House Bot posts under `HOUSE_WALLET`.
+    // Still `Option<String>` rather than `String` — offers rehydrated from
+    // before this change may carry `None`, and the lobby renders that.
+    let poster_addr = Some(
+        state
+            .authed_wallet(&headers)
+            .ok_or(StatusCode::UNAUTHORIZED)?,
+    );
 
     // Validate the stake NOW, not at accept: an unparseable or absurd stake
     // would otherwise stand in the public lobby, and every join would die with
@@ -611,12 +611,16 @@ async fn park_accept(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let acceptor_bot = is_bot_seat(&req.seat);
-    // Strict, like posting an offer: a stale bearer must 401 rather than seat a
-    // signed-in player anonymously. Anonymity here doesn't just lose the game
-    // from their history — it also fails the same-wallet check below open, so a
-    // poster could accept their own offer. Read before the offer is claimed, so
-    // a rejected join doesn't consume it.
-    let acceptor_wallet = state.authed_wallet_strict(&headers)?;
+    // Required, like posting one: both sides of a game need a session. Sitting
+    // down anonymously doesn't just lose the game from your history — it also
+    // fails the same-wallet check below OPEN, so a poster could accept their
+    // own offer. Read before the offer is claimed, so a rejected join doesn't
+    // consume it.
+    let acceptor_wallet = Some(
+        state
+            .authed_wallet(&headers)
+            .ok_or(StatusCode::UNAUTHORIZED)?,
+    );
 
     // Claim the offer (open -> matching), capturing its terms.
     let claim = {
@@ -939,15 +943,16 @@ async fn queue_join(
     state.reject_if_rate_limited_create(&headers)?;
     let tc = validate_tc(req.initial_secs, req.increment_secs)?;
     let bot = is_bot_seat(&req.seat);
-    // Wagered tiers AND bot seats require auth; the seat (and the agent it
-    // dispatches to) is always the authed wallet's. A casual browser seat plays
-    // fine without one — but take it when it's offered, since a seat with no
-    // recorded wallet is a game that never reaches the player's history.
-    let addr = match state.authed_wallet_strict(&headers)? {
-        Some(w) => Some(w),
-        None if req.stake.is_some() || bot => return Err(StatusCode::UNAUTHORIZED),
-        None => None,
-    };
+    // Every tier requires auth, free ones included — see `park_create` for the
+    // full reasoning. Short version: the seat (and the agent it dispatches to)
+    // is always a wallet's, a seat with no recorded wallet is a game that never
+    // reaches its own player's history, and the web app no longer offers this
+    // to anyone signed out.
+    let addr = Some(
+        state
+            .authed_wallet(&headers)
+            .ok_or(StatusCode::UNAUTHORIZED)?,
+    );
 
     // `name` stays empty: a queued seat is only ever anonymous or wallet-bound,
     // and `start_game` resolves the wallet-bound case from its username. See
@@ -1333,15 +1338,14 @@ async fn gauntlet_start(
     state.reject_if_draining()?;
     state.reject_if_rate_limited_create(&headers)?;
     validate_tc(req.initial_secs, req.increment_secs)?;
-    let addr = if req.stake.is_some() {
-        Some(
-            state
-                .authed_wallet(&headers)
-                .ok_or(StatusCode::UNAUTHORIZED)?,
-        )
-    } else {
-        None
-    };
+    // Auth for every gauntlet, staked or not — see `park_create`. A free
+    // gauntlet is a run of real games against real opponents; only its stake is
+    // absent, not its consequences.
+    let addr = Some(
+        state
+            .authed_wallet(&headers)
+            .ok_or(StatusCode::UNAUTHORIZED)?,
+    );
     let id = Uuid::new_v4();
     state.0.lobby.gauntlets.lock().insert(
         id,
@@ -2209,6 +2213,13 @@ async fn tourney_join_inner(
                 if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
                     t.entrant_engines.insert(wallet.clone(), e);
                 }
+                // The `else` is load-bearing now that re-joining is idempotent:
+                // without it, a wallet that entered with its bot and then
+                // re-entered from the browser would keep the binding, so every
+                // pairing still dispatches to the agent — the browser sits at a
+                // board it is never asked to play, and an agent that is offline
+                // at dispatch forfeits the round. Joining is how you choose
+                // which plays your seat, so the last join has to win both ways.
                 if bot {
                     t.entrant_bots.insert(
                         wallet.clone(),
@@ -2217,6 +2228,8 @@ async fn tourney_join_inner(
                             uci_options: clean_uci_options(req.uci_options),
                         },
                     );
+                } else {
+                    t.entrant_bots.remove(&wallet);
                 }
                 // Deliberately NOT written: `entrant_wallets` maps a nickname id
                 // to its wallet, and this id already IS one (`is_wallet_id`), so
@@ -4285,6 +4298,17 @@ mod tests {
         h
     }
 
+    /// A distinct signed-in player: their own IP (the rate limiters key on it)
+    /// and their own session (every matchmaking door requires one now, free
+    /// games included — see `park_create`). Two of these never collide on the
+    /// same-wallet guard, which is why the pairing tests take an index.
+    fn player(state: &AppState, n: usize) -> HeaderMap {
+        let mut h = from_ip(n);
+        let token = state.0.auth.mint_session(&test_wallet(n));
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
     #[tokio::test]
     async fn park_colour_is_a_coin_and_matches_the_launch_tokens() {
         // Posting an offer used to mean White every time and accepting one
@@ -4298,10 +4322,14 @@ mod tests {
         const N: usize = 40;
 
         for i in 0..N {
-            let headers = from_ip(i);
+            // Two DISTINCT signed-in players per round. One session for both
+            // ends would be refused by the same-wallet guard, which is the
+            // point: a free offer needs a session on each side now.
+            let poster = player(&state, i);
+            let acceptor = player(&state, i + N);
             let offer_id = park_create(
                 State(state.clone()),
-                headers.clone(),
+                poster.clone(),
                 Json(ParkCreateReq {
                     stake: None,
                     initial_secs: 60,
@@ -4320,14 +4348,14 @@ mod tests {
             let acc = park_accept(
                 State(state.clone()),
                 Path(offer_id),
-                headers.clone(),
+                acceptor,
                 Some(Json(ParkAcceptReq::default())),
             )
             .await
             .expect("accept")
             .0;
 
-            let posted = park_get(State(state.clone()), Path(offer_id), headers)
+            let posted = park_get(State(state.clone()), Path(offer_id), poster)
                 .await
                 .expect("offer")
                 .0;
@@ -4381,12 +4409,14 @@ mod tests {
                 seat: None,
                 uci_options: None,
             };
-            let a = queue_join(State(state.clone()), from_ip(i), Json(req()))
+            // Two distinct signed-in players, as in the park test above: the
+            // queue requires a session on every tier now, free included.
+            let a = queue_join(State(state.clone()), player(&state, i), Json(req()))
                 .await
                 .expect("A join")
                 .0
                 .ticket_id;
-            let b = queue_join(State(state.clone()), from_ip(i), Json(req()))
+            let b = queue_join(State(state.clone()), player(&state, i + N), Json(req()))
                 .await
                 .expect("B join")
                 .0
@@ -4571,9 +4601,13 @@ mod tests {
         };
 
         // The session parks a waiting ticket (no opponent yet); no game exists.
-        let _ = queue_join(State(state.clone()), HeaderMap::new(), Json(req(Some(sid))))
-            .await
-            .expect("first join waits");
+        let _ = queue_join(
+            State(state.clone()),
+            player(&state, 1),
+            Json(req(Some(sid))),
+        )
+        .await
+        .expect("first join waits");
         assert!(state.0.rooms.lock().is_empty());
 
         // The session stops (owner-stop, or auto-stop after a no-move forfeit).
@@ -4581,7 +4615,7 @@ mod tests {
 
         // An opponent joins the same tier and pops the stopped session's stale
         // ticket — the pair-time re-check must drop it, not open a new game.
-        let _ = queue_join(State(state.clone()), HeaderMap::new(), Json(req(None)))
+        let _ = queue_join(State(state.clone()), player(&state, 2), Json(req(None)))
             .await
             .expect("second join waits (stale ticket dropped)");
         assert!(
@@ -4626,10 +4660,10 @@ mod tests {
             seat: None,
             uci_options: None,
         };
-        let _ = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+        let _ = queue_join(State(state.clone()), player(&state, 1), Json(browser()))
             .await
             .expect("p1");
-        let r2 = queue_join(State(state.clone()), HeaderMap::new(), Json(browser()))
+        let r2 = queue_join(State(state.clone()), player(&state, 2), Json(browser()))
             .await
             .expect("p2");
         let tr = queue_get(State(state.clone()), Path(r2.0.ticket_id), HeaderMap::new())
@@ -6579,11 +6613,16 @@ mod tests {
 
     #[tokio::test]
     async fn my_games_recognises_a_bot_entrant_case_insensitively() {
-        // The web client lowercases the entrant id it sends to /my-games, while
-        // the entrant is stored in the case the server recorded — checksummed,
-        // now that the id is a wallet. An exact-match bot lookup therefore
-        // missed, and the server handed the browser a live seat token for a game
-        // its own agent was playing.
+        // The entrant id and the id a client sends to /my-games can differ in
+        // CASE. `mint_session` lowercases, so the server records a lowercase
+        // wallet, while a browser reads its address from the connector — where
+        // it is EIP-55 checksummed — and sends that. An exact-match bot lookup
+        // therefore missed, and the server handed the browser a live seat token
+        // for a game its own agent was playing.
+        //
+        // The query below is deliberately the checksummed form against a
+        // lowercase-stored entrant. Sending the lowercase form would match
+        // exactly and test nothing.
         let (state, _c, _r) = test_state();
         let wa = "0xAA11111111111111111111111111111111111111";
         let wb = "0xBB22222222222222222222222222222222222222";
@@ -6628,7 +6667,7 @@ mod tests {
             State(state.clone()),
             Path(tid),
             Query(MyGamesQuery {
-                player: Some(wa.to_lowercase()),
+                player: Some(wa.to_string()),
             }),
             HeaderMap::new(),
         )
@@ -6806,6 +6845,190 @@ mod tests {
              free entry or not (got {:?})",
             sponsored.err()
         );
+    }
+
+    /// EVERY matchmaking door needs a session, free games included.
+    ///
+    /// This is one product rule with four entry points, and it used to be
+    /// enforced at only some of them: a stake or a bot seat required auth, a
+    /// free browser seat did not. That left a hole the web app's sign-in gate
+    /// cannot close, because the gate is in the browser — anything scripting
+    /// `POST /park/offers` could still put an anonymous free challenge in the
+    /// same "Open challenges" table every signed-in player reads, as a row none
+    /// of them could have created. It is also a seat that records no wallet, so
+    /// the finished game reaches neither player's history.
+    ///
+    /// Deliberately NOT in this list: `POST /games`, the Test Engine sandbox,
+    /// which is the one door that stays open (see `TEST_MODE` in main.rs).
+    #[tokio::test]
+    async fn every_free_matchmaking_door_needs_a_session() {
+        let (state, _c, _r) = test_state();
+        let anon = HeaderMap::new();
+
+        let park = park_create(
+            State(state.clone()),
+            anon.clone(),
+            Json(ParkCreateReq {
+                stake: None, // free
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None, // browser, not a bot
+                uci_options: None,
+            }),
+        )
+        .await;
+        assert_eq!(
+            park.err(),
+            Some(StatusCode::UNAUTHORIZED),
+            "free park offer"
+        );
+
+        let queue = queue_join(
+            State(state.clone()),
+            anon.clone(),
+            Json(QueueReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                session_id: None,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .err();
+        assert_eq!(queue, Some(StatusCode::UNAUTHORIZED), "free queue tier");
+
+        let gauntlet = gauntlet_start(
+            State(state.clone()),
+            anon.clone(),
+            Json(GauntletStartReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+            }),
+        )
+        .await
+        .err();
+        assert_eq!(gauntlet, Some(StatusCode::UNAUTHORIZED), "free gauntlet");
+
+        // Accepting is the other half of park: a game has two seats, and one
+        // anonymous seat is enough to lose the game from a history — and to
+        // slip past the same-wallet guard, which keys on `poster_addr`.
+        let poster = player(&state, 7);
+        let offer = park_create(
+            State(state.clone()),
+            poster,
+            Json(ParkCreateReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("a signed-in poster still posts")
+        .0
+        .offer_id;
+        let accept = park_accept(
+            State(state.clone()),
+            Path(offer),
+            anon,
+            Some(Json(ParkAcceptReq::default())),
+        )
+        .await
+        .err();
+        assert_eq!(accept, Some(StatusCode::UNAUTHORIZED), "free park accept");
+        // …and the rejected accept did NOT consume the offer.
+        assert!(
+            park_accept(
+                State(state.clone()),
+                Path(offer),
+                player(&state, 8),
+                Some(Json(ParkAcceptReq::default())),
+            )
+            .await
+            .is_ok(),
+            "a 401'd accept must leave the offer open"
+        );
+    }
+
+    /// Joining is how you choose what plays your seat, so the LAST join wins in
+    /// both directions.
+    ///
+    /// Re-joining is idempotent (the retry path for a durable write that
+    /// failed), which is what makes the reverse direction reachable at all: a
+    /// wallet that entered with its bot and then re-entered from the browser
+    /// used to keep the binding, so every pairing still dispatched to the agent
+    /// — the browser sat at a board it was never asked to play, and an agent
+    /// offline at dispatch forfeited the round.
+    #[tokio::test]
+    async fn re_joining_from_the_browser_releases_a_bot_binding() {
+        let (state, _c, _r) = test_state();
+        // `mint_session` lowercases, so the entrant id the server records is the
+        // lowercased wallet whatever case the client signed in with.
+        let wallet = "0xAA11111111111111111111111111111111111111".to_lowercase();
+        let (tok, _rx) = register_bot(&state, &wallet);
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        let join = |seat: Option<&str>| {
+            tourney_join(
+                State(state.clone()),
+                Path(tid),
+                bearer(&tok),
+                Json(JoinReq {
+                    seat: seat.map(str::to_string),
+                    uci_options: None,
+                    engine: None,
+                    invite: None,
+                }),
+            )
+        };
+
+        assert_eq!(join_code(&join(Some("bot")).await), StatusCode::OK);
+        assert!(
+            state
+                .0
+                .lobby
+                .tournaments
+                .lock()
+                .get(&tid)
+                .unwrap()
+                .entrant_bots
+                .contains_key(&wallet),
+            "the bot entry is recorded"
+        );
+
+        assert_eq!(join_code(&join(None).await), StatusCode::OK);
+        let t = state.0.lobby.tournaments.lock();
+        let t = t.get(&tid).unwrap();
+        assert!(
+            !t.entrant_bots.contains_key(&wallet),
+            "re-joining from the browser must release the agent, or every pairing \
+             still dispatches to a bot the player is no longer driving"
+        );
+        assert_eq!(t.players.len(), 1, "and it is still one entrant");
     }
 
     /// A FREE tournament's games belong to the sessions that entered it, and the
