@@ -2,6 +2,7 @@
 
 import { useDynamicContext } from "@dynamic-labs/sdk-react-core";
 import Link from "next/link";
+import { useState } from "react";
 import { useAccount } from "wagmi";
 
 import { dynamicConfigured } from "@/lib/dynamicEnv";
@@ -10,9 +11,9 @@ import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 
 /** Three states, not two. "checking" is what stops a signed-in player from
- *  seeing a flash of the sign-in wall on every navigation: the answer depends on
- *  localStorage (client-only) and on `/config` (a fetch), and neither exists
- *  during the server render. */
+ *  seeing a flash of the sign-in wall on every navigation: the answer lives in
+ *  localStorage, which is client-only, so neither the server render nor the
+ *  first client render can see a session that exists. */
 export type AuthState = "checking" | "in" | "out";
 
 /** Is this visitor signed in enough to be seated?
@@ -96,7 +97,26 @@ export function SignInGate({
  *  page uses: it renders the gate only through a branch that is safe.
  *
  *  `checking` renders a placeholder of roughly the gate's height rather than
- *  nothing, so the page doesn't jump when the answer lands. */
+ *  nothing, so the page doesn't jump when the answer lands.
+ *
+ *  **A DOOR, NOT A FENCE.** Once this has admitted someone it keeps rendering
+ *  its children for the life of the mount, even if the session then goes away.
+ *  Retracting is not a stricter version of the same idea — it is a different and
+ *  much worse thing, because these children own LIVE GAMES. `<SeatGame>` lives
+ *  under here, so any of the ordinary ways a token disappears mid-game —
+ *  `authedFetch` dropping a stale one on a 401, the 24h session TTL lapsing, a
+ *  wallet disconnect or account switch in the header firing `clearAuth` — would
+ *  unmount the board and close its socket. A seat that is GONE (rather than
+ *  merely idle) hands the opponent a forfeit win and the whole stake
+ *  (`room.rs reap_forfeit_winner`), so a session quietly expiring would
+ *  confiscate the stake of someone who was sitting right there playing. That is
+ *  the same failure the decline path is careful to avoid, arriving by a
+ *  different route.
+ *
+ *  Nothing is lost by latching: this gate is product UX, and the server is the
+ *  authority — every route these pages call re-checks the session itself and
+ *  401s, which `authedFetch` surfaces as "your sign-in expired". A fresh visit
+ *  remounts and re-checks. */
 export function RequireSignIn({
   title,
   lede,
@@ -107,7 +127,14 @@ export function RequireSignIn({
   children: React.ReactNode;
 }) {
   const state = useAuthState();
-  if (state === "in") return <>{children}</>;
+  // Adjusted during render rather than in an effect: an effect runs after paint,
+  // so a retracting session would flash the wall over a live board for a frame
+  // before this put it back. React re-renders immediately on a set during
+  // render, without painting the discarded result.
+  const [admitted, setAdmitted] = useState(false);
+  if (state === "in" && !admitted) setAdmitted(true);
+
+  if (state === "in" || admitted) return <>{children}</>;
   if (state === "checking") return <div className="gate gate-skeleton" aria-hidden="true" />;
   if (!dynamicConfigured) {
     return (

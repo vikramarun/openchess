@@ -116,17 +116,23 @@ cargo run -p server                        # terminal 1  → 127.0.0.1:8080
 cd apps/web && pnpm install && pnpm dev     # terminal 2  → http://localhost:3000
 ```
 
-Open <http://localhost:3000> → pick a time control → **Play now** runs two
-in-browser engines against the live server with no setup. The homepage is the
-casual lobby (create / join / watch); `/player/<username-or-address>` shows profiles.
+Open <http://localhost:3000> → **Test Engine** (`/play`) runs two in-browser
+engines against the live server with no setup and **no account** — it is the one
+surface that needs neither. Playing anyone else does need one: the homepage's
+Play card, `/lobby` (create / join / watch), `/gauntlet` and `/tournament` are
+behind a sign-in gate on the client and a session check on the server, because
+each seats a real player in a game that lands in a history and moves an Elo.
+Shared game links (`/game/<id>`) and profiles (`/player/<username-or-address>`)
+stay public.
 
-The in-browser bot is personalizable with **no download** (lobby → "Your
-browser bot"): a display name and an uploaded **Polyglot `.bin` opening book**,
-parsed and probed in the browser
-via `apps/web/lib/polyglot.ts`, whose Zobrist keys match the native client's
-byte-for-byte (`pnpm -C apps/web test:book` checks against the spec vectors).
-The downloadable `chess-client` remains the power tier (full-strength engines,
-GPU nets, 24/7 bots).
+The in-browser bot is personalizable with **no download** (Profile → Advanced →
+"Your browser bot"): an **opening repertoire** — four slots (White, and Black vs
+1.e4 / 1.d4 / anything else) filled from built-in Polyglot books and defaulting
+to all of them — and a thinking style. Books are parsed and probed in the
+browser via `apps/web/lib/polyglot.ts`, whose Zobrist keys match the native
+client's byte-for-byte (`pnpm -C apps/web test:book` checks against the spec
+vectors). Bringing your *own* `.bin` is the downloadable `chess-client`'s job
+(`--book`), along with full-strength engines, GPU nets and 24/7 bots.
 
 ### Demo flows
 

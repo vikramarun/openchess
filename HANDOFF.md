@@ -120,6 +120,8 @@ one creates are in [CLAUDE.md](CLAUDE.md); this is the summary.
   (`/game/[id]`), profiles, terms, privacy. **Needs a server deploy**, and
   `chess-client gauntlet` now resolves a session up front (a free gauntlet with
   no `OPENCHESS_WALLET_KEY` is refused with a message instead of a bare 401).
+  The gate **latches**: once admitted it never retracts, because `<SeatGame>`
+  renders under it and unmounting a live board forfeits its stake.
 - **A Test Engine game no longer shows up in "Live now."** `POST /games` records
   `TEST_MODE` and `/games/live` filters it out. It already recorded no seat
   wallets, so it was never in a history or an Elo — the lobby was the last place

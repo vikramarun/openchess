@@ -121,5 +121,31 @@ check(
     "anything gated on a fetch hangs the page when the server is down",
 );
 
+// --- the gate is a DOOR, not a fence ---
+// The most expensive thing in this file. <SeatGame> renders under RequireSignIn,
+// so a gate that RETRACTS unmounts a live board and closes its socket — and a
+// seat that is gone (rather than idle) hands the opponent a forfeit win and the
+// whole stake, per room.rs reap_forfeit_winner. Every ordinary way a token
+// disappears would then confiscate a stake from someone sitting right there
+// playing: authedFetch dropping a stale token on a 401, the 24h session TTL
+// lapsing mid-game, a wallet disconnect or account switch firing clearAuth.
+//
+// So once admitted, it stays admitted for the life of the mount. Nothing is lost
+// — the server re-checks the session on every route these pages call, and a
+// fresh visit remounts. Grepped rather than rendered, like the rest of this
+// file: what matters is that the latch is still there.
+check(
+  "admission latches",
+  /admitted/.test(gate) && /state === "in" \|\| admitted/.test(gate),
+  "RequireSignIn must keep rendering children once it has admitted someone — " +
+    "retracting unmounts a live board and forfeits its stake",
+);
+check(
+  "the latch is set during render, not in an effect",
+  /if \(state === "in" && !admitted\) setAdmitted\(true\)/.test(gate) &&
+    !/useEffect\([^)]*setAdmitted/.test(gate),
+  "an effect runs after paint, so the wall would flash over a live board first",
+);
+
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
 process.exit(failed ? 1 : 0);

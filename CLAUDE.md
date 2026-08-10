@@ -204,6 +204,19 @@ wallet.
   must send the bearer unconditionally — `apps/web` routes them all through
   `authedFetch`, and `chess-client gauntlet` now resolves a session up front
   rather than sending one only when staked.
+  **Admission LATCHES.** `RequireSignIn` keeps rendering its children for the
+  life of the mount once it has admitted someone, and that is a correctness
+  requirement, not laziness: `<SeatGame>` renders under it, so a gate that
+  retracted would unmount a LIVE BOARD and close its socket the moment a token
+  went away — `authedFetch` dropping a stale one on a 401, the 24h session TTL
+  lapsing mid-game, a wallet disconnect or account switch firing `clearAuth`.
+  A seat that is *gone* (rather than idle) hands the opponent a forfeit win and
+  the whole stake (`room.rs reap_forfeit_winner`), so an expiring session would
+  confiscate the stake of someone sitting right there playing — the same
+  confiscation the decline path is careful to avoid, by a different route.
+  Nothing is lost: the server re-checks every call and 401s, and a fresh visit
+  remounts. The latch is set DURING RENDER, not in an effect, or the wall
+  flashes over the board for a frame first. `test:gate` pins both halves.
   Two traps in the hook. It **must not block on `/config`**:
   `useOnchainConfig` retries a failed fetch forever with backoff, so a version
   that answered "checking" until the config landed turned an unreachable game
