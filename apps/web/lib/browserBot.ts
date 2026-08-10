@@ -1,15 +1,18 @@
 // The user's BROWSER bot: a personalized in-browser Stockfish — an opening
-// repertoire, a thinking style, and an uploaded Polyglot book — with zero
-// downloads. The native client (chess-client) is the power tier; this is the
-// on-ramp.
+// repertoire and a thinking style — with zero downloads. The native client
+// (chess-client) is the power tier; this is the on-ramp.
 //
 // No display name lives here any more. A seat is labeled by the USERNAME of the
 // wallet sitting in it, resolved server-side, because a name the client chose
 // can name anybody — see `seat_info` in crates/server/src/main.rs.
 //
-// Settings live in localStorage; the (potentially large) book lives in
-// IndexedDB and is parsed once per session into memory for synchronous
-// probing on each move.
+// No uploaded book either. A visitor could hand this a Polyglot `.bin`, which
+// lived in IndexedDB and was probed ahead of the repertoire. It was the most
+// advanced control on the most beginner-facing surface, and it is fully covered
+// one tier up — `chess-client --book <file>` takes any book, with a real engine
+// behind it. What is left here is what a first-time visitor can actually use.
+//
+// Settings live in localStorage.
 
 import { Chess } from "chessops/chess";
 
@@ -21,13 +24,11 @@ import {
   selectedBookIds,
   type Repertoire,
 } from "./books";
-import { parseBook, pickBookMove, type BookEntry } from "./polyglot";
+import { pickBookMove, type BookEntry } from "./polyglot";
 import { readMigrated, writeKey } from "./storage";
 import { DEFAULT_TIME_POLICY, normalizeTimePolicy, timePolicyLabel, type TimePolicy } from "./timePolicy";
 
 export type BrowserBotConfig = {
-  /** Stop using an opening book after this many plies. */
-  bookMaxPly: number;
   /** Which built-in opening books this bot plays, per color/reply slot. */
   repertoire: Repertoire;
   /** How it spends its clock. */
@@ -35,28 +36,20 @@ export type BrowserBotConfig = {
 };
 
 export const DEFAULT_CONFIG: BrowserBotConfig = {
-  bookMaxPly: 16,
   repertoire: DEFAULT_REPERTOIRE,
   time: DEFAULT_TIME_POLICY,
 };
 
-/** Clamp a numeric config field, treating a valid 0 as 0 (not falsy-default). */
-function clampInt(v: unknown, lo: number, hi: number, dflt: number): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : dflt;
-}
-
-/** Field-by-field parse with per-field defaults, so a config written before
- *  repertoires existed keeps its book setting and simply gains the new field.
- *  Exported for the tests, which have no localStorage.
+/** Field-by-field parse with per-field defaults, so a config written before a
+ *  field existed simply gains it. Exported for the tests, which have no
+ *  localStorage.
  *
- *  This rebuilds into a fresh object rather than spreading, which is also what
- *  makes the removal of `name` free: a blob still carrying one is simply never
- *  read, so no migration is needed. */
+ *  This rebuilds into a fresh object rather than spreading, which is what makes
+ *  a removed field free: a blob still carrying `name` or `bookMaxPly` is simply
+ *  never read, so neither needed a migration. */
 export function parseBrowserBotConfig(raw: unknown): BrowserBotConfig {
   const r = (raw ?? {}) as Record<string, unknown>;
   return {
-    bookMaxPly: clampInt(r.bookMaxPly, 0, 60, DEFAULT_CONFIG.bookMaxPly),
     repertoire: normalizeRepertoire(r.repertoire),
     time: normalizeTimePolicy(r.time),
   };
@@ -113,103 +106,11 @@ export function browserSeat(cfg: BrowserBotConfig = getBrowserBotConfig()): { en
   return { engine: browserEngineLabel(cfg) };
 }
 
-// ---------------------------------------------------------------------------
-// Uploaded opening book (IndexedDB) + in-memory probe cache
-// ---------------------------------------------------------------------------
-
-export type BookInfo = { name: string; positions: number };
-
-const DB_NAME = "openchess";
-const STORE = "books";
-const BOOK_KEY = "user";
-
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains(STORE)) {
-        req.result.createObjectStore(STORE);
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idb<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  return openDb().then(
-    (db) =>
-      new Promise<T>((resolve, reject) => {
-        const tx = db.transaction(STORE, mode);
-        const req = fn(tx.objectStore(STORE));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      }),
-  );
-}
-
-let cachedEntries: BookEntry[] | null = null;
-let cachedInfo: BookInfo | null = null;
-let loadPromise: Promise<void> | null = null;
-// Bumped on every save/clear so an in-flight load that resolves afterward can
-// tell it's stale and refuse to repopulate the cache with a superseded book.
-let generation = 0;
-
-/** Validate + persist an uploaded Polyglot .bin; returns its stats. */
-export async function saveUserBook(file: File): Promise<BookInfo> {
-  const bytes = await file.arrayBuffer();
-  const entries = parseBook(bytes); // throws on malformed input
-  if (entries.length === 0) throw new Error("That book contains no entries.");
-  await idb("readwrite", (s) => s.put({ name: file.name, bytes }, BOOK_KEY));
-  generation++;
-  cachedEntries = entries;
-  cachedInfo = { name: file.name, positions: entries.length };
-  return cachedInfo;
-}
-
-export async function clearUserBook(): Promise<void> {
-  generation++;
-  cachedEntries = null;
-  cachedInfo = null;
-  await idb("readwrite", (s) => s.delete(BOOK_KEY));
-}
-
-/** Load + parse the stored book into the in-memory cache (idempotent). */
-export function ensureBookLoaded(): Promise<void> {
-  if (typeof window === "undefined" || cachedEntries) return Promise.resolve();
-  if (!loadPromise) {
-    const gen = generation;
-    loadPromise = idb<{ name: string; bytes: ArrayBuffer } | undefined>("readonly", (s) =>
-      s.get(BOOK_KEY),
-    )
-      .then((row) => {
-        // A save/clear during the read supersedes us — don't clobber it.
-        if (gen !== generation) return;
-        if (row) {
-          cachedEntries = parseBook(row.bytes);
-          cachedInfo = { name: row.name, positions: cachedEntries.length };
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        loadPromise = null;
-      });
-  }
-  return loadPromise;
-}
-
-export async function userBookInfo(): Promise<BookInfo | null> {
-  await ensureBookLoaded();
-  return cachedInfo;
-}
-
-/** Synchronous probe of the uploaded book (call ensureBookLoaded first).
- *  Returns the highest-weight book move as UCI, or null. `maxPly` is passed in
- *  (rather than read from config here) so this stays cheap in the move loop. */
-export function probeUserBook(pos: Chess, ply: number, maxPly: number): string | null {
-  if (!cachedEntries || ply >= maxPly) return null;
-  return pickBookMove(cachedEntries, pos);
-}
+// A previously-uploaded Polyglot book may still be sitting in IndexedDB under
+// `openchess`/`books`. Nothing reads it now that the upload control is gone, and
+// it is deliberately not deleted here: a one-shot cleanup would have to run on
+// every page load of every visitor forever to catch the few who ever used it.
+// Browsers evict unreferenced origin storage on their own.
 
 // ---------------------------------------------------------------------------
 // Selected repertoire (built-in books, fetched from /books/*.bin)

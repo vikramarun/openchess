@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { useEngine } from "@/lib/engineContext";
 import { AuthButton } from "./AuthButton";
 import { Logo } from "./Logo";
 import { activeTab } from "./TabBar";
@@ -27,17 +26,8 @@ const LINKS: { href: string; label: string }[] = [
 ];
 
 export function Header() {
-  const { status } = useEngine();
   const pathname = usePathname() ?? "/";
   const section = activeTab(pathname);
-  const label =
-    status === "ready"
-      ? "Engine ready"
-      : status === "loading"
-        ? "Loading engine…"
-        : status === "error"
-          ? "Engine failed"
-          : "Engine";
 
   // Gauntlet is not a tab of its own, so activeTab folds it into /tournament.
   // Here it has its own link and has to win on its own path, or /gauntlet would
@@ -70,16 +60,19 @@ export function Header() {
             </Link>
           ))}
         </nav>
+        {/* No engine-status pill here. It used to sit left of the wallet, and it
+            was wrong twice over. It reported the SINGLETON eval engine
+            (lib/engineContext), which most routes never load — so "Engine
+            ready" on a page with an eval bar and a dim "Engine" everywhere
+            else described a worker the visitor has no relationship with, not
+            whether they can play. And it cost ~144px of a row that also has to
+            hold six nav links, the wordmark, the bankroll pill and an account
+            chip whose width is a username: signed in at 1100px the nav ran
+            under it. Engine status now lives where an engine is the subject —
+            /play's Test Engine card — and each seat reports its own
+            (SeatGame's "Status:" line), which is the one a player is waiting
+            on. */}
         <div className="header-actions">
-          {/* The label is hidden below 720px, not the whole pill: 85px is more
-              than the row can spare next to the wordmark and Sign in, but the
-              routes with no engine banner of their own (/game, /gauntlet,
-              /tournament) would otherwise show no engine status at all on a
-              phone. The dot keeps it, and `title` carries the words. */}
-          <span className="engine-pill" title={`${label} — Stockfish runs in your browser, free`}>
-            <span className={`dot ${status}`} />
-            <span className="engine-pill-label">{label}</span>
-          </span>
           <WalletMenu />
           <AuthButton />
         </div>

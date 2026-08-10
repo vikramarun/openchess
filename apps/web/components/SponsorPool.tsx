@@ -45,14 +45,39 @@ export function SponsorPool({
   const [done, setDone] = useState<string | null>(null);
 
   const tidHex = tidToBytes32(tid);
+
+  // Does the CONFIGURED escrow actually support sponsorship?
+  //
+  // `sponsorship` exists only from v2 on, so this read reverts against an older
+  // deployment — which is the honest capability probe, and it needs no wallet,
+  // so a signed-out visitor gets the right answer too. Without it the panel
+  // renders against whatever escrow `/config` names and the button reverts on
+  // submit, costing the user gas to learn what we could have known first. This
+  // also makes a rollback to an older escrow a no-op here rather than a bug.
+  // Deliberately a CONSTANT tournament id, not this one: what's being asked is
+  // whether the escrow has the function at all, which is a property of the
+  // deployment. Keying on `tidHex` would re-read once per tournament opened and
+  // defeat react-query's cache, for an answer that cannot differ between them.
+  const { isError: noSponsorship, isLoading: probing } = useReadContract({
+    address: escrow,
+    abi: ESCROW_ABI,
+    functionName: "sponsorship",
+    args: [`0x${"0".repeat(64)}`, `0x${"0".repeat(40)}`],
+    query: { retry: false, staleTime: Infinity },
+  });
+
   const { data: mine, refetch: refetchMine } = useReadContract({
     address: escrow,
     abi: ESCROW_ABI,
     functionName: "sponsorship",
     args: address ? [tidHex, address] : undefined,
-    query: { enabled: !!address && isConnected },
+    query: { enabled: !!address && isConnected && !noSponsorship },
   });
   const already = (mine as bigint | undefined) ?? 0n;
+
+  // Render nothing while probing rather than flashing a control that may be
+  // about to disappear, and nothing at all if this escrow can't take a sponsor.
+  if (probing || noSponsorship) return null;
 
   if (!isConnected || !address) {
     return (
@@ -141,6 +166,12 @@ export function SponsorPool({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {/* Stated here rather than by the parent panel: this line is only true
+          when an escrow that accepts sponsorship is configured, which is
+          exactly the condition for this component rendering at all. */}
+      <span className="muted" style={{ fontSize: 12 }}>
+        Anyone can add to this pool.
+      </span>
       <div className="offer-form" style={{ margin: 0 }}>
         <label className="of-field">
           <span className="muted">Sponsor the pool (USDC)</span>

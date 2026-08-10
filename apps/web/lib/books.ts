@@ -68,7 +68,23 @@ export function booksForSlot(slot: BookSlot): BookMeta[] {
   return BOOKS.filter((b) => b.slot === slot);
 }
 
-/** `null` in a slot means "no book here — play the engine from move one". */
+/** Every book for a slot at once, rather than one style's.
+ *
+ *  Not a seventh book on disk — it is the six merged, which Polyglot makes
+ *  free: entries are keyed by position, so concatenating the styles gives one
+ *  set that knows every line any of them knows, and `weighted` picking then
+ *  chooses between them in proportion to how often the source games played
+ *  them. A style is therefore a NARROWING of this, not a different corpus.
+ *
+ *  It is the default. The alternative default was no book at all, which is
+ *  strictly worse for a player who never opens this panel: measured against the
+ *  real server, a booked seat spent 0.0s on its first five moves where an
+ *  unbooked one spent 7.5s each, and in a 3+0 game that is a quarter of the
+ *  clock gone before either side has left theory. */
+export const ALL_BOOKS = "all";
+
+/** `null` in a slot means "no book here — play the engine from move one";
+ *  `ALL_BOOKS` means every book for that slot. */
 export type Repertoire = {
   white: string | null;
   vsE4: string | null;
@@ -81,10 +97,10 @@ export type Repertoire = {
 };
 
 export const DEFAULT_REPERTOIRE: Repertoire = {
-  white: null,
-  vsE4: null,
-  vsD4: null,
-  vsOther: null,
+  white: ALL_BOOKS,
+  vsE4: ALL_BOOKS,
+  vsD4: ALL_BOOKS,
+  vsOther: ALL_BOOKS,
   maxPly: 16,
   pick: "weighted",
 };
@@ -116,12 +132,24 @@ const STYLE_LABELS: Record<BookStyle, string> = {
 
 export const STYLES = Object.keys(STYLE_LABELS) as BookStyle[];
 
-/** Named starting points that fill all four slots with one style. Every slot
- *  stays individually editable afterward — a preset is a shortcut, not a mode,
- *  and mixing (Sharp as White, Solid as Black) is a first-class option. */
-export const PRESETS: { id: BookStyle; label: string; blurb: string; rep: Omit<Repertoire, "maxPly" | "pick"> }[] =
-  STYLES.map((style) => ({
-    id: style,
+/** Fill all four slots at once. Every slot stays individually editable
+ *  afterward — a preset is a shortcut, not a mode, and mixing (Sharp as White,
+ *  Solid as Black) is a first-class option.
+ *
+ *  Ordered widest to narrowest: everything, then the six styles that each carve
+ *  a repertoire out of it, then nothing. The two ends are the same control as
+ *  the middle six on purpose — "No opening book" used to be a separate button
+ *  hard-coded in the picker, which read as an escape hatch rather than one of
+ *  the choices. */
+export const PRESETS: { id: string; label: string; blurb: string; rep: Omit<Repertoire, "maxPly" | "pick"> }[] = [
+  {
+    id: ALL_BOOKS,
+    label: "Everything",
+    blurb: "The whole book. Every style below, chosen between by how often the line is played.",
+    rep: { white: ALL_BOOKS, vsE4: ALL_BOOKS, vsD4: ALL_BOOKS, vsOther: ALL_BOOKS },
+  },
+  ...STYLES.map((style) => ({
+    id: style as string,
     label: STYLE_LABELS[style],
     blurb: STYLE_BLURBS[style],
     rep: {
@@ -130,15 +158,34 @@ export const PRESETS: { id: BookStyle; label: string; blurb: string; rep: Omit<R
       vsD4: BOOKS.find((b) => b.slot === "vsD4" && b.style === style)?.id ?? null,
       vsOther: BOOKS.find((b) => b.slot === "vsOther" && b.style === style)?.id ?? null,
     },
-  }));
+  })),
+  {
+    id: "none",
+    label: "No opening book",
+    blurb: "Calculates from move one. Nothing is filtered out — it just costs clock.",
+    rep: { white: null, vsE4: null, vsD4: null, vsOther: null },
+  },
+];
 
 /** Validate a repertoire read from localStorage. Unknown ids become `null`
  *  rather than a 404 fetch mid-game, and every number is clamped — this blob
  *  is user-editable and feeds the move loop. */
 export function normalizeRepertoire(raw: unknown): Repertoire {
   const r = (raw ?? {}) as Partial<Record<keyof Repertoire, unknown>>;
+  // `null` is the one value that survives as itself: it is the UI writing "no
+  // book in this slot", which has to outrank the default. Anything else
+  // unusable — absent, a book belonging to another slot, a number — falls back
+  // to the default, the same contract `maxPly` and `pick` follow below. A
+  // wrong-slot id in particular must never be kept: the file exists and would
+  // fetch cleanly, then play the other colour's moves.
   const slot = (v: unknown, s: BookSlot): string | null =>
-    typeof v === "string" && BY_ID.get(v)?.slot === s ? v : null;
+    v === null
+      ? null
+      : v === ALL_BOOKS
+        ? ALL_BOOKS
+        : typeof v === "string" && BY_ID.get(v)?.slot === s
+          ? v
+          : DEFAULT_REPERTOIRE[s];
   const maxPly = Number(r.maxPly);
   return {
     white: slot(r.white, "white"),
@@ -150,25 +197,43 @@ export function normalizeRepertoire(raw: unknown): Repertoire {
   };
 }
 
+/** Every concrete book id a repertoire selects, with `ALL_BOOKS` expanded to
+ *  that slot's six. Everything downstream — the fetch, the byte total, the cache
+ *  signature — reads this rather than the four raw slot values, so the sentinel
+ *  never has to be understood twice. */
 export function selectedBookIds(rep: Repertoire): string[] {
-  return [rep.white, rep.vsE4, rep.vsD4, rep.vsOther].filter((id): id is string => id !== null);
+  return SLOTS.flatMap(({ slot }) => {
+    const v = rep[slot];
+    if (v === ALL_BOOKS) return booksForSlot(slot).map((b) => b.id);
+    return v === null ? [] : [v];
+  });
 }
 
 /** Short human label — "Sharp", or "Sharp/Solid" for a mixed repertoire. Used
  *  for the engine string declared to opponents, which the server caps at 48
  *  chars, so it names styles rather than listing four book titles. */
 export function repertoireLabel(rep: Repertoire): string {
-  const styles = selectedBookIds(rep)
-    .map((id) => BY_ID.get(id)?.style)
-    .filter((s): s is BookStyle => !!s);
-  if (styles.length === 0) return "";
-  const unique = [...new Set(styles)];
-  if (unique.length === 1) return STYLE_LABELS[unique[0]];
+  // Every slot on "everything" is the default and the widest setting; naming its
+  // six styles would spend the whole 48-char budget saying "no preference".
+  if (SLOTS.every(({ slot }) => rep[slot] === ALL_BOOKS)) return "Full book";
+  // Per SLOT, not per selected book: with `ALL_BOOKS` expanding to six ids, a
+  // label built from `selectedBookIds` would call a one-slot mix a six-style
+  // one and pick an arbitrary name out of it.
+  const labelOf = (slot: BookSlot): string | null => {
+    const v = rep[slot];
+    if (v === ALL_BOOKS) return "Full";
+    const style = v ? BY_ID.get(v)?.style : undefined;
+    return style ? STYLE_LABELS[style] : null;
+  };
+  const names = SLOTS.map(({ slot }) => labelOf(slot)).filter((n): n is string => !!n);
+  if (names.length === 0) return "";
+  const unique = [...new Set(names)];
+  if (unique.length === 1) return unique[0];
   // Mixed: name White's style and Black's dominant one, which is what an
   // opponent actually cares about.
-  const whiteStyle = rep.white ? BY_ID.get(rep.white)?.style : undefined;
-  const rest = unique.filter((s) => s !== whiteStyle);
-  return [whiteStyle, rest[0]].filter(Boolean).map((s) => STYLE_LABELS[s as BookStyle]).join("/");
+  const white = labelOf("white");
+  const rest = unique.filter((n) => n !== white);
+  return [white, rest[0]].filter(Boolean).join("/");
 }
 
 // ---------------------------------------------------------------------------

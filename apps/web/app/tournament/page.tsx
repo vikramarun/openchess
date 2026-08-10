@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "wagmi";
 
 import { SeatGame } from "@/components/SeatGame";
+import { RequireSignIn } from "@/components/SignInGate";
 import { SponsorPool } from "@/components/SponsorPool";
 import { TournamentAdmission } from "@/components/TournamentAdmission";
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
@@ -26,7 +27,6 @@ import {
   entrantLabel,
   fetchTournament,
   fetchTournaments,
-  rememberCasualIdentity,
   hasPrizePool,
   isOrganizer,
   kindOf,
@@ -64,7 +64,14 @@ export default function TournamentPage() {
           pool is distributed onchain by final standings.
         </p>
       </div>
-      {mounted ? <TournamentClient /> : null}
+      {mounted ? (
+        <RequireSignIn
+          title="Sign in to enter a tournament"
+          lede="Rounds are dispatched on the server's schedule, so an entry has to belong to an account that can be paired, scored and paid."
+        >
+          <TournamentClient />
+        </RequireSignIn>
+      ) : null}
     </div>
   );
 }
@@ -156,11 +163,13 @@ function TournamentClient() {
   // approval request is in flight.
   const [inviteCode, setInviteCode] = useState("");
   const [requesting, setRequesting] = useState(false);
-  const [casualName, setCasualName] = useState("");
 
-  // Casual entrant identity, mirrored from localStorage so a reload doesn't turn
-  // an entrant into a stranger. Buy-in tournaments key on the wallet instead.
-  const [identities, setIdentities] = useState<Record<string, string>>({});
+  // Entrant ids that predate the wallet-only rule. A casual tournament used to
+  // key its entrants on a nickname the joiner typed, remembered here so a reload
+  // didn't turn an entrant into a stranger. New joins are the wallet, on both
+  // sides — this is read-only, kept until the last name-keyed tournament created
+  // before that change has been started or swept. Nothing writes it.
+  const [legacyIds, setLegacyIds] = useState<Record<string, string>>({});
   // The tournament whose detail page is open (standings, pairings, my game).
   const [openTid, setOpenTid] = useState<string | null>(null);
   // Rounds the player explicitly backed out of, per tournament. Leaving a round
@@ -173,10 +182,23 @@ function TournamentClient() {
   const bot = useBotStatus(token);
   const { available } = useAvailable(config?.escrow);
 
+  /** Who I am in this tournament.
+   *
+   *  One answer for both kinds now: the connected wallet. A casual entry used to
+   *  be a nickname, so this branched on `buy_in` and read a different source for
+   *  each — the same account could be an entrant of one tournament and a
+   *  stranger to another. The legacy branch only fires for a tournament actually
+   *  joined under the old rule, and it returns the wallet otherwise so the
+   *  organizer checks below still have someone to compare. */
   const identityIn = useCallback(
-    (t: Tournament): string | null =>
-      t.buy_in ? (address ? address.toLowerCase() : null) : identities[t.id] ?? null,
-    [address, identities],
+    (t: Tournament): string | null => {
+      const me = address?.toLowerCase() ?? null;
+      if (me && t.players.some((p) => sameEntrant(p, me))) return me;
+      const legacy = legacyIds[t.id];
+      if (legacy && t.players.some((p) => sameEntrant(p, legacy))) return legacy;
+      return me;
+    },
+    [address, legacyIds],
   );
   const isEntrant = useCallback(
     (t: Tournament) => {
@@ -227,9 +249,10 @@ function TournamentClient() {
     };
   }, [openTid]);
 
-  // Hydrate remembered casual identities once the lobby is known.
+  // Hydrate the pre-wallet casual identities once the lobby is known. Read-only
+  // — see `legacyIds`; nothing writes this store any more.
   useEffect(() => {
-    setIdentities((prev) => {
+    setLegacyIds((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const t of tourneys) {
@@ -447,24 +470,14 @@ function TournamentClient() {
 
   const join = async (t: Tournament, asBot = false, invite?: string) => {
     setErr(null);
-    if ((t.buy_in || asBot) && !token)
-      return setErr(
-        asBot
-          ? "Sign in to enter with your bot."
-          : "Sign in (top right) to join a tournament with an entry fee.",
-      );
-    const player = t.buy_in
-      ? undefined
-      : casualName.trim() || `guest-${Math.floor(Date.now() % 100000)}`;
+    // Every entry needs a session now, free or paid: the entrant IS the wallet.
+    // The page is gated too, so this only fires on an expired session.
+    if (!token) return setErr(SESSION_EXPIRED);
     try {
-      // authedFetch, always: a CASUAL join wants the session too — it's what
-      // lets the server put the finished games in this player's history and
-      // move their casual Elo. Signed out stays fine (no header is attached).
       const r = await authedFetch(`${SERVER_HTTP}/tournaments/${t.id}/join`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          player,
           ...(invite ? { invite } : {}),
           ...(asBot ? { seat: "bot", uci_options: loadBotOptions() } : { engine: browserSeat().engine }),
         }),
@@ -479,16 +492,18 @@ function TournamentClient() {
                 ? "Couldn’t move your entry into the pool. Check your deposited balance."
                 : r.status === 424
                   ? BOT_OFFLINE_MSG
-                  : r.status === 409
-                    ? "That display name is already taken in this tournament."
-                    : // A display name shaped like a wallet address is refused:
-                      // the server reads an address-shaped entrant id AS that
-                      // wallet, so allowing one would let a guest bind the seat
-                      // to somebody else's address. Say which rule was hit —
-                      // otherwise this reads as a generic failure of the form.
-                      r.status === 400
-                      ? "Pick a display name that isn’t a wallet address."
-                      : r.status === 403
+                  : // 409 used to mean a display name collision, which cannot
+                    // happen now that an entrant is a wallet. What is left is
+                    // the door being shut: started, settled, or at the entrant
+                    // cap.
+                    r.status === 409
+                    ? "This tournament isn’t taking entries — it has already started or filled up."
+                    : // The admission gate. The server answers 403 for every
+                      // not-admitted case and never a 2xx — `fetch` counts 202
+                      // as ok, so a "you're still pending" success code would be
+                      // read here as a completed join. Which case it is comes
+                      // from `my_admission`, not the status.
+                      r.status === 403
                       ? t.admission === "invite"
                         ? "That invite code isn’t valid — it may already have been used."
                         : t.my_admission === "pending"
@@ -500,14 +515,9 @@ function TournamentClient() {
         );
         return;
       }
-      // Store the entrant id the SERVER recorded — it sanitizes and caps the
-      // display name, and remembering our own version would leave us looking up
-      // an entrant that doesn't exist.
-      const recorded: string | undefined = (await r.json().catch(() => null))?.player;
-      if (!t.buy_in && recorded) {
-        rememberCasualIdentity(t.id, recorded);
-        setIdentities((m) => ({ ...m, [t.id]: recorded }));
-      }
+      // Nothing to remember any more: the entrant id is the connected wallet in
+      // every tournament, free or paid, so `identityIn` can read it off the
+      // account instead of off a nickname stashed in localStorage.
       setOpenTid(t.id);
     } catch {
       setErr("Server unreachable.");
@@ -705,11 +715,14 @@ function TournamentClient() {
           (openT.status === "open" || openT.status === "running") && (
             <div className="panel" style={{ marginBottom: 16 }}>
               <b style={{ color: "var(--text-strong)" }}>Prize pool</b>
+              {/* Only the pool figure and how ENTRY works — both true of any
+                  escrow. Anything about sponsorship belongs to `SponsorPool`,
+                  which hides itself when the configured escrow can't take one;
+                  saying it here would leave the claim on screen with nothing
+                  behind it. */}
               <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
                 {poolLabel(openT.pool) ?? "Nothing in the pot yet"}
-                {kindOf(openT) === "free"
-                  ? " — entry is free, so the prizes are whatever sponsors put up."
-                  : " — entries plus sponsorship."}
+                {kindOf(openT) === "free" ? " — entry is free." : " — from entries."}
               </div>
               <SponsorPool
                 tid={openT.id}
@@ -942,9 +955,12 @@ function TournamentClient() {
             </label>
           )}
         </div>
+        {/* Only reachable on an EXPIRED session — the page itself is gated now,
+            so nobody signed out ever sees this form. Kept because that case is
+            real and the alternative is a Create button that 401s silently. */}
         {admission !== "open" && !token && (
           <div className="muted" style={{ fontSize: 12, marginTop: 4, color: "#e0a06c" }}>
-            Sign in (top right) first — minting codes and approving entrants are the
+            Your sign-in expired — minting codes and approving entrants are the
             organizer&apos;s, so a gated tournament needs one.
           </div>
         )}
@@ -959,23 +975,11 @@ function TournamentClient() {
             </>
           )}
         </div>
-        <label className="of-field" style={{ marginTop: 10 }}>
-          <span className="muted">Display name for casual tournaments</span>
-          <input
-            value={casualName}
-            onChange={(e) => setCasualName(e.target.value)}
-            placeholder="your handle (casual only)"
-            style={{ maxWidth: 280 }}
-          />
-        </label>
-        {/* Signed in, the standings and the board both show the name the SERVER
-            resolves from your wallet — never this string, which anyone could set
-            to anyone else's handle. Say so here, or typing "Alice" and seeing
-            0xaa88…8888 in the crosstable reads as a bug. */}
-        <div className="muted" style={{ fontSize: 12, marginTop: 4, maxWidth: 420 }}>
-          Identifies your entry. Signed in, the standings show your username — or your address
-          until you <Link href="/profile">claim one</Link>.
-        </div>
+        {/* No display-name field. An entrant is their wallet in every
+            tournament now, and the standings print the username that wallet
+            claimed on Profile — a second, per-tournament name would be both a
+            place to impersonate somebody and a form field on the CREATE panel
+            that only ever affected JOINING. */}
         {err && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 6 }}>{err}</div>}
       </div>
 

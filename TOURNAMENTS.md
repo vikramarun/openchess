@@ -1,10 +1,9 @@
 # Tournaments — respec
 
-_Status: **all three parts and the dispatch prerequisite are built** (PR #58).
-Part 1 and Part 3 run on the live contract. Part 2 does not: sponsorship needs
-**contract v2, which is not deployed** — see the warning at the top of
-[DEPLOYMENTS.md](DEPLOYMENTS.md). Merging before v2 ships puts free-entry and
-sponsorship UI in front of users against a v1 contract, where both fail._
+_Status: **all three parts are built and live.** Contract v2 is deployed at
+`0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68` and `ESCROW_ADDR` points at it, so
+sponsorship and free entry work in production. It ships **unaudited** — see
+[DEPLOYMENTS.md](DEPLOYMENTS.md); `MAX_STAKE` stays at 25 USDC as the guardrail._
 
 Two asks drive this:
 
@@ -156,7 +155,7 @@ pays. A prize table computed a second way in the UI will drift.
 
 ---
 
-## Part 2 — sponsorship (contract v2) — **BUILT, NOT DEPLOYED**
+## Part 2 — sponsorship (contract v2) — **LIVE**
 
 Contract ([ChessEscrow.sol](contracts/src/ChessEscrow.sol)): zero buy-in,
 `sponsorTournament`, `refundSponsorship`, the `claimRefund` zero-buy-in guard,
@@ -174,9 +173,10 @@ bankroll; a local record of sponsored ids so the claim panel can offer
 `refundSponsorship` (the server's claimable list is entrants-only, and a sponsor
 is not an entrant); and no refund button where the contract refuses one.
 
-**Nothing is deployed** — see the warning at the top of
-[DEPLOYMENTS.md](DEPLOYMENTS.md). Remaining: Part 3 (admission control), and the
-audit + bankroll migration.
+**Deployed** at `0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68`; the server points
+at it. v1 held 0 USDC at cutover, so the bankroll migration this section used to
+warn about never applied. What remains is the audit — see
+[DEPLOYMENTS.md](DEPLOYMENTS.md).
 
 ### Contract changes
 
