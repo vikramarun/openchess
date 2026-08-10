@@ -109,7 +109,9 @@ pub fn move_overhead_for(initial_ms: Option<u64>) -> u64 {
 /// on a server predating the field, where the clock is right on a fresh game and
 /// wrong on a reconnect — strictly better than giving up the scaling entirely.
 pub fn initial_ms_from(time_control: Option<TimeControl>, clock: &Clock) -> u64 {
-    time_control.map(|tc| tc.initial_ms).unwrap_or(clock.white_ms)
+    time_control
+        .map(|tc| tc.initial_ms)
+        .unwrap_or(clock.white_ms)
 }
 
 /// Moves Stockfish assumes remain when a `go` carries no `movestogo`, and how
@@ -438,7 +440,10 @@ mod tests {
     fn no_cap_unless_one_was_asked_for() {
         // The default must not change how anyone's existing engine plays —
         // only the opt-in ceiling does.
-        assert_eq!(move_cap_ms(&TimePolicy::default(), 250, Some(180_000)), None);
+        assert_eq!(
+            move_cap_ms(&TimePolicy::default(), 250, Some(180_000)),
+            None
+        );
     }
 
     #[test]
@@ -569,7 +574,10 @@ mod tests {
             increment_ms: 0,
         };
         assert_eq!(initial_ms_from(Some(tc), &mid_game), 600_000);
-        assert_eq!(move_overhead_for(Some(initial_ms_from(Some(tc), &mid_game))), 250);
+        assert_eq!(
+            move_overhead_for(Some(initial_ms_from(Some(tc), &mid_game))),
+            250
+        );
 
         // A server too old to send the field still gets the scaling from the
         // clock, which is right on a fresh game. Losing that would put every
