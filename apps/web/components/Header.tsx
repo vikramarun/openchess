@@ -8,8 +8,8 @@ import { Logo } from "./Logo";
 import { activeTab } from "./TabBar";
 import { WalletMenu } from "./WalletMenu";
 
-/** The desktop navigation. Below 720px `.nav` is display:none and
- *  components/TabBar.tsx takes over — see the ≤720px block in globals.css.
+/** The desktop navigation. Below 1100px `.nav` is display:none and
+ *  components/TabBar.tsx takes over — see the ≤1100px block in globals.css.
  *
  *  Six destinations here against the tab bar's five: Gauntlet gets its own link
  *  where there is room for it, and folds under the tab bar's "Events" where

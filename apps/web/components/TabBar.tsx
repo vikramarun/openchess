@@ -8,7 +8,7 @@ import { IconBoard, IconChip, IconSwords, IconTrophy, IconUser } from "./icons";
 
 /** The primary navigation on phones.
  *
- *  Below 720px the header's `.nav` is `display: none` and this is the only way
+ *  Below 1100px the header's `.nav` is `display: none` and this is the only way
  *  to reach four of the five destinations. It replaces a masked horizontal
  *  scroller whose last link ("Customize") sat 77px off the right edge at 375px
  *  — a destination you could only reach by discovering that a row with no

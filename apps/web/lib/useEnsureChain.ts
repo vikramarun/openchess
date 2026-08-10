@@ -5,7 +5,9 @@ import { useAccount, useSwitchChain } from "wagmi";
 
 /** Returns a function that switches the wallet to `expected` if it isn't already
  *  there — the one place the "be on the right chain before a write" step lives
- *  (bankroll deposit/withdraw, SIWE sign-in, tournament claim/refund).
+ *  (bankroll deposit/withdraw, tournament claim/refund, sponsorship). NOT
+ *  sign-in: SIWE is a `personal_sign` whose chain id is the server's, so it
+ *  needs no switch — and prompting for one on page load is user-hostile.
  *
  *  **Reads the chain from `useAccount()`, never `useChainId()`.** wagmi only
  *  syncs a connector's chain into `config.state.chainId` when that chain is in

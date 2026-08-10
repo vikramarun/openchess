@@ -528,9 +528,13 @@ function TournamentClient() {
     setErr(null);
     if (t.buy_in && !token) return setErr("Sign in (top right) to start your tournament.");
     try {
-      const r = await fetch(`${SERVER_HTTP}/tournaments/${t.id}/start`, {
+      // authedFetch, not a bare bearer: starting is organizer-authenticated, and
+      // a session that lapsed (every server redeploy voids them) would otherwise
+      // 401 with no way to recover — the dead token stays in storage and a
+      // reload reproduces it. This drops it and re-prompts instead. Sent for a
+      // casual tournament too; anyone may start one, so the header is ignored.
+      const r = await authedFetch(`${SERVER_HTTP}/tournaments/${t.id}/start`, {
         method: "POST",
-        headers: t.buy_in && token ? { authorization: `Bearer ${token}` } : {},
       });
       if (!r.ok)
         setErr(
@@ -538,9 +542,11 @@ function TournamentClient() {
             ? MAINTENANCE_MSG
             : r.status === 409
               ? "Need at least 2 entrants."
-              : r.status === 403
-                ? "Only the organizer can start this tournament."
-                : `Couldn’t start (${r.status}).`,
+              : r.status === 401
+                ? SESSION_EXPIRED
+                : r.status === 403
+                  ? "Only the organizer can start this tournament."
+                  : `Couldn’t start (${r.status}).`,
         );
       else setOpenTid(t.id);
     } catch {

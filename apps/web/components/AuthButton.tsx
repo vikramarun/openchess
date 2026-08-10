@@ -30,9 +30,9 @@ export function AuthButton() {
 
 /** One button for the whole entry flow. Signing in opens Dynamic's modal — email
  *  and Google provision an embedded wallet, external wallets connect as before —
- *  then we auto-switch to the server's expected chain and, on a staked server,
- *  immediately prompt the SIWE signature. So there's a single "Sign in", never a
- *  separate connect + sign-in step. The session token is bound to the wallet it
+ *  and on a staked server we immediately prompt the SIWE signature. So there's a
+ *  single "Sign in", never a separate connect + sign-in step. No chain switch is
+ *  involved: SIWE doesn't need one, and the money writes each do their own. The session token is bound to the wallet it
  *  was issued for and cleared on disconnect / account switch. */
 function AuthButtonInner() {
   // `useAccount().chainId` is the connector's REAL chain; `useChainId()` is
@@ -131,9 +131,10 @@ function AuthButtonInner() {
 
   const ready = isConnected && !!address && expected != null;
 
-  // Auto-complete sign-in once connected on a staked server: runSignIn
-  // switches to the expected chain (if needed) and then prompts the SIWE
-  // signature, so this is the whole connect → switch → sign flow in one step.
+  // Auto-complete sign-in once connected on a staked server. `runSignIn`
+  // prompts the SIWE signature and nothing else — it deliberately does NOT
+  // switch chains (see the note inside it), because this effect runs on page
+  // load and a switch there is an unsolicited wallet prompt.
   useEffect(() => {
     if (!ready || !wagerOn || signedIn || busy) return;
     const key = address!.toLowerCase();
@@ -171,41 +172,62 @@ function AuthButtonInner() {
     }
 
     // Connected but the signed-in session isn't established yet.
-    if (wagerOn && !signedIn) {
+    //
+    // `config == null` counts as needing one, to agree with `useAuthState`,
+    // which reads unknown config as the production truth (wagering on, session
+    // required) and puts a sign-in wall on every gated route. Without that
+    // clause the two disagree for exactly as long as `/config` is unreachable —
+    // a hand-deployed server restart — and the visitor gets an account chip in
+    // the header while the page under it says "Sign in to play". The button is
+    // disabled until the config lands, because `runSignIn` needs a chain id for
+    // the SIWE message and would otherwise be a control that does nothing.
+    const needsSession = wagerOn || config == null;
+    if (needsSession && !signedIn) {
       return (
         <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
           {error && <span className="auth-err">{error}</span>}
-          <button className="primary" disabled={busy} onClick={runSignIn}>
-            {busy ? "Signing…" : "Finish sign-in"}
+          <button className="primary" disabled={busy || expected == null} onClick={runSignIn}>
+            {busy ? "Signing…" : expected == null ? "Connecting…" : "Finish sign-in"}
           </button>
         </span>
       );
     }
 
-    // Signed-in user drifted to the wrong network — surface a switch control.
-    if (wagerOn && expected != null && chainId !== expected) {
-      return (
-        <button className="wrong-net" onClick={() => ensureChain(expected).catch(() => {})}>
-          Wrong network, switch
-        </button>
-      );
-    }
-
     // Signed in (or a casual server that needs no signature) → account chip.
+    //
+    // A wrong network is shown BESIDE the chip, never instead of it. This is the
+    // only `setShowDynamicUserProfile` call site in the app, so it is the only
+    // route to sign out, to the Dynamic profile, and to embedded-wallet export —
+    // and below 1100px the header is the only place those exist at all.
+    // Replacing it stranded anyone who declined the switch prompt with no way
+    // out. The nag is advisory anyway: escrow reads go through wagmi's pinned
+    // chain, and every write calls `ensureChain` itself before it sends.
+    const wrongChain = wagerOn && expected != null && chainId != null && chainId !== expected;
     return (
-      <button
-        className="account-chip"
-        onClick={() => setShowDynamicUserProfile(true)}
-        title="Account"
-      >
-        {photo ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={photo} alt="" className="chip-av" />
-        ) : (
-          <span className="chip-av chip-av-fallback">♟</span>
+      <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+        {wrongChain && (
+          <button
+            className="wrong-net"
+            onClick={() => ensureChain(expected!).catch(() => {})}
+            title={`Switch your wallet to chain ${expected}`}
+          >
+            Wrong network
+          </button>
         )}
-        <span>{playerLabel({ username, address })}</span>
-      </button>
+        <button
+          className="account-chip"
+          onClick={() => setShowDynamicUserProfile(true)}
+          title="Account"
+        >
+          {photo ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={photo} alt="" className="chip-av" />
+          ) : (
+            <span className="chip-av chip-av-fallback">♟</span>
+          )}
+          <span>{playerLabel({ username, address })}</span>
+        </button>
+      </span>
     );
   }
 

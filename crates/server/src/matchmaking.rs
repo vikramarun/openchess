@@ -3138,11 +3138,23 @@ async fn tourney_start(
         // Buy-in tournaments (money at stake) may only be started by the
         // organizer — an anonymous caller must not lock the field before it
         // fills. Casual tournaments have no pool, so anyone may start.
+        //
+        // NO session and NOT-the-organizer are different answers on purpose.
+        // Both used to be 403, which made an expired session indistinguishable
+        // from someone else's tournament: the client can only self-heal a
+        // credential it is told is bad (`authedFetch` retries on 401), so an
+        // organizer whose session lapsed — a server redeploy voids every one —
+        // was told "only the organizer can start this" about their own event,
+        // with entrants' buy-ins already locked, and no way back except signing
+        // out by hand. 401 says "re-authenticate"; 403 says "not yours".
         if t.buy_in.is_some() {
-            let ok = matches!(
-                (&t.organizer, &caller),
-                (Some(org), Some(c)) if org.eq_ignore_ascii_case(c)
-            );
+            let Some(caller) = caller.as_deref() else {
+                return Err(StatusCode::UNAUTHORIZED);
+            };
+            let ok = t
+                .organizer
+                .as_deref()
+                .is_some_and(|org| org.eq_ignore_ascii_case(caller));
             if !ok {
                 return Err(StatusCode::FORBIDDEN);
             }
@@ -7547,6 +7559,69 @@ mod tests {
         let mut got = [g.white.as_deref(), g.black.as_deref()];
         got.sort();
         assert_eq!(got, [Some(wa), Some(wb)]);
+    }
+
+    /// Starting a paid tournament tells a lapsed session apart from a stranger.
+    ///
+    /// Both used to be 403, which made an expired session indistinguishable from
+    /// somebody else's event — and a client can only self-heal a credential it is
+    /// told is bad. The organizer of a tournament with entrants' buy-ins already
+    /// locked was told "only the organizer can start this", about their own
+    /// event, with no way back except signing out by hand.
+    #[tokio::test]
+    async fn starting_a_paid_tournament_401s_a_lapsed_session_and_403s_a_stranger() {
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(50_000_000))));
+        let org = "0xaa15151515151515151515151515151515151515";
+        let other = "0xbb16161616161616161616161616161616161616";
+        let t_org = state.0.auth.mint_session(org);
+        let t_other = state.0.auth.mint_session(other);
+        let tid = tourney_create(
+            State(state.clone()),
+            bearer(&t_org),
+            Json(TourneyCreateReq {
+                name: "Paid".into(),
+                buy_in: Some("2000000".into()),
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+
+        // No credential at all — including a token the server no longer knows,
+        // which `authed_wallet` reports the same way. Recoverable: re-sign.
+        assert_eq!(
+            tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+                .await
+                .err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            tourney_start(State(state.clone()), Path(tid), bearer("dead-token"))
+                .await
+                .err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        // A VALID session that simply isn't the organizer stays 403 — nothing to
+        // re-authenticate, the answer is just no.
+        assert_eq!(
+            tourney_start(State(state.clone()), Path(tid), bearer(&t_other))
+                .await
+                .err(),
+            Some(StatusCode::FORBIDDEN)
+        );
+        // The organizer gets past the gate (and then hits the entrant floor,
+        // which is what proves the auth check passed rather than short-circuited).
+        assert_eq!(
+            tourney_start(State(state.clone()), Path(tid), bearer(&t_org))
+                .await
+                .err(),
+            Some(StatusCode::CONFLICT)
+        );
     }
 
     /// A BUY-IN tournament's seats still carry their entrants' wallets.
