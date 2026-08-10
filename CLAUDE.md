@@ -20,6 +20,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
 (cd apps/web && pnpm test:seatengine) # the seat engine's prewarm/refcount lifecycle
 (cd apps/web && pnpm test:time)    # per-move clock budgeting (movetime ceilings)
+(cd apps/web && pnpm test:benchclock) # /bench/time's clock charges what the server charges
 (cd apps/web && pnpm test:candidates) # style picks never trade away a forced mate
 (cd apps/web && pnpm test:eval)    # eval-bar score mapping (UCI info → bar)
 (cd apps/web && pnpm test:seat)    # pre-game confirm gate (decline must not close the socket)

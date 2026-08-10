@@ -199,9 +199,16 @@ export const TAKEOVER_FACTOR = 2;
  *  in ~2ms. `pace` states its own `movestogo`, which is why a lower one moves
  *  this threshold EARLIER — the same coupling that made "Pace, 15 moves" look
  *  like a taste setting while it was really editing a safety cliff. */
-export function takeoverBelowMs(policy: TimePolicy, overheadMs: number): number {
+export function takeoverBelowMs(
+  policy: TimePolicy,
+  overheadMs: number,
+  /** Overridable so `/bench/time` can sweep it — that is the only caller that
+   *  should pass one. `0` means never take over, which is how the bench replays
+   *  the pre-takeover behavior against the current one. */
+  factor: number = TAKEOVER_FACTOR,
+): number {
   const movestogo = policy.mode === "pace" ? policy.movestogo : SUDDEN_DEATH_MOVESTOGO;
-  return overheadMs * (2 + movestogo) * TAKEOVER_FACTOR;
+  return overheadMs * (2 + movestogo) * factor;
 }
 
 export type GoPlan = {
@@ -230,6 +237,9 @@ export function goCommand(
      *  not optional: the takeover point is derived from it, and a caller that
      *  forgot to pass it would silently get the old collapse back. */
     overheadMs: number;
+    /** `/bench/time` only — see `takeoverBelowMs`. Left alone in the seat, so
+     *  a game always uses the shipped factor. */
+    takeoverFactor?: number;
   },
 ): GoPlan {
   const { clock, budgetMs: budget, remainingMs, overheadMs } = ctx;
@@ -245,7 +255,7 @@ export function goCommand(
   // REPLACEMENT — a `movetime` alongside `wtime` is only ever a ceiling, so
   // appending one here would still leave a 2ms search (verified in
   // `pnpm test:time`).
-  if (remainingMs <= takeoverBelowMs(policy, overheadMs)) {
+  if (remainingMs <= takeoverBelowMs(policy, overheadMs, ctx.takeoverFactor)) {
     return { cmd: `go movetime ${budget}` };
   }
 
