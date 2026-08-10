@@ -324,6 +324,20 @@ wallet.
   On the native side the takeover is **opt-in** (`--min-move-ms`, off by
   default, set by `house-bot.sh`): a connected engine's time manager belongs to
   its author, and the threshold assumes Stockfish-style allocation.
+- **The server clock is SIGNED, and the lag allowance is a total overdraft.**
+  `white_ms`/`black_ms` are `i64` so an overrun is carried as debt. They used to
+  be `u64` charged with `saturating_sub`, which floored the balance at zero while
+  `flag_if_expired` compares against `remaining + LAG_ALLOWANCE_MS` — so the
+  150ms grace was handed back on **every move**, and a side sitting at 0ms never
+  flagged as long as each move landed inside it. Measured before the fix: a 500ms
+  clock, moves of 120ms, and after 2400ms both clocks read 0 with the game still
+  running. That is a bot on a fast link deciding never to lose on time, for real
+  money, and the per-250ms `on_tick` sweep did not catch it either (its `elapsed`
+  is measured from the turn start, so it was under the allowance too). Keep the
+  arithmetic exact: a `.max(0)` anywhere in the CHARGE re-opens it, and
+  `an_empty_clock_cannot_be_played_through` is what fails. Clamping is for the
+  WIRE only (`to_wire`) — `protocol::Clock` is unsigned and nobody should watch a
+  negative clock.
 - **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is
   `has_insufficient_material(flagged.opposite())` — not `is_insufficient_material()`,
   which shakmaty defines as *neither* side being able to mate. Asking the latter

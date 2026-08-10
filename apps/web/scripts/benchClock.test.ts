@@ -61,27 +61,39 @@ function check(name: string, got: unknown, want: unknown) {
   check("search fits but the trip does not", late.flagged, true);
 }
 
-// --- a quirk this MIRRORS rather than fixes ---------------------------------
-// The balance floors at zero (the server's `saturating_sub`) while the flag test
-// compares against `remaining + LAG_ALLOWANCE_MS`, so a side at 0ms survives
-// every move under the allowance — the grace is renewable per move rather than
-// once. Reproduced against `crates/game-engine`: a 500ms clock, moves of 120ms,
-// and after 2400ms both clocks read 0 with the game still running.
-//
-// Pinned here so the disagreement is visible if the server is fixed and this is
-// not: a harness that is kinder than the referee measures a game nobody plays.
+// --- an empty clock cannot be played through --------------------------------
+// The harness mirrors the referee, and the referee used to floor the balance at
+// zero while the flag test compared against `remaining + LAG_ALLOWANCE_MS` —
+// handing the grace back every move, so a side at 0ms never flagged as long as
+// each move landed inside it. Both are exact now. This is the property that
+// broke, so it is the property that gets pinned; if the harness ever goes back
+// to clamping, it becomes kinder than the game and measures a game nobody plays.
 {
   let c = newClock(500, 0);
+  let flaggedAt: number | null = null;
   for (let i = 0; i < 20; i++) {
     const r = charge(c, i % 2 === 0 ? "white" : "black", 120, 0);
-    if (r.flagged) break;
+    if (r.flagged) {
+      flaggedAt = i;
+      break;
+    }
     c = r.clock;
   }
-  check("an empty clock survives sub-allowance moves, as on the server", [c.whiteMs, c.blackMs], [0, 0]);
-  check("and still does not flag", charge(c, "white", 120, 0).flagged, false);
-  // One move past the allowance does end it, which is why realistic time
-  // controls still flag normally: budgets there are far above 150ms.
-  check("a move past the allowance still flags", charge(c, "white", 151, 0).flagged, true);
+  check("somebody flags on a 500ms clock at 120ms a move", flaggedAt !== null, true);
+  // The overdraft is carried, not forgiven per move: one 100ms overrun on a
+  // 1000ms clock is absorbed, a second one is not.
+  const once = charge(newClock(1_000, 0), "white", 1_100, 0);
+  check("a single late arrival is still absorbed", once.flagged, false);
+  check("and the debt is carried, not floored", once.clock.whiteMs, -100);
+  check("so the next overrun ends it", charge(once.clock, "white", 60, 0).flagged, true);
+}
+
+// --- but the SEAT never sees the debt ---------------------------------------
+// `remainingFor` is the wire clock, clamped like `to_wire` in the referee: the
+// policy under test must be fed what a real seat is told, not our bookkeeping.
+{
+  const inDebt = charge(newClock(1_000, 0), "white", 1_100, 0).clock;
+  check("the seat reads zero, not a negative clock", remainingFor(inDebt, "white"), 0);
 }
 
 process.exit(failed === 0 ? 0 : 1);

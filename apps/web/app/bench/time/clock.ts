@@ -16,8 +16,11 @@ export function newClock(initialMs: number, incMs: number): BenchClock {
   return { whiteMs: initialMs, blackMs: initialMs, incMs };
 }
 
+/** What the SEAT sees: the wire clock, clamped at zero like `to_wire` in
+ *  `crates/game-engine`. A seat never learns it is in debt, so the policy under
+ *  test must not either. */
 export function remainingFor(clock: BenchClock, side: Side): number {
-  return side === "white" ? clock.whiteMs : clock.blackMs;
+  return Math.max(0, side === "white" ? clock.whiteMs : clock.blackMs);
 }
 
 /** Charge one move to the mover.
@@ -34,7 +37,11 @@ export function charge(
   rttMs: number,
 ): { clock: BenchClock; flagged: boolean } {
   const spent = elapsedMs + rttMs;
-  const remaining = remainingFor(clock, side);
+  // The SIGNED balance, not the clamped one: an overrun is carried as debt, so
+  // the next flag test starts from it. Mirrors `crates/game-engine`, where
+  // flooring this at zero handed the allowance back every move and a side at
+  // 0ms could play on forever.
+  const remaining = side === "white" ? clock.whiteMs : clock.blackMs;
   if (spent > remaining + LAG_ALLOWANCE_MS) {
     const flat = side === "white" ? { ...clock, whiteMs: 0 } : { ...clock, blackMs: 0 };
     return { clock: flat, flagged: true };
@@ -42,14 +49,11 @@ export function charge(
   // Increment lands only on a move that actually arrived in time, same as the
   // server: it is added after the deduction, not before.
   //
-  // The `Math.max(0, …)` mirrors the server's `saturating_sub`, and it carries a
-  // real quirk with it: because the balance floors at zero while the flag test
-  // above compares against `remaining + LAG_ALLOWANCE_MS`, a side sitting at 0ms
-  // survives every move that takes under the allowance. The allowance is meant
-  // to absorb jitter once and is in practice renewable per move. Do NOT "fix"
-  // that here — a harness that disagrees with the referee measures a game
-  // nobody plays. Fix it in `crates/game-engine` and then follow it here.
-  const left = Math.max(0, remaining - spent) + clock.incMs;
+  // Exact — no `Math.max(0, …)`. That clamp is what made the allowance
+  // renewable, and it is now absent from the referee too; putting it back here
+  // would make the harness kinder than the game, which measures a game nobody
+  // plays. Clamping belongs in `remainingFor`, which is what the seat sees.
+  const left = remaining - spent + clock.incMs;
   return {
     clock: side === "white" ? { ...clock, whiteMs: left } : { ...clock, blackMs: left },
     flagged: false,

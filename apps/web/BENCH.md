@@ -184,12 +184,13 @@ and full delegation to the engine's own manager. So an arm's Elo reads as
 - **The clock is pinned by a test** (`pnpm test:benchclock`). A harness clock
   that is subtly wrong does not fail; it produces plausible Elo numbers that
   decide what ships.
-- **The clock mirrors a server quirk on purpose.** The balance floors at zero
-  (`saturating_sub`) while the flag test compares against
-  `remaining + LAG_ALLOWANCE_MS`, so a side sitting at 0ms survives every move
-  that takes under the allowance — the grace is effectively renewable per move
-  rather than granted once. Reproduced directly against `crates/game-engine`: a
-  500ms clock, moves of 120ms, and after 2400ms both clocks read 0 with the game
-  still running. It barely shows at real time controls, where budgets are well
-  above 150ms. Do not "fix" it in the harness alone — a harness kinder than the
-  referee measures a game nobody plays.
+- **The clock mirrors the referee exactly, including the sign.** Balances go
+  negative; an overrun is carried as debt and `remainingFor` clamps only what
+  the *seat* is shown, matching `to_wire` in `crates/game-engine`. Do not add a
+  `Math.max(0, …)` back into the charge. That clamp is precisely the bug this
+  harness found: with it, the 150ms lag allowance was handed back on every move
+  and a side sitting at 0ms never flagged. The 2-second smoke run that surfaced
+  it played 129 plies with neither side flagging — arithmetically impossible,
+  and the only reason it was visible at all is that a tiny clock makes the
+  budgets smaller than the allowance. A harness kinder than the referee measures
+  a game nobody plays; so does a harsher one.
