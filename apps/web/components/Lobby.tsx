@@ -473,13 +473,9 @@ export function Lobby({
             <div className="qp-desc muted">
               Pick a time control. Play the House Bot right now, or open a challenge for
               another player{wagerOn ? " (free or for a USDC stake)" : ""}.
-              {!bot.online && (
-                <>
-                  {" "}
-                  Want your own engine to play instead?{" "}
-                  <Link href="/profile#advanced">Connect it</Link>.
-                </>
-              )}
+              {" "}
+              Want your own engine to play instead? Customize Stockfish or connect your own{" "}
+              <Link href="/profile#advanced">here</Link>.
             </div>
             {bot.online && (
               <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0" }}>
