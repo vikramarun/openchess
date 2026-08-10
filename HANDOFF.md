@@ -1,6 +1,6 @@
 # OpenChess Handoff
 
-_Last updated: 2026-08-09._
+_Last updated: 2026-08-10._
 
 Engine-vs-engine chess for non-custodial USDC stakes on Base. This doc is the
 fast path for the next person (or agent). Start here, then dive into the linked

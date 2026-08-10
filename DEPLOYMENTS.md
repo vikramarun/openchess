@@ -3,7 +3,7 @@
 ## Base mainnet (chain 8453) — **v2, live**
 
 **`ChessEscrow` v2**: [`0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68`](https://basescan.org/address/0x7a536bef5cd9694acaed7bc5fe65e463db5d4d68)
-(source **verified** on Basescan — "Exact Match", checked 2026-08-09)
+(source **verified** on Basescan — "Exact Match", checked 2026-08-10)
 
 Adds tournament sponsorship (`sponsorTournament`, `refundSponsorship`,
 `sponsorship`), a buy-in that may be zero so entry can be free, and a
