@@ -47,6 +47,17 @@ fn redact(text: &str) -> String {
     out
 }
 
+/// The JSON body an alert is sent as, with the message scrubbed.
+///
+/// Split out from `fire` so the SCRUBBING IS WIRED IN can be tested, not just
+/// the scrubber. `redact` had its own tests while nothing checked that `fire`
+/// called it — deleting the call left every test green, and the property that
+/// matters is that a keyed RPC URL never leaves the process.
+fn payload(text: &str) -> serde_json::Value {
+    let text = redact(text);
+    serde_json::json!({ "text": text, "content": text })
+}
+
 /// Send an alert if a webhook is configured. Safe to call from any async
 /// context on the tokio runtime; returns immediately.
 pub fn fire(text: impl Into<String>) {
@@ -56,9 +67,8 @@ pub fn fire(text: impl Into<String>) {
     if url.trim().is_empty() {
         return;
     }
-    let text = redact(&text.into());
+    let body = payload(&text.into());
     tokio::spawn(async move {
-        let body = serde_json::json!({ "text": text, "content": text });
         let res = reqwest::Client::new()
             .post(&url)
             .timeout(std::time::Duration::from_secs(5))
@@ -101,6 +111,34 @@ mod tests {
             "text after the url was dropped: {out}"
         );
         assert!(out.contains("[redacted-url]"));
+    }
+
+    /// The wiring, not just the scrubber: an alert BODY carries no URL.
+    ///
+    /// `redact`'s own tests pass with the call removed from the send path, which
+    /// leaves the property that actually matters — nothing keyed leaves the
+    /// process — unpinned.
+    #[test]
+    fn the_sent_body_is_redacted_not_just_the_helper() {
+        let body = super::payload(
+            "settle failed: error sending request for url \
+             (https://base-mainnet.g.alchemy.com/v2/SECRETKEY123): timeout",
+        );
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("SECRETKEY123"),
+            "key in body: {rendered}"
+        );
+        assert!(
+            !rendered.contains("alchemy.com"),
+            "host in body: {rendered}"
+        );
+        // Both keys webhooks read must carry the scrubbed text, not just one.
+        for k in ["text", "content"] {
+            let v = body.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+            assert!(v.contains("settle failed"), "{k} lost the message");
+            assert!(v.contains("[redacted-url]"), "{k} not redacted");
+        }
     }
 
     #[test]
