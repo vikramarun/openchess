@@ -171,9 +171,14 @@ export function ConnectEngine() {
                     </label>
                   ))}
               </div>
+              {/* "Skill Level" used to be one of the examples here. It is your
+                  binary and we cannot stop you, but suggesting a strength
+                  limiter in our own UI is a different thing from permitting
+                  one — and Skill Level in particular does not play weaker
+                  chess, it plays deliberately worse moves. */}
               <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
                 Blank = engine default. Saved in this browser and sent with each game (e.g.
-                Threads, Hash, Skill Level).
+                Threads, Hash).
               </p>
             </details>
           )}

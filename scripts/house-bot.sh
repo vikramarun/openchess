@@ -24,12 +24,7 @@
 #   SERVER                default https://openchess.fly.dev
 #   ENGINE                default stockfish (must be on PATH or a path)
 #   NAME                  default "House Bot"
-#   SKILL                 default 20: Stockfish "Skill Level" 0..20. 20 is
-#                         full strength (and Stockfish's own default). Below 20
-#                         the engine picks a deliberately worse move from the
-#                         top few, which reads as random blunders rather than
-#                         weaker play; if you ever want a beatable house bot
-#                         again, UCI_LimitStrength + UCI_Elo is the honest knob.
+#   (no strength knob, on purpose — see the note above the invocation)
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
 #   SEATS                 default 2: concurrent house games per time control.
@@ -62,7 +57,6 @@ set -euo pipefail
 SERVER="${SERVER:-https://openchess.fly.dev}"
 ENGINE="${ENGINE:-stockfish}"
 NAME="${NAME:-House Bot}"
-SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
 SEATS="${SEATS:-2}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
@@ -148,7 +142,7 @@ if [[ -n "${BOOK:-}" && ! -f "$BOOK" ]]; then
   exit 1
 fi
 
-echo "house bot: $NAME (skill $SKILL) on $SERVER; time controls: $TCS (${SEATS} seat(s) each)"
+echo "house bot: $NAME (full strength) on $SERVER; time controls: $TCS (${SEATS} seat(s) each)"
 echo "book: ${BOOK:-none (every opening move is a full search)}"
 
 # SEATS autopilots per time control. Same wallet across instances is fine — and
@@ -186,11 +180,18 @@ run_tc() {
   while true; do
     # The client's own output already names the game/opponent; the autopilot
     # retries transient errors internally, so an exit here is unusual.
+    #
+    # There is deliberately NO strength option here. This used to pass
+    # `--uci-option "Skill Level=$SKILL"`, defaulting to 20 (full) but inviting
+    # a weaker house bot — and "Skill Level" below 20 does not play weaker
+    # chess, it picks a deliberately worse move from the top few, which reads as
+    # random blunders. The product promise is full-strength Stockfish, this is
+    # the opponent most players actually face, and it settles real money. Don't
+    # add one back: not Skill Level, not UCI_LimitStrength/UCI_Elo.
     "$CLIENT" connect --auto \
       --server "$SERVER" \
       --engine "$ENGINE" \
       --name "$NAME" \
-      --uci-option "Skill Level=$SKILL" \
       --max-move-ms "$max_move_ms" \
       --min-move-ms "$MIN_MOVE_MS" \
       ${overhead_args[@]+"${overhead_args[@]}"} \

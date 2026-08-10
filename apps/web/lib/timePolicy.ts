@@ -21,16 +21,23 @@ export const OVERHEAD_MS = 100;
 export const MAX_CLOCK_FRACTION = 0.25;
 /** Below this much clock, spend a tenth of it per move and nothing more. */
 export const PANIC_MS = 5000;
+/** What `engine` mode spends once it has taken over from the engine's own
+ *  manager. Constants rather than the `tempo` fields on purpose — see the
+ *  `default` branch of `budgetMs`. These are the numbers the takeover shipped
+ *  with and the bench has yet to tune, so they move only with a measurement. */
+export const ENGINE_TAKEOVER_DIVISOR = 30;
+export const ENGINE_TAKEOVER_INC_FACTOR = 0.8;
 
 export type TimeMode =
-  /** Stockfish allocates from the real clock (today's behavior). */
+  /** Stockfish allocates from the real clock, with the seat taking over below
+   *  the point its manager gives up (`takeoverBelowMs`). The default, and the
+   *  only honest choice for an engine that isn't ours. */
   | "engine"
-  /** Same, but with a constant `movestogo` — lower thinks longer per move. */
-  | "pace"
+  /** A share of the remaining clock: remaining / divisor + increment × factor.
+   *  The one taste axis, exposed as named presets (`TEMPO_PRESETS`). */
+  | "tempo"
   /** A flat think time per move. */
   | "fixed"
-  /** remaining / divisor + increment * incFactor. */
-  | "fraction"
   /** A fixed node count: identical strength on a phone and a desktop. */
   | "nodes";
 
@@ -40,38 +47,56 @@ export type TimeMode =
  *  modes never loses the settings of the mode you switched away from. */
 export type TimePolicy = {
   mode: TimeMode;
-  /** `pace`: constant movestogo. Fixed, never counting down — as movestogo
-   *  approaches 1 Stockfish assumes a new time control is coming and burns
-   *  nearly everything it has left. */
-  movestogo: number;
   /** `fixed`: ms per move. */
   fixedMs: number;
-  /** `fraction`: divide the remaining clock by this. */
+  /** `tempo`: divide the remaining clock by this. Lower thinks longer. */
   divisor: number;
-  /** `fraction`: how much of the increment to spend on top. */
+  /** `tempo`: how much of the increment to spend on top. */
   incFactor: number;
   /** `nodes`: nodes per move. */
   nodes: number;
 };
 
+/** The tempo presets, as divisors. Named rather than numbered because this is
+ *  the panel's only taste axis and nobody choosing a bot's character wants to
+ *  reason about `incFactor`; the raw number stays reachable under Advanced.
+ *
+ *  `remaining / divisor` is geometric — it decays and never reaches zero — which
+ *  is what keeps even the slowest preset from flagging on its own. What it can't
+ *  do is know how many moves are left, so a low divisor front-loads. That is why
+ *  the panel previews the actual first-move cost at every lobby time control
+ *  instead of describing it. */
+export const TEMPO_PRESETS = { blitzer: 90, steady: 45, deliberate: 22 } as const;
+export type TempoName = keyof typeof TEMPO_PRESETS;
+
 export const DEFAULT_TIME_POLICY: TimePolicy = {
   mode: "engine",
-  movestogo: 30,
   fixedMs: 500,
-  divisor: 30,
+  divisor: TEMPO_PRESETS.steady,
   incFactor: 0.8,
   nodes: 200_000,
 };
 
 const RANGES = {
-  movestogo: [2, 200],
   fixedMs: [50, 30_000],
   divisor: [5, 200],
   incFactor: [0, 1],
   nodes: [1_000, 20_000_000],
 } as const;
 
-const MODES: TimeMode[] = ["engine", "pace", "fixed", "fraction", "nodes"];
+const MODES: TimeMode[] = ["engine", "tempo", "fixed", "nodes"];
+
+/** Modes that no longer exist, and what they become.
+ *
+ *  `pace` is gone because it was never a taste setting: its `movestogo` fed
+ *  straight into `takeoverBelowMs`, so picking a "thoughtful" bot moved the
+ *  low-clock cliff EARLIER (at the shipped reserve, from 26s to 8s at
+ *  movestogo 30, and to 4.2s at 15). A knob labelled as character that edits a
+ *  safety property is the coupling this whole change exists to remove, so it
+ *  folds back into plain delegation rather than being relabelled.
+ *
+ *  `fraction` is the same arithmetic as `tempo` and simply keeps its divisor. */
+const RETIRED_MODES: Record<string, TimeMode> = { pace: "engine", fraction: "tempo" };
 
 function clampNum(v: unknown, lo: number, hi: number, dflt: number): number {
   const n = Number(v);
@@ -113,10 +138,13 @@ export function moveOverheadMs(initialMs: number): number {
  *  a `go movetime NaN` that the engine simply never answers. */
 export function normalizeTimePolicy(raw: unknown): TimePolicy {
   const r = (raw ?? {}) as Record<string, unknown>;
-  const mode = MODES.includes(r.mode as TimeMode) ? (r.mode as TimeMode) : DEFAULT_TIME_POLICY.mode;
+  // A stored blob outlives the modes it was written with, so a retired one is
+  // migrated rather than silently reset — a bot that quietly became something
+  // else is worse than one that kept its settings.
+  const stored = typeof r.mode === "string" ? (RETIRED_MODES[r.mode] ?? r.mode) : r.mode;
+  const mode = MODES.includes(stored as TimeMode) ? (stored as TimeMode) : DEFAULT_TIME_POLICY.mode;
   return {
     mode,
-    movestogo: Math.round(clampNum(r.movestogo, ...RANGES.movestogo, DEFAULT_TIME_POLICY.movestogo)),
     fixedMs: Math.round(clampNum(r.fixedMs, ...RANGES.fixedMs, DEFAULT_TIME_POLICY.fixedMs)),
     divisor: Math.round(clampNum(r.divisor, ...RANGES.divisor, DEFAULT_TIME_POLICY.divisor)),
     incFactor: clampNum(r.incFactor, ...RANGES.incFactor, DEFAULT_TIME_POLICY.incFactor),
@@ -147,7 +175,7 @@ export function budgetMs(policy: TimePolicy, ctx: ClockCtx): number {
     case "fixed":
       want = policy.fixedMs;
       break;
-    case "fraction":
+    case "tempo":
       want = remainingMs / policy.divisor + incrementMs * policy.incFactor;
       break;
     case "nodes":
@@ -157,9 +185,18 @@ export function budgetMs(policy: TimePolicy, ctx: ClockCtx): number {
       want = Math.min(remainingMs * 0.2, 4000);
       break;
     default:
-      // engine / pace let Stockfish allocate; the value is only used when the
-      // server sent no clock at all.
-      want = Math.min(remainingMs / policy.divisor + incrementMs * policy.incFactor, 4000);
+      // `engine` lets Stockfish allocate while it can. This value is what the
+      // seat spends once it has TAKEN OVER (and when the server sent no clock
+      // at all), so it is deliberately independent of `policy.divisor`:
+      // that field belongs to `tempo`, and wiring the two together would mean
+      // changing a tempo preset silently retuned the low-clock behavior of a
+      // mode the user isn't even in. It nearly did — `divisor`'s default moved
+      // from 30 to 45 when the presets landed, which would have cut every
+      // takeover budget by a third with nothing to show for it.
+      want = Math.min(
+        remainingMs / ENGINE_TAKEOVER_DIVISOR + incrementMs * ENGINE_TAKEOVER_INC_FACTOR,
+        4000,
+      );
   }
 
   if (!Number.isFinite(want)) want = MIN_BUDGET_MS;
@@ -207,8 +244,9 @@ export function takeoverBelowMs(
    *  the pre-takeover behavior against the current one. */
   factor: number = TAKEOVER_FACTOR,
 ): number {
-  const movestogo = policy.mode === "pace" ? policy.movestogo : SUDDEN_DEATH_MOVESTOGO;
-  return overheadMs * (2 + movestogo) * factor;
+  // No mode states its own `movestogo` any more, which is the point: the
+  // threshold is a property of the engine, not of anything the user picked.
+  return overheadMs * (2 + SUDDEN_DEATH_MOVESTOGO) * factor;
 }
 
 export type GoPlan = {
@@ -245,7 +283,7 @@ export function goCommand(
   const { clock, budgetMs: budget, remainingMs, overheadMs } = ctx;
 
   if (policy.mode === "nodes") return { cmd: `go nodes ${policy.nodes}`, hardStopMs: budget };
-  if (policy.mode === "fixed" || policy.mode === "fraction") return { cmd: `go movetime ${budget}` };
+  if (policy.mode === "fixed" || policy.mode === "tempo") return { cmd: `go movetime ${budget}` };
 
   // engine / pace need a real clock; without one they degrade to a budget.
   if (!clock) return { cmd: `go movetime ${budget}` };
@@ -263,21 +301,85 @@ export function goCommand(
   const b = Math.max(50, Math.floor(clock.blackMs));
   const inc = Math.max(0, Math.floor(clock.incMs));
   const base = `go wtime ${w} btime ${b} winc ${inc} binc ${inc}`;
-  return policy.mode === "pace" ? { cmd: `${base} movestogo ${policy.movestogo}` } : { cmd: base };
+  return { cmd: base };
 }
+
+/** The preset a divisor corresponds to, or null for a hand-set one. */
+export function tempoName(divisor: number): TempoName | null {
+  const hit = (Object.keys(TEMPO_PRESETS) as TempoName[]).find(
+    (k) => TEMPO_PRESETS[k] === divisor,
+  );
+  return hit ?? null;
+}
+
+const TEMPO_LABEL: Record<TempoName, string> = {
+  blitzer: "Blitzer",
+  steady: "Steady",
+  deliberate: "Deliberate",
+};
 
 /** One-line description for the UI and for the engine label. */
 export function timePolicyLabel(p: TimePolicy): string {
   switch (p.mode) {
-    case "pace":
-      return p.movestogo <= 20 ? "Deep thinker" : "Brisk";
+    case "tempo": {
+      const name = tempoName(p.divisor);
+      return name ? TEMPO_LABEL[name] : `1/${p.divisor} clock`;
+    }
     case "fixed":
       return p.fixedMs <= 300 ? "Blitzer" : `${(p.fixedMs / 1000).toFixed(1)}s/move`;
-    case "fraction":
-      return `1/${p.divisor} clock`;
     case "nodes":
       return `${Math.round(p.nodes / 1000)}k nodes`;
     default:
       return "";
   }
+}
+
+/** What this policy will actually do at a given time control, for the panel.
+ *
+ *  Pure, and the honesty mechanism for the whole settings page: every previous
+ *  version of this UI described `engine` mode in prose ("nothing to tune, and
+ *  nothing to lose") precisely because it was the one mode whose behavior we
+ *  could not compute — and that was the mode that collapsed to 2ms searches. Now
+ *  that the handover point is derived, every mode has numbers, so every mode
+ *  shows them.
+ *
+ *  `atFullClock` is the first move of the game; `atLowClock` is the case that
+ *  was silently broken. `delegatesAtLowClock` says which of the two engines is
+ *  choosing at that point, because "Stockfish decides" and "the seat decides"
+ *  are genuinely different answers and the user is entitled to see which. */
+export type TimePreview = {
+  initialMs: number;
+  overheadMs: number;
+  /** Clock below which this seat stops delegating (0 when it never delegates). */
+  handoverMs: number;
+  atFullClockMs: number;
+  atLowClockMs: number;
+  lowClockMs: number;
+  delegatesAtFullClock: boolean;
+  delegatesAtLowClock: boolean;
+};
+
+export function previewAt(
+  policy: TimePolicy,
+  tc: { initialSecs: number; incSecs: number },
+  /** The clock to describe the low-time case at. 15s is not arbitrary: it is
+   *  where the reported blundering started. */
+  lowClockMs = 15_000,
+): TimePreview {
+  const initialMs = tc.initialSecs * 1000;
+  const incrementMs = tc.incSecs * 1000;
+  const overheadMs = moveOverheadMs(initialMs);
+  const delegated = policy.mode === "engine";
+  const handoverMs = delegated ? takeoverBelowMs(policy, overheadMs) : 0;
+  const at = (remainingMs: number) => budgetMs(policy, { remainingMs, incrementMs });
+  return {
+    initialMs,
+    overheadMs,
+    handoverMs,
+    atFullClockMs: at(initialMs),
+    atLowClockMs: at(Math.min(lowClockMs, initialMs)),
+    lowClockMs: Math.min(lowClockMs, initialMs),
+    delegatesAtFullClock: delegated && initialMs > handoverMs,
+    delegatesAtLowClock: delegated && Math.min(lowClockMs, initialMs) > handoverMs,
+  };
 }
