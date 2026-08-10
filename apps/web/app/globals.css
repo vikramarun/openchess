@@ -765,15 +765,6 @@ a:hover {
   }
 }
 
-/* All that survives the engine banner, which used to sit in the hero and is now
-   a sentence in the how-it-works footnote: the mark on "running in your browser
-   for free", which is the part of it worth keeping. Green, not gold — the engine
-   being free is not a money figure. */
-.free {
-  color: var(--accent);
-  font-weight: 600;
-}
-
 /* ---------- mode grid (lichess quick-pairing style) ---------- */
 .mode-grid {
   display: grid;
@@ -2319,14 +2310,6 @@ table.standings tr.me td {
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   padding: 16px;
-}
-/* The footnotes the hero used to carry: what the demo board is, and what the
-   in-browser engine costs. Both are true and both need saying — they just
-   aren't the pitch. */
-.how-note {
-  margin: var(--s-4) 0 0;
-  font-size: var(--t-sm);
-  max-width: 70ch;
 }
 .how-num {
   width: 26px;

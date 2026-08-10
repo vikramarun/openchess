@@ -1,6 +1,6 @@
 # OpenChess Handoff
 
-_Last updated: 2026-08-08._
+_Last updated: 2026-08-10._
 
 Engine-vs-engine chess for non-custodial USDC stakes on Base. This doc is the
 fast path for the next person (or agent). Start here, then dive into the linked
@@ -16,10 +16,12 @@ docs.
 
 ## Current state (what's live)
 
-- **Contract is LIVE on Base mainnet.** `ChessEscrow` deployed + Basescan-verified
-  at `0x7Cc1dD4F12BBfb40fCA6eC2334a27c646FCf923D` (chain 8453), owned by a
+- **Contract is LIVE on Base mainnet.** `ChessEscrow` **v2** (tournament
+  sponsorship + free entry) is deployed at
+  `0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68` (chain 8453), owned by a
   hardware wallet (`0x4392…DF6A`, Ownable2Step accepted), oracle `0xE41A…7B53`
-  (funded). See [DEPLOYMENTS.md](DEPLOYMENTS.md).
+  (funded). The v1 at `0x7Cc1…923D` is superseded (held 0 USDC at cutover).
+  See [DEPLOYMENTS.md](DEPLOYMENTS.md).
 - **Server** (`chess-server`) runs on Fly at `openchess.fly.dev`; **web** on
   Vercel at `openchess.ai`. `GET /config` → `wager_enabled:true`.
 - **Working end-to-end:** the casual lobby (create/join/watch, in-browser
@@ -57,10 +59,10 @@ docs.
   (`Agents::bind_game`/`game_ended` off `cleanup_task`; client Status frames
   can only mark busy, never idle; `set_busy` is conn-id-guarded); the ws layer
   disconnects players/spectators when a room dies so clients never hang on a
-  never-started game. Bot seats are wired to the park lobby only so far;
-  gauntlet/tournament web pages still drive the browser engine, but the
-  `SeatDelivery` plumbing means adding them is a per-endpoint claim, not a
-  re-implementation.
+  never-started game. Bot seats now work in **all three modes** (park, gauntlet,
+  tournament — PR #11): `queue_join` and the tournament dispatch claim the agent
+  per game via `SeatDelivery::Agent`, exactly the per-endpoint claim the
+  plumbing was built for.
 - **Personalizable browser bot (no download):** the in-browser engine is now
   **Stockfish 18** (NNUE, `apps/web/public/engines/sf18-lite-single-*/`, single-
   threaded 7 MB, so no COOP/COEP headers are needed; see `public/ENGINE.md`). The
@@ -97,7 +99,7 @@ docs.
   if it was contested, with both sides making ≥1 move** (`ply >= 2`); a no-show, or an
   engine that connects then hangs and flags without moving, loses the game/stake
   but its **Elo is untouched**. Single guard in `room.rs finish()`.
-- **Tests:** 126 Rust + 25 Foundry (incl. a 128k-call solvency invariant) + 20
+- **Tests:** ~200 Rust + 34 Foundry (incl. a 128k-call solvency invariant) + 29
   web suites (the full `pnpm test:*` list lives in `apps/web/package.json`; the
   build/test reference in CLAUDE.md names each one). CI in
   `.github/workflows/ci.yml` runs all of them; releases in `release.yml`.
@@ -260,6 +262,10 @@ already bumped, so `git tag v0.1.1 && git push origin v0.1.1` is the whole job).
   the same move. The browser engine got the `Move Overhead` half of the same fix
   (`apps/web/lib/engine.ts`); it is **not** capped, so a browser seat playing
   for money still searches at full strength.
+  _Since superseded:_ the `SKILL` env var was **removed outright** (nothing may
+  offer to weaken the engine), the ceiling is derived as `initial/MOVE_BUDGET`,
+  and the flat 250ms overhead became per-game scaling that `house-bot.sh` must
+  **not** override (`MOVE_OVERHEAD_MS` only pins it deliberately). See CLAUDE.md.
 - **The house bot has an opening book** *(same house-bot deploy)*. The cap above
   bounds the symptom; the book removes it. Measured against the real server, a
   booked seat spent **0.0s** on its first five moves while an unbooked seat with
@@ -318,7 +324,9 @@ because nothing *enforced* them. Read this before the next deploy.
    nothing watched it. `/ready` now fails when money is live without a DB, and
    `REQUIRE_ONCHAIN=1` refuses the boot outright.
 
-2. **Rate limiting / abuse guardrails: DONE** (`crates/server/src/ratelimit.rs`).
+## Hardening notes (shipped)
+
+- **Rate limiting / abuse guardrails: DONE** (`crates/server/src/ratelimit.rs`).
    In-process, single-node (moves behind Redis with the rest of the state when
    multi-node lands). Per-IP token-bucket throttles on `/auth/*` (middleware),
    park offer create/accept, and both WS upgrades; a per-owner (wallet, else IP)
@@ -349,7 +357,7 @@ because nothing *enforced* them. Read this before the next deploy.
    wallet columns); it is now a single `GROUP BY` join over a `UNION ALL` of the
    white/black seats, with the wallet columns indexed (migration
    `0007_wallet_lower_indexes`).
-3. **Deploy survivability: maintenance/drain mode DONE (PR #8); full
+- **Deploy survivability: maintenance/drain mode DONE (PR #8); full
    rehydration descoped.** Every `deploy-server.sh` kills live in-memory games,
    so the mitigation is the owner-triggered **maintenance/drain mode**: the
    escrow owner flips it from the web app (a global banner + toggle rendered
@@ -427,20 +435,22 @@ all in `crates/server` + a Redis dependency.
 ## Other known gaps (money-side, external gates)
 
 - **Independent contract audit.** The real gate before raising `MAX_STAKE`.
-  Two internal reviews + 25 tests are done; a third-party audit is not.
+  Two internal reviews + 34 Foundry tests are done; a third-party audit is not.
 - **Oracle key hardening.** Currently a hot key in a Fly secret. Move to
   KMS/HSM + a multisig/threshold oracle (ERC-1271 in the contract) before
   raising `MAX_STAKE`. See [AUDIT.md](AUDIT.md) round-4 notes + PRODUCTION.md.
 - **Tournament UI gaps.** Swiss/knockout pairing is advertised but only
-  round-robin is implemented; Merkle-claim + `claimRefund` have no browser UI
-  (funds are recoverable onchain, just not in-app for large/abandoned fields).
-  Standings, pairings and round auto-entry are done.
+  round-robin is implemented. (The Merkle-claim and refund browser UIs have
+  since shipped: `apps/web/components/TournamentClaim.tsx` calls both
+  `claimTournament` and `claimRefund`, surfaced by `ClaimWinnings.tsx`; per-game
+  `claimTimeout` lives in `GameRefund.tsx`.) Standings, pairings and round
+  auto-entry are done.
 
 ## Run / test / deploy (quick)
 
 ```bash
 cargo build && cargo test          # DATABASE_URL set → also runs persistence test
-(cd contracts && forge test)       # 25 Foundry tests
+(cd contracts && forge test)       # 34 Foundry tests
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot spec vectors
 cargo run -p server                # local server on :8080
 (cd apps/web && pnpm dev)          # web on :3000

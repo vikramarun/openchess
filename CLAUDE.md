@@ -12,7 +12,7 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 ## Build / test / run
 ```bash
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
-(cd contracts && forge test)       # Foundry: 25 tests incl. a solvency invariant
+(cd contracts && forge test)       # Foundry: 34 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:books)   # every built-in book walks clean (incl. castling)
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
@@ -205,19 +205,30 @@ wallet.
   must send the bearer unconditionally — `apps/web` routes them all through
   `authedFetch`, and `chess-client gauntlet` now resolves a session up front
   rather than sending one only when staked.
-  **Admission LATCHES.** `RequireSignIn` keeps rendering its children for the
-  life of the mount once it has admitted someone, and that is a correctness
-  requirement, not laziness: `<SeatGame>` renders under it, so a gate that
-  retracted would unmount a LIVE BOARD and close its socket the moment a token
+  **Admission LATCHES while a board is live, and ONLY then.** `RequireSignIn`
+  re-walls a gated page on any auth loss — our sign-out button, Dynamic's
+  profile widget, a wallet disconnect, a 401 dropping the token — EXCEPT while
+  a live board holds it open: `<SeatGame>` declares itself via `useLiveSeatHold`
+  (`lib/liveSeat.ts`), and the gate refuses to unlatch while any hold exists.
+  Both halves are correctness requirements. The hold: a gate that retracted
+  mid-game would unmount a LIVE BOARD and close its socket the moment a token
   went away — `authedFetch` dropping a stale one on a 401, the 24h session TTL
-  lapsing mid-game, a wallet disconnect or account switch firing `clearAuth`.
-  A seat that is *gone* (rather than idle) hands the opponent a forfeit win and
-  the whole stake (`room.rs reap_forfeit_winner`), so an expiring session would
-  confiscate the stake of someone sitting right there playing — the same
-  confiscation the decline path is careful to avoid, by a different route.
-  Nothing is lost: the server re-checks every call and 401s, and a fresh visit
-  remounts. The latch is set DURING RENDER, not in an effect, or the wall
-  flashes over the board for a frame first. `test:gate` pins both halves.
+  lapsing mid-game, a wallet disconnect or account switch firing `clearAuth` —
+  and a seat that is *gone* (rather than idle) hands the opponent a forfeit win
+  and the whole stake (`room.rs reap_forfeit_winner`): an expiring session would
+  confiscate the stake of someone sitting right there playing, the same
+  confiscation the decline path is careful to avoid by a different route. The
+  re-wall: staying "admitted" to /lobby after signing out shipped once, and it
+  cannot be fixed by classifying sign-outs as explicit vs passive — the control
+  users actually reach (Dynamic's widget Log out) is indistinguishable from a
+  wallet-side disconnect at our layer, so the guard keys on the BOARD, not on
+  intent. If a component that owns a live game socket ever renders under the
+  gate without taking the hold, every auth loss unmounts it again — silently.
+  Nothing else is lost: the server re-checks every call and 401s, and a fresh
+  visit remounts. Both the latch and the unlatch are set DURING RENDER, not in
+  an effect, or the wall flashes over the board for a frame first. `test:gate`
+  pins all of it: the latch, the guarded unlatch, the gate's subscription to
+  the hold count, `SeatGame`'s hold, and the once-only release.
   Two traps in the hook. It **must not block on `/config`**:
   `useOnchainConfig` retries a failed fetch forever with backoff, so a version
   that answered "checking" until the config landed turned an unreachable game

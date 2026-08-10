@@ -7,9 +7,11 @@ dissolves, and the server is simply the authority on legality, clock, and
 result. Players bring their own UCI engine, or use the Stockfish that runs in
 the browser. Money settles onchain, in a contract, never a platform wallet.
 
-**Live:** <https://openchess.ai> · **`ChessEscrow` on Base mainnet:**
-[`0x7Cc1…923D`](https://basescan.org/address/0x7cc1dd4f12bbfb40fca6ec2334a27c646fcf923d)
-(verified). New here? Start with **[HANDOFF.md](HANDOFF.md)**.
+**Live:** <https://openchess.ai> · **`ChessEscrow` v2 on Base mainnet:**
+[`0x7a53…4D68`](https://basescan.org/address/0x7a536bef5cd9694acaed7bc5fe65e463db5d4d68)
+(source verified on Basescan; see [DEPLOYMENTS.md](DEPLOYMENTS.md) for parameters
+and the superseded v1).
+New here? Start with **[HANDOFF.md](HANDOFF.md)**.
 
 > **Status:** deployed and running, but **single-node** (one Fly machine) and
 > **not independently audited**, so stakes are capped at 25 USDC. Making it
@@ -22,7 +24,7 @@ the browser. Money settles onchain, in a contract, never a platform wallet.
 - **Casual lobby (free, fully in-browser).** Pick a time control (1+0 / 3+0 /
   5+0 / 10+0) and play the OpenChess bot right away, open a challenge for another
   player's engine, or **watch live games**. Two Stockfish engines compiled to
-  **WASM** play on *your* CPU, with zero download and zero server compute. A curated
+  **WASM** play on *your* CPU, with nothing to install and zero server compute. A curated
   opening book (from [official-stockfish/books](https://github.com/official-stockfish/books))
   makes openings instant and varied.
 - **Staked modes (USDC on Base, non-custodial).**
@@ -60,34 +62,38 @@ system / flow / data diagrams.
 ```
 crates/protocol      shared serde wire types (server + client)
 crates/game-engine   authoritative board, clock, result (shakmaty)
-crates/byo-client    chess-client: UCI driver, selfplay + networked play, Polyglot book
+crates/byo-client    chess-client: UCI driver, selfplay/play/gauntlet, `connect` bot agent,
+                     Polyglot book, SIWE/link-code auth
 crates/server        chess-server: HTTP + WS hub + per-game room actors, 3 modes, SIWE
 crates/ledger        onchain settlement (alloy), EIP-712 results, SIWE recovery
 crates/persistence   Postgres (sqlx) + migrations + settlement outbox
+crates/book-gen      dev tool: builds assets/house-book.bin from a SAN repertoire
 contracts/           ChessEscrow.sol (Foundry): pooled balances + EIP-712 settlement
 apps/web             Next.js UI: lobby, in-browser WASM engine, wallet/SIWE, spectator, profiles
-scripts/             onchain-demo.sh (1v1), tournament-demo.sh + tournament-e2e.py
+scripts/             deploy-server.sh (the ONLY way to deploy the server), house-bot.sh,
+                     onchain-demo.sh (1v1), tournament-demo.sh + tournament-e2e.py
                      (settled + abandoned tournament money-loop, real Postgres)
 Dockerfile, fly.toml server deploy;  .github/workflows/ci.yml  CI
 ```
 
 ## Status
 
-**151 automated tests pass** (126 Rust + 25 Foundry), plus 20 web suites. Four audit rounds
-([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated. CI
-(`.github/workflows/ci.yml`) runs Postgres + `forge test` + `cargo test` + the
-web build on every push.
+CI (`.github/workflows/ci.yml`) runs the full test surface on every push:
+the Rust workspace (`cargo test`, ~200 tests), 34 Foundry tests (including a
+128k-call solvency invariant), all 29 web suites (`pnpm test:*`), clippy/fmt,
+and the web build, against a real Postgres. Four audit rounds
+([AUDIT.md](AUDIT.md)) with the Critical/High findings remediated.
 
 | Component | Dir | Status |
 |---|---|---|
-| Shared wire protocol | `crates/protocol` | ✅ 5 tests |
-| Authoritative game engine (shakmaty) | `crates/game-engine` | ✅ 6 tests |
+| Shared wire protocol | `crates/protocol` | ✅ unit tests |
+| Authoritative game engine (shakmaty) | `crates/game-engine` | ✅ unit tests |
 | BYO engine client (UCI + WS play + Polyglot book) | `crates/byo-client` | ✅ vs Stockfish + book tests |
 | Game server (WS hub + rooms + 3 modes + SIWE + lobby + rate limiting) | `crates/server` | ✅ live + unit tests |
-| Non-custodial escrow + oracle (games + tournament pools) | `contracts/src/ChessEscrow.sol` | ✅ 25 Foundry tests |
+| Non-custodial escrow + oracle (games + tournament pools + sponsorship) | `contracts/src/ChessEscrow.sol` | ✅ 34 Foundry tests |
 | Onchain settlement + SIWE recovery | `crates/ledger` | ✅ Anvil + recovery tests |
 | Persistence (Postgres) + settlement outbox | `crates/persistence` | ✅ round-trip + live |
-| Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser + 20 test suites |
+| Web app (lobby, in-browser WASM engine, spectator, profiles, leaderboard) | `apps/web` | ✅ verified in-browser + 29 test suites |
 
 **This is not a turnkey production deployment.** Several items are ops/legal
 decisions only the operator can make: an **independent contract audit**, the
@@ -150,9 +156,11 @@ cargo run -p byo-client -- play --game <GAME_ID> --token <BLACK_TOKEN>
 # Full onchain money loop (Park/Patzer) on a local Anvil chain
 cargo build && (cd contracts && forge build) && bash scripts/onchain-demo.sh
 
-# Gauntlet: back-to-back games at a tier
+# Gauntlet: back-to-back games at a tier. Needs a signed-in wallet even when
+# free (its games land in your record): set OPENCHESS_WALLET_KEY, or pass
+# --auth-token from `chess-client login`.
 chess-client gauntlet --count 5 --initial-secs 8 --increment-secs 0
-#   staked: add --stake <usdc-base-units> --auth-token <siwe-session>
+#   staked: add --stake <usdc-base-units>
 
 # Connect: put YOUR engine (+ optional Polyglot book) online as a bot bound
 # to your wallet, then drive it from the website: start/join lobby games there
@@ -174,8 +182,9 @@ chess-client connect --server https://openchess.fly.dev \
 bash scripts/tournament-demo.sh   # wraps scripts/tournament-e2e.py
 
 # House bot: keep the park populated so visitors always have an opponent.
-# one casual autopilot per lobby time control under one (UNFUNDED) wallet.
-OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh   # SKILL=8 by default
+# SEATS (default 2) casual autopilots per lobby time control under one
+# (UNFUNDED) wallet, at full strength — there is no skill knob on purpose.
+OPENCHESS_WALLET_KEY=0x... ./scripts/house-bot.sh
 # ...or run it 24/7 as its own Fly app (stockfish + chess-client in one image):
 #   fly apps create openchess-housebot --org personal
 #   fly secrets set --stage -a openchess-housebot OPENCHESS_WALLET_KEY=0x... # UNFUNDED

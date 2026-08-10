@@ -6,6 +6,7 @@ import { useAccount, useAccountEffect } from "wagmi";
 
 import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { authAddress, authToken, clearAuth } from "@/lib/escrow";
+import { markSignInIntent, useSignInIntent } from "@/lib/signInIntent";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { signInWithEthereum } from "@/lib/siwe";
 import { playerLabel } from "@/lib/playerLabel";
@@ -30,10 +31,13 @@ export function AuthButton() {
 
 /** One button for the whole entry flow. Signing in opens Dynamic's modal — email
  *  and Google provision an embedded wallet, external wallets connect as before —
- *  and on a staked server we immediately prompt the SIWE signature. So there's a
- *  single "Sign in", never a separate connect + sign-in step. No chain switch is
- *  involved: SIWE doesn't need one, and the money writes each do their own. The session token is bound to the wallet it
- *  was issued for and cleared on disconnect / account switch. */
+ *  and on a staked server the same click flows on into the Base chain switch and
+ *  the SIWE signature. So there's a single "Sign in", never a separate connect +
+ *  sign-in step. Every wallet prompt in that chain is downstream of the click:
+ *  nothing here may prompt on page load (see lib/signInIntent.ts — a silently
+ *  restored connection with no session shows "Finish sign-in" and waits). The
+ *  session token is bound to the wallet it was issued for and cleared on
+ *  disconnect / account switch. */
 function AuthButtonInner() {
   // `useAccount().chainId` is the connector's REAL chain; `useChainId()` is
   // pinned to the configured list (prod: `[base]` only) and so can never report
@@ -66,8 +70,13 @@ function AuthButtonInner() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Only auto-sign once per address, so a rejected prompt doesn't loop. Reset
-  // when the connected account changes.
+  // How many times a Sign in control has been clicked this page-load (0 =
+  // never). The auto-complete effect below is armed by this and by nothing
+  // else — it is what keeps every wallet prompt behind a user gesture.
+  const signInIntent = useSignInIntent();
+  // Only auto-sign once per (gesture, address), so a rejected prompt doesn't
+  // loop but clicking Sign in again is a real retry. Reset when the connected
+  // account changes.
   const signTried = useRef<string | null>(null);
   // Latest connected address, readable from inside async callbacks.
   const addressRef = useRef(address);
@@ -96,18 +105,25 @@ function AuthButtonInner() {
     setError(null);
     setBusy(true);
     try {
-      // Deliberately NO `ensureChain` here. SIWE is a `personal_sign` over a
-      // text message; the `Chain ID` line carries the SERVER's expected chain
-      // (`config.chainId`), which is also what the server validates against, so
-      // the wallet's own network is irrelevant to whether the signature
-      // verifies. This effect auto-runs on page load, so switching here would
-      // fire an unsolicited network prompt at a user who only opened the site —
-      // and, since a rejected switch throws, would leave someone who declines
-      // unable to sign in at all (no casual attribution, no tournament join)
-      // over a chain they didn't need to be on. It was harmless only while
-      // `useEnsureChain` read the pinned `useChainId()` and could never fire.
-      // The switch belongs on the money writes, where it is user-initiated and
-      // genuinely required — and each of those calls it itself.
+      // Bring the wallet to Base as part of sign-in. This is safe to do here
+      // ONLY because runSignIn is now strictly downstream of a user gesture
+      // (the intent gate on the auto-complete effect below, or a direct button
+      // click) — the old version of this function auto-ran on page load, which
+      // is why the switch used to be banned from it.
+      //
+      // Best-effort, not a precondition: SIWE is a `personal_sign` whose
+      // `Chain ID` line carries the SERVER's expected chain, so the signature
+      // verifies whatever network the wallet is on. A declined switch must not
+      // cost the sign-in itself (no casual attribution, no tournament join,
+      // over a chain a free player never needed) — the "Wrong network" nag
+      // stays available, and every money write re-runs `ensureChain` itself
+      // before it sends.
+      //
+      // Ordering matters: switch FIRST, then sign. `signMessageAsync` is
+      // useDynamicSigner (built from primaryWallet.getWalletClient(), account
+      // passed explicitly) precisely because wagmi's signer can throw
+      // "Connector not connected" when asked to sign right after a switch.
+      await ensureChain(expected).catch(() => {});
       await signInWithEthereum(address, expected, signMessageAsync);
       // The account may have switched while the signature was pending — never
       // keep a session for a wallet the token wasn't issued to. On success,
@@ -127,21 +143,29 @@ function AuthButtonInner() {
     } finally {
       setBusy(false);
     }
-  }, [address, expected, signMessageAsync]);
+  }, [address, expected, ensureChain, signMessageAsync]);
 
   const ready = isConnected && !!address && expected != null;
 
-  // Auto-complete sign-in once connected on a staked server. `runSignIn`
-  // prompts the SIWE signature and nothing else — it deliberately does NOT
-  // switch chains (see the note inside it), because this effect runs on page
-  // load and a switch there is an unsolicited wallet prompt.
+  // Complete sign-in once connected on a staked server — but ONLY downstream
+  // of a Sign in click (`signInIntent`, lib/signInIntent.ts). This effect used
+  // to run unconditionally, and that was the popup-on-load bug: Dynamic
+  // restores an external wallet's connection silently, our SIWE session dies
+  // daily (24h TTL, voided by every server redeploy, dropped by authedFetch on
+  // a 401), so "connected, no token" is the normal returning-visitor state —
+  // and this effect answered it by firing a `personal_sign` prompt out of the
+  // wallet extension on every page load, before any click. Now that state just
+  // renders the "Finish sign-in" button. The intent gate is also what makes
+  // the chain switch inside `runSignIn` acceptable: everything this effect
+  // triggers is part of a flow the user started.
   useEffect(() => {
+    if (!signInIntent) return; // no gesture this page-load → never prompt
     if (!ready || !wagerOn || signedIn || busy) return;
-    const key = address!.toLowerCase();
+    const key = `${signInIntent}:${address!.toLowerCase()}`;
     if (signTried.current === key) return;
     signTried.current = key;
     runSignIn();
-  }, [ready, wagerOn, signedIn, busy, address, runSignIn]);
+  }, [signInIntent, ready, wagerOn, signedIn, busy, address, runSignIn]);
 
   // Dynamic says we're logged in but the session never became usable. This is
   // checked before `sdkHasLoaded` because it covers BOTH stuck states the hook
@@ -165,7 +189,16 @@ function AuthButtonInner() {
   function control() {
     if (!isConnected || !address) {
       return (
-        <button className="primary" onClick={() => setShowAuthFlow(true)}>
+        <button
+          className="primary"
+          onClick={() => {
+            // The gesture that authorizes wallet prompts for the rest of this
+            // page-load: connect (Dynamic's modal) → chain switch → SIWE all
+            // flow from this one click, with no further clicks required.
+            markSignInIntent();
+            setShowAuthFlow(true);
+          }}
+        >
           Sign in
         </button>
       );
@@ -186,7 +219,21 @@ function AuthButtonInner() {
       return (
         <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
           {error && <span className="auth-err">{error}</span>}
-          <button className="primary" disabled={busy || expected == null} onClick={runSignIn}>
+          <button
+            className="primary"
+            disabled={busy || expected == null}
+            onClick={() => {
+              // A direct click IS the gesture — mark it so an account switch
+              // later in this flow can auto-complete like the modal path does.
+              // This handler starts the sign-in itself, so it must also CLAIM
+              // the gesture's attempt key: the auto-complete effect skips while
+              // `busy`, and an unclaimed key after a rejected signature would
+              // make that effect fire a second prompt the user just declined.
+              const gesture = markSignInIntent();
+              signTried.current = `${gesture}:${address!.toLowerCase()}`;
+              runSignIn();
+            }}
+          >
             {busy ? "Signing…" : expected == null ? "Connecting…" : "Finish sign-in"}
           </button>
         </span>
@@ -235,8 +282,14 @@ function AuthButtonInner() {
     <>
       {control()}
       {/* Must be in the tree for setShowDynamicUserProfile to have anything to
-          open; it renders nothing until then. Also where logging out lives, and
-          a Dynamic logout disconnects wagmi, which fires clearAuth above. */}
+          open; it renders nothing until then. Also where logging out lives: a
+          Dynamic logout disconnects wagmi, which fires clearAuth above — and
+          that alone is what signs the visitor out of gated pages, because
+          RequireSignIn re-walls on any auth loss once no live board holds it
+          open (lib/liveSeat.ts). No explicit-vs-passive classification exists
+          here on purpose: this widget's logout is indistinguishable from a
+          wallet-side disconnect at our layer, and the board's own hold is what
+          keeps a mid-game disconnect from forfeiting a stake. */}
       <DynamicUserProfile />
     </>
   );

@@ -73,6 +73,10 @@ export function useStaleAuthRecovery() {
     window.location.reload();
   }, []);
 
+  // Logging out here (button click or the 30s timer) ends in `clearAuth`,
+  // which is all the sign-in gate needs: RequireSignIn re-walls on any auth
+  // loss unless a live board holds it open (lib/liveSeat.ts), so no
+  // explicit-vs-automatic distinction is made — or needed — at this layer.
   const manualLogout = useCallback(async () => {
     clearTimers();
     try {

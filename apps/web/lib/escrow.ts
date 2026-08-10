@@ -113,7 +113,16 @@ export function setAuth(token: string, address: string) {
   notifyAuthChanged();
 }
 
-/** Drop the stored SIWE session (on disconnect or account switch). */
+/** Drop the stored SIWE session (on disconnect, account switch, a 401, the
+ *  stale-session auto-logout — every way a session ends, chosen or not).
+ *
+ *  Deliberately ONE function for all of them. The sign-in gate does not care
+ *  which path cleared the session: it re-walls gated pages whenever the visitor
+ *  is signed out, and what protects a live game from that is the board's own
+ *  hold (lib/liveSeat.ts), not a guess about whether the user "meant" the
+ *  sign-out. Classifying callers here shipped nothing but a gap — the sign-out
+ *  users actually reach for (Dynamic's profile widget) is indistinguishable
+ *  from a wallet-side disconnect at this layer. */
 export function clearAuth() {
   if (typeof window === "undefined") return;
   clearKey("token");

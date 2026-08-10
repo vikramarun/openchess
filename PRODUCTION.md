@@ -16,8 +16,9 @@ honest checklist.
 
 ## What's already done for you (hardening)
 
-- **Contract** (`ChessEscrow.sol`, 25 Foundry tests): non-custodial balances +
-  per-game escrow + tournament pool (direct + Merkle-claim), `Ownable2Step`,
+- **Contract** (`ChessEscrow.sol`, 34 Foundry tests): non-custodial balances +
+  per-game escrow + tournament pool (direct + Merkle-claim + sponsorship /
+  free entry, since v2), `Ownable2Step`,
   `Pausable`, EIP-712 results with `deadline` + fork-safe domain separator,
   SafeERC20-lite + deposit-by-delta, fee snapshot at open, replay guards,
   conservation-tested, timeout/refund safety nets, indexer events, a deploy
@@ -34,7 +35,8 @@ honest checklist.
   chessground CSS (no CDN origin in `style-src` at all — supersedes the old
   SRI-on-CDN approach), client-only wagmi config.
 - **CI** (`.github/workflows/ci.yml`): Postgres + `forge test` + `cargo test` +
-  all 20 web suites (`pnpm test:*`, enumerated in CLAUDE.md) + web build.
+  clippy/fmt + all 29 web suites (`pnpm test:*`, enumerated in CLAUDE.md) +
+  web build.
 
 ## Action items only you can do (before mainnet)
 
@@ -86,14 +88,14 @@ honest checklist.
   than during a debugging session. Always deploy through the wrapper.
 
 ### 4. Observability
-- [ ] Put `/ready` in the load-balancer health check; keep `/health` for
-  liveness. **Caveat: `/ready` cannot detect a *missing* database.** It pings
-  the DB only `if let Some(db)` (`main.rs` `ready()`), so a server booted with
-  no `DATABASE_URL` reports `200 ready` while running with no persistence and
-  **no settlement outbox worker** (started only when a DB exists). Set
-  `REQUIRE_ONCHAIN=1`, which is the check that actually fails closed on an
-  unset `DATABASE_URL`, and treat a `503` from `/leaderboard` as the real
-  signal that the DB is absent.
+- [x] Put `/ready` in the load-balancer health check; keep `/health` for
+  liveness. `/ready` pings the DB when one is configured, and — since the
+  incident where a production node ran wagering with no Postgres — also
+  **503s when onchain settlement is live but `DATABASE_URL` is unset**
+  (`main.rs` `ready()`, pinned by
+  `ready_fails_when_wagering_is_live_but_there_is_no_db`). A DB-less node is
+  still fine for casual-only deploys. Belt-and-braces: `REQUIRE_ONCHAIN=1`
+  refuses the boot outright instead of serving unready.
 - [~] **Alert on settlement failures and outbox depth/age.** `ALERT_WEBHOOK_URL`
   (unset ⇒ no-op) now fires a best-effort webhook on the two money-critical
   give-ups (escrow-refund-after-abort, settlement-outbox exhausted). Still add
@@ -186,8 +188,10 @@ fly postgres attach openchess-db                               # sets the DATABA
 # Onchain stakes (omit for a casual-only server):
 fly secrets set RPC_URL="https://..." ESCROW_ADDR="0x..." ORACLE_KEY="0x..."
 # Edit SIWE_DOMAIN + WEB_ORIGIN in fly.toml to your Vercel domain, then:
-fly deploy
-fly scale count 1                                              # exactly ONE instance (single-node)
+./scripts/deploy-server.sh    # NEVER a bare `fly deploy`: it re-adds Fly's HA
+                              # machine, which silently breaks this single-node
+                              # app. The wrapper deploys --ha=false, pins the
+                              # count to 1, and asserts it.
 ```
 
 Then point the Vercel app's `NEXT_PUBLIC_SERVER_HTTP` / `NEXT_PUBLIC_SERVER_WS`
@@ -273,7 +277,7 @@ fly secrets set \
   ESCROW_ADDR="0x<deployed-escrow>" \
   ORACLE_KEY="0x<oracle-private-key>"   # the key from step 1
 # in fly.toml [env]: SIWE_CHAIN_ID = "84532", REQUIRE_ONCHAIN = "1"
-fly deploy
+./scripts/deploy-server.sh    # never a bare `fly deploy` (re-adds the HA machine)
 ```
 
 **5. No frontend change.** `GET /config` now reports `wager_enabled` + the escrow

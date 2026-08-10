@@ -6,6 +6,8 @@ import { useState } from "react";
 import { useAccount } from "wagmi";
 
 import { dynamicConfigured } from "@/lib/dynamicEnv";
+import { useLiveSeats } from "@/lib/liveSeat";
+import { markSignInIntent } from "@/lib/signInIntent";
 import { useAuthToken } from "@/lib/useAuthToken";
 import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -74,7 +76,19 @@ export function SignInGate({
       <div className="gate-title display d3">{title}</div>
       <p className="gate-lede muted">{children}</p>
       {dynamicConfigured ? (
-        <button className="primary gate-cta" onClick={() => setShowAuthFlow(true)}>
+        <button
+          className="primary gate-cta"
+          onClick={() => {
+            // The gesture that authorizes wallet prompts for the rest of this
+            // page-load (lib/signInIntent.ts). It also covers the visitor whose
+            // wallet is ALREADY silently reconnected: for them the Dynamic modal
+            // may have nothing to show, and it is the header's auto-complete
+            // effect — armed by this mark — that carries them into the SIWE
+            // signature.
+            markSignInIntent();
+            setShowAuthFlow(true);
+          }}
+        >
           Sign in
         </button>
       ) : (
@@ -99,24 +113,34 @@ export function SignInGate({
  *  `checking` renders a placeholder of roughly the gate's height rather than
  *  nothing, so the page doesn't jump when the answer lands.
  *
- *  **A DOOR, NOT A FENCE.** Once this has admitted someone it keeps rendering
- *  its children for the life of the mount, even if the session then goes away.
- *  Retracting is not a stricter version of the same idea — it is a different and
- *  much worse thing, because these children own LIVE GAMES. `<SeatGame>` lives
- *  under here, so any of the ordinary ways a token disappears mid-game —
- *  `authedFetch` dropping a stale one on a 401, the 24h session TTL lapsing, a
- *  wallet disconnect or account switch in the header firing `clearAuth` — would
- *  unmount the board and close its socket. A seat that is GONE (rather than
- *  merely idle) hands the opponent a forfeit win and the whole stake
- *  (`room.rs reap_forfeit_winner`), so a session quietly expiring would
+ *  **THE LATCH GUARDS BOARDS, NOT SESSIONS.** Once this has admitted someone it
+ *  keeps rendering its children for as long as a LIVE BOARD is mounted under it,
+ *  even if the session goes away — and re-walls the page the moment the visitor
+ *  is signed out with no board open. The two halves matter equally.
+ *
+ *  Why the hold exists: these children own live games. `<SeatGame>` lives under
+ *  here, so any of the ordinary ways a token disappears mid-game — `authedFetch`
+ *  dropping a stale one on a 401, the 24h session TTL lapsing, a wallet
+ *  disconnect or account switch in the header firing `clearAuth` — would
+ *  otherwise unmount the board and close its socket. A seat that is GONE
+ *  (rather than merely idle) hands the opponent a forfeit win and the whole
+ *  stake (`room.rs reap_forfeit_winner`), so a session quietly expiring would
  *  confiscate the stake of someone who was sitting right there playing. That is
  *  the same failure the decline path is careful to avoid, arriving by a
- *  different route.
+ *  different route. `SeatGame` declares itself via `useLiveSeatHold`
+ *  (lib/liveSeat.ts), and while any hold is open this gate will not retract.
  *
- *  Nothing is lost by latching: this gate is product UX, and the server is the
+ *  Why the re-wall exists: with no board open, "admitted" is just a stale
+ *  answer. Signing out of the lobby and still seeing the lobby shipped once —
+ *  and the sign-out that matters most arrives through Dynamic's profile widget,
+ *  which at our layer is indistinguishable from a wallet-side disconnect, so
+ *  there is no reliable "the user chose this" signal to key on. Keying on the
+ *  BOARD instead makes every sign-out path honest at once, and what it protects
+ *  is exactly the thing the latch was ever for.
+ *
+ *  Nothing else is lost: this gate is product UX, and the server is the
  *  authority — every route these pages call re-checks the session itself and
- *  401s, which `authedFetch` surfaces as "your sign-in expired". A fresh visit
- *  remounts and re-checks. */
+ *  401s, which `authedFetch` surfaces as "your sign-in expired". */
 export function RequireSignIn({
   title,
   lede,
@@ -127,12 +151,22 @@ export function RequireSignIn({
   children: React.ReactNode;
 }) {
   const state = useAuthState();
+  // How many live boards are mounted right now. Subscribed, not just read: a
+  // signed-out player finishing a game must see the wall come back when the
+  // board unmounts, and that release is what re-renders this component.
+  const liveSeats = useLiveSeats();
   // Adjusted during render rather than in an effect: an effect runs after paint,
   // so a retracting session would flash the wall over a live board for a frame
   // before this put it back. React re-renders immediately on a set during
   // render, without painting the discarded result.
   const [admitted, setAdmitted] = useState(false);
   if (state === "in" && !admitted) setAdmitted(true);
+  // The un-latch, same discipline. Signed out AND no live board → the wall is
+  // the truth again, whichever way the session ended (our sign-out button,
+  // Dynamic's widget, a wallet disconnect, a 401 dropping the token). While a
+  // board is open the latch holds and the game is untouchable — see the
+  // component comment and lib/liveSeat.ts.
+  if (state === "out" && admitted && liveSeats === 0) setAdmitted(false);
 
   if (state === "in" || admitted) return <>{children}</>;
   if (state === "checking") return <div className="gate gate-skeleton" aria-hidden="true" />;

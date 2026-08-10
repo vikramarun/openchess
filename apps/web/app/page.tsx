@@ -125,13 +125,6 @@ export default function Home() {
               </div>
             </div>
           </div>
-          {/* What the engine-status banner in the hero used to say, reduced to
-              the part that is a selling point rather than a status readout. */}
-          <p className="how-note muted">
-            The engine is Stockfish,{" "}
-            <span className="free">running in your browser for free</span>, entirely
-            customizable to you.
-          </p>
         </div>
       )}
     </div>

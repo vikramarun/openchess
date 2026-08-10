@@ -12,6 +12,7 @@ import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
 import { acquirePlayerEngine, fallbackEngine, releasePlayerEngine } from "@/lib/playerEngine";
+import { useLiveSeatHold } from "@/lib/liveSeat";
 import { playSeat } from "@/lib/play";
 import { connectSpectator } from "@/lib/spectatorSocket";
 import { contractUrl, fmtUsdc, profitForStake } from "@/lib/escrow";
@@ -60,6 +61,10 @@ export function SeatGame({
   initialSecs?: number | null;
   incrementSecs?: number | null;
 }) {
+  // Declare this board to the sign-in gate for the life of the mount: the gate
+  // re-walls a page when the session goes away, and the hold is what stops that
+  // from unmounting a live game and forfeiting its stake (lib/liveSeat.ts).
+  useLiveSeatHold();
   const { fen, moves, frames, clock, result, verified, applyFrame } = useSpectatorBoard();
   // Your own game is navigable while you play it, exactly as it is when you
   // spectate one: stepping back doesn't pause the stream or your engine (it only
