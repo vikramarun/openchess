@@ -195,11 +195,14 @@ function Preview({ time }: { time: TimePolicy }) {
   // Flag a first move that eats a big share of the clock. `remaining/divisor`
   // decays and so never flags on its own, but it does front-load, and a preset
   // that looks thoughtful at 1+0 can be extravagant at 10+0.
-  // Only where the SEAT is choosing: in a delegated cell the number is our
-  // hypothetical, and warning about a move Stockfish is making is noise.
-  const greedy = rows.filter(
-    (r) => !r.p.delegatesAtFullClock && r.p.atFullClockMs > r.p.initialMs * 0.1,
-  );
+  // How many moves this pace plans for. `remaining/divisor` means the first
+  // move takes exactly 1/divisor of the clock at EVERY time control — the ratio
+  // is the divisor, not a property of the game — so a "spends over a tenth of
+  // the clock" warning would fire for all four rows or none, and never for any
+  // preset. The move count is the same fact stated usefully: a player can judge
+  // "paces for 45 moves" against a real game instantly, where 2.2% means
+  // nothing.
+  const pacesFor = time.mode === "tempo" ? time.divisor : null;
 
   return (
     <div className="muted" style={{ fontSize: 12 }}>
@@ -250,9 +253,11 @@ function Preview({ time }: { time: TimePolicy }) {
           .
         </div>
       )}
-      {greedy.length > 0 && (
+      {pacesFor !== null && (
         <div style={{ marginTop: 4 }}>
-          Spends over a tenth of the clock on move one at {greedy.map((r) => r.tc.label).join(", ")}.
+          Paces for about <b style={{ color: "var(--text-strong)" }}>{pacesFor}</b> more moves at
+          any point, so it never runs the clock out — but a game longer than that gets faster as
+          it goes.
         </div>
       )}
     </div>
