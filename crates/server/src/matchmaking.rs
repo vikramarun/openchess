@@ -3600,8 +3600,20 @@ fn tournament_ladder(buy_in: Option<&str>) -> Ladder {
 /// it is sponsor-funded). Unparseable is treated as zero: the value has already
 /// been validated at create, and this is read on paths where refusing to answer
 /// would be worse than treating an impossible row as free.
+///
+/// **Parsed as `U256` — the same way the money paths parse it — and only then
+/// narrowed.** A plain `u128::from_str` disagrees with `U256::from_str` on
+/// strings like `"0x1E8480"`, which the charging path (`tourney_join_inner`)
+/// reads as 2 USDC while this read 0. That divergence is not cosmetic now that
+/// this function decides two things it didn't used to: which ladder the pairings
+/// count for, and whether the event may be `Open`. Agreeing with whoever takes
+/// the money is the invariant. A value too large for `u128` still reads as 0,
+/// which fails CLOSED on both (casual ladder, gated admission).
 fn entry_fee(buy_in: Option<&str>) -> u128 {
-    buy_in.and_then(|b| b.parse::<u128>().ok()).unwrap_or(0)
+    buy_in
+        .and_then(|b| b.parse::<U256>().ok())
+        .and_then(|u| u128::try_from(u).ok())
+        .unwrap_or(0)
 }
 
 /// Does this tournament have an onchain prize pool at all?
@@ -5865,6 +5877,25 @@ mod tests {
         assert_eq!(entry_fee(None), 0);
         assert_eq!(entry_fee(Some("0")), 0);
         assert_eq!(entry_fee(Some("1000000")), 1_000_000);
+        // Must agree with the path that actually CHARGES the entrant, which
+        // parses as U256 (`tourney_join_inner`). A plain u128 parse reads this
+        // hex string as 0 while the join charges 2 USDC — so the event would be
+        // charged as paid, then filed on the casual ladder and, before the
+        // MIN_OPEN_ENTRY_FEE gate, waved through as "free". Same value, two
+        // readers, one of them holding the money.
+        assert_eq!(
+            entry_fee(Some("0x1E8480")),
+            2_000_000,
+            "entry_fee must parse what the charging path parses"
+        );
+        assert_eq!(tournament_ladder(Some("0x1E8480")), Ladder::Ranked);
+        // Beyond u128 still reads as 0, which fails CLOSED (casual + gated).
+        let huge = U256::MAX.to_string();
+        assert_eq!(entry_fee(Some(&huge)), 0);
+        assert_eq!(
+            rehydrated_admission(Admission::Open, Some(&huge)),
+            Admission::Approval
+        );
 
         assert_eq!(tournament_ladder(None), Ladder::Casual);
         assert_eq!(tournament_ladder(Some("1000000")), Ladder::Ranked);
