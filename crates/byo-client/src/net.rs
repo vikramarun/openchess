@@ -34,12 +34,19 @@ pub struct PlayOpts {
 /// moment the move lands, so an engine that budgets purely from `wtime` is
 /// spending time it doesn't have — every round trip and every scheduler hiccup
 /// comes out of its clock unmodelled.
-#[derive(Clone, Copy, Debug)]
+/// Both fields default to `None`, which reads as "decide this per game" rather
+/// than "off": the reserve is scaled to the time control and the ceiling is
+/// left to the engine.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct TimePolicy {
     /// Reserved per move for the round trip to the server. Stockfish's own
     /// default (`Move Overhead` = 10ms) assumes a local opponent; over a real
     /// network that shortfall accumulates into a flag.
-    pub move_overhead_ms: u64,
+    ///
+    /// `None` — the default — scales it to the game's time control once
+    /// `GameStart` reveals the clock (see `move_overhead_for`). `Some` pins it,
+    /// for an operator who knows their own latency.
+    pub move_overhead_ms: Option<u64>,
     /// Hard ceiling on a single search, or `None` to let the engine decide.
     ///
     /// Worth setting for any long-running bot: Stockfish 17 will spend ~62s on
@@ -49,17 +56,30 @@ pub struct TimePolicy {
     pub max_move_ms: Option<u64>,
 }
 
-impl Default for TimePolicy {
-    fn default() -> Self {
-        TimePolicy {
-            move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
-            max_move_ms: None,
-        }
+/// Bounds on the per-move network reserve, in ms.
+pub const MIN_MOVE_OVERHEAD_MS: u64 = 50;
+pub const MAX_MOVE_OVERHEAD_MS: u64 = 250;
+
+/// The reserve to use for a game whose clock starts at `initial_ms`.
+///
+/// A flat reserve is not a flat cost. Stockfish's sudden-death manager takes
+/// `Move Overhead × (2 + movestogo)` off the clock BEFORE allocating anything,
+/// and with no `movestogo` it assumes 50 — so a 250ms reserve holds back 13
+/// SECONDS. That is 2% of a 10+0 clock and 22% of a 1+0 one, which is why a
+/// bullet seat fell off a cliff a rapid seat never reached: under 13s of clock
+/// there was nothing left to allocate and the engine answered in ~2ms. Measured
+/// on the same search at 15s left: 100ms of thinking at a 250ms reserve, 517ms
+/// at 100ms.
+///
+/// Dividing by 1000 pins the total reserve near 5.2% of the starting clock at
+/// any time control. `None` means the clock isn't known yet, which is a reason
+/// to be cautious rather than frugal — it takes the maximum.
+pub fn move_overhead_for(initial_ms: Option<u64>) -> u64 {
+    match initial_ms {
+        Some(ms) if ms > 0 => (ms / 1000).clamp(MIN_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS),
+        _ => MAX_MOVE_OVERHEAD_MS,
     }
 }
-
-/// Default reserve per move for the network round trip, in ms.
-pub const DEFAULT_MOVE_OVERHEAD_MS: u64 = 250;
 
 /// The `movetime` ceiling to attach to a `go`, given the policy and how much
 /// clock this side actually has left. `None` means "no ceiling".
@@ -70,15 +90,24 @@ pub const DEFAULT_MOVE_OVERHEAD_MS: u64 = 250;
 /// flat ceiling and lets the engine's own manager do the rest.
 ///
 /// The cap is also floored so a bot in deep time trouble is never told to
-/// search for ~0ms: the engine's own manager already handles that case, and
-/// forcing a 1ms search would throw the game away rather than lose on time.
-fn move_cap_ms(policy: &TimePolicy, remaining_ms: Option<u64>) -> Option<u64> {
+/// search for ~0ms: forcing a 1ms search would throw the game away rather than
+/// lose on time.
+///
+/// This floor is on the CEILING, so it cannot lift a search the engine has
+/// already decided to cut short — and it does not mean the low-clock case is
+/// handled. It used to say the engine's own manager took care of that; it does
+/// not. Stockfish collapses to ~2ms once the clock falls under
+/// `Move Overhead × 52`, which is what `move_overhead_for` pushes down out of
+/// normal play. Removing that floor entirely is a takeover, not a cap: a
+/// `movetime` alongside `wtime` is only ever a ceiling (verified — `wtime 10000
+/// movetime 1000` still spends 2ms), so the command has to be replaced.
+fn move_cap_ms(policy: &TimePolicy, overhead_ms: u64, remaining_ms: Option<u64>) -> Option<u64> {
     const FLOOR_MS: u64 = 50;
     let max = policy.max_move_ms?;
     let Some(remaining) = remaining_ms else {
         return Some(max);
     };
-    let usable = remaining.saturating_sub(policy.move_overhead_ms);
+    let usable = remaining.saturating_sub(overhead_ms);
     Some(max.min(usable).max(FLOOR_MS))
 }
 
@@ -105,11 +134,18 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
 
     let mut engine = UciEngine::launch(&opts.engine_path, &opts.engine_args).await?;
     engine.set_option("MultiPV", "1").await?;
+    // The reserve in force right now. It starts cautious because the time
+    // control is not known until `GameStart`, and is re-set there unless the
+    // operator pinned one.
+    let mut overhead_ms = opts
+        .time
+        .move_overhead_ms
+        .unwrap_or_else(|| move_overhead_for(None));
     // Before the caller's options, so an explicit `--uci-option "Move
     // Overhead=..."` still wins.
     if engine.supports_option("Move Overhead") {
         engine
-            .set_option("Move Overhead", &opts.time.move_overhead_ms.to_string())
+            .set_option("Move Overhead", &overhead_ms.to_string())
             .await?;
     }
     for (k, v) in &opts.uci_options {
@@ -160,9 +196,20 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
             ServerMessage::GameStart {
                 your_color,
                 opponent,
+                clock,
                 ..
             } => {
                 my_color = Some(your_color);
+                // The clock at game start IS the time control, and it is the
+                // server's own number rather than a flag that could disagree
+                // with the game we were actually seated in. An operator who
+                // pinned a reserve keeps it.
+                if opts.time.move_overhead_ms.is_none() && engine.supports_option("Move Overhead") {
+                    overhead_ms = move_overhead_for(Some(clock.white_ms));
+                    engine
+                        .set_option("Move Overhead", &overhead_ms.to_string())
+                        .await?;
+                }
                 match &opponent {
                     Some(o) => println!(
                         "Game started. I am {your_color:?}, facing {}{}.",
@@ -207,7 +254,7 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                                 clock.black_ms,
                                 inc,
                                 inc,
-                                move_cap_ms(&opts.time, my_clock),
+                                move_cap_ms(&opts.time, overhead_ms, my_clock),
                             )
                             .await?
                     }
@@ -284,31 +331,53 @@ mod tests {
     fn no_cap_unless_one_was_asked_for() {
         // The default must not change how anyone's existing engine plays —
         // only the opt-in ceiling does.
-        assert_eq!(move_cap_ms(&TimePolicy::default(), Some(180_000)), None);
+        assert_eq!(move_cap_ms(&TimePolicy::default(), 250, Some(180_000)), None);
     }
 
     #[test]
     fn caps_the_opening_search() {
         // The case this exists for: Stockfish would otherwise spend ~62s on
         // move 1 of a 10+0 game.
-        assert_eq!(move_cap_ms(&capped(7_500), Some(600_000)), Some(7_500));
+        assert_eq!(move_cap_ms(&capped(7_500), 250, Some(600_000)), Some(7_500));
     }
 
     #[test]
     fn never_budgets_time_the_clock_does_not_have() {
         // 2s left, 250ms of it owed to the network: search at most 1.75s, not
         // the 5s ceiling.
-        assert_eq!(move_cap_ms(&capped(5_000), Some(2_000)), Some(1_750));
+        assert_eq!(move_cap_ms(&capped(5_000), 250, Some(2_000)), Some(1_750));
     }
 
     #[test]
     fn keeps_a_floor_when_the_clock_is_nearly_gone() {
         // Below the overhead the subtraction saturates to zero. Telling the
         // engine to search for ~0ms throws the game away; losing on time was
-        // already the likely outcome, so leave it a usable sliver and let the
-        // engine's own manager decide.
-        assert_eq!(move_cap_ms(&capped(5_000), Some(100)), Some(50));
-        assert_eq!(move_cap_ms(&capped(5_000), Some(0)), Some(50));
+        // already the likely outcome, so leave it a usable sliver. Note this
+        // only stops US from asking for ~0ms — the engine can still choose it.
+        assert_eq!(move_cap_ms(&capped(5_000), 250, Some(100)), Some(50));
+        assert_eq!(move_cap_ms(&capped(5_000), 250, Some(0)), Some(50));
+    }
+
+    #[test]
+    fn the_reserve_scales_to_the_time_control() {
+        // The whole point: a flat 250ms is 22% of a bullet clock once
+        // Stockfish multiplies it by 52, and 2% of a rapid one.
+        assert_eq!(move_overhead_for(Some(60_000)), 60); // 1+0
+        assert_eq!(move_overhead_for(Some(180_000)), 180); // 3+0
+        assert_eq!(move_overhead_for(Some(300_000)), 250); // 5+0, at the cap
+        assert_eq!(move_overhead_for(Some(600_000)), 250); // 10+0, at the cap
+    }
+
+    #[test]
+    fn an_unknown_time_control_reserves_the_most_not_the_least() {
+        // `None` is "GameStart hasn't happened yet", which is a reason to be
+        // careful. Taking the floor here would risk flagging on latency in
+        // exactly the case where we know least about the game.
+        assert_eq!(move_overhead_for(None), MAX_MOVE_OVERHEAD_MS);
+        assert_eq!(move_overhead_for(Some(0)), MAX_MOVE_OVERHEAD_MS);
+        // And a clock so short that the scaled value would round to nothing
+        // still gets a usable reserve.
+        assert_eq!(move_overhead_for(Some(1_000)), MIN_MOVE_OVERHEAD_MS);
     }
 
     #[test]
@@ -317,7 +386,7 @@ mod tests {
         // left" the search would be floored at 50ms and the bot would blunder
         // the game away — a silent failure, since nothing else reads the
         // colour on this path. Fall back to the flat ceiling instead.
-        assert_eq!(move_cap_ms(&capped(5_000), None), Some(5_000));
-        assert_eq!(move_cap_ms(&TimePolicy::default(), None), None);
+        assert_eq!(move_cap_ms(&capped(5_000), 250, None), Some(5_000));
+        assert_eq!(move_cap_ms(&TimePolicy::default(), 250, None), None);
     }
 }

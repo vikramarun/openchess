@@ -46,9 +46,26 @@ function checkThat(name: string, ok: boolean, detail = "") {
 class StubEngine {
   seenHistory: string[][] = [];
   resyncs = 0;
-  constructor(private answers: string[]) {}
+  /** Every reserve the seat has set, in order. */
+  overheads: number[] = [];
+  /** What the seat asked of the engine, in order — the reserve has to be set
+   *  before the first search, and counting the two separately can't tell. */
+  calls: string[] = [];
+  constructor(
+    private answers: string[],
+    /** Ticks to stall inside `setMoveOverhead`, standing in for the real
+     *  engine's `await this.ready`. Without a stall the option lands in the
+     *  first microtask and no ordering bug can be observed. */
+    private setupTicks = 0,
+  ) {}
+  async setMoveOverhead(ms: number) {
+    for (let i = 0; i < this.setupTicks; i++) await new Promise((r) => setTimeout(r, 0));
+    this.overheads.push(ms);
+    this.calls.push("overhead");
+  }
   private next(history: string[]) {
     this.seenHistory.push([...history]);
+    this.calls.push("search");
     return this.answers.length > 1 ? this.answers.shift()! : this.answers[0];
   }
   async bestMoveWithClock(history: string[]) {
@@ -91,6 +108,27 @@ async function oneTurn(answers: string[], history = HISTORY_KTR) {
     clock: { white_ms: 60_000, black_ms: 60_000, increment_ms: 0 },
   });
   return { ws, engine };
+}
+
+/** Play a game at a given time control, through `game_start`, and report what
+ *  network reserve the engine was given. */
+async function reserveFor(initialMs: number) {
+  const engine = new StubEngine(["f8c5"]);
+  playSeat("game-1", "tok", engine as never, 400);
+  const ws = FakeSocket.last!;
+  ws.onopen?.();
+  await ws.deliver({ type: "welcome" });
+  await ws.deliver({
+    type: "game_start",
+    clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
+  });
+  await ws.deliver({
+    type: "your_turn",
+    ply: HISTORY_KTR.length,
+    moves_uci: HISTORY_KTR,
+    clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
+  });
+  return engine;
 }
 
 const movesSent = (ws: FakeSocket) =>
@@ -165,6 +203,41 @@ async function main() {
   {
     const pos = Chess.default();
     checkThat("the fallback finds a move in the start position", isLegal(pos, anyLegalUci(pos)));
+  }
+
+  // --- the network reserve reaches the engine, scaled to the game --------------
+  // Stockfish withholds ~52x this number before allocating anything, so a value
+  // left at the rapid default is a fifth of a bullet clock: the seat answered in
+  // ~2ms below 13 seconds and threw away won games. The seat has to re-set it
+  // per game, because the engine is prewarmed before the time control is known.
+  {
+    check("a 1+0 seat reserves 60ms", (await reserveFor(60_000)).overheads, [60]);
+    check("a 10+0 seat keeps the cap", (await reserveFor(600_000)).overheads, [250]);
+  }
+  {
+    // And it must land BEFORE the first search, not after it. Both handlers are
+    // async and the socket invokes them concurrently, so this is a real race:
+    // losing it would budget move one at the old reserve.
+    // A real socket does NOT wait for one handler before invoking the next, and
+    // `setMoveOverhead` waits on the engine's handshake — so deliver both frames
+    // without awaiting in between, which is the shape the barrier exists for.
+    const engine = new StubEngine(["f8c5"], 2);
+    playSeat("game-1", "tok", engine as never, 400);
+    const ws = FakeSocket.last!;
+    ws.onopen?.();
+    await ws.deliver({ type: "welcome" });
+    const clock = { white_ms: 60_000, black_ms: 60_000, increment_ms: 0 };
+    const started = ws.onmessage!({ data: JSON.stringify({ type: "game_start", clock }) });
+    const turned = ws.onmessage!({
+      data: JSON.stringify({
+        type: "your_turn",
+        ply: HISTORY_KTR.length,
+        moves_uci: HISTORY_KTR,
+        clock,
+      }),
+    });
+    await Promise.all([started, turned]);
+    check("the reserve is set before the first search", engine.calls, ["overhead", "search"]);
   }
 
   console.log(failed === 0 ? "\nall checks passed" : `\n${failed} check(s) failed`);

@@ -12,6 +12,9 @@
 
 /** Never hand the engine less than this; below it a search returns nothing useful. */
 export const MIN_BUDGET_MS = 50;
+/** Bounds on the per-move network reserve (see `moveOverheadMs`). */
+export const MIN_MOVE_OVERHEAD_MS = 50;
+export const MAX_MOVE_OVERHEAD_MS = 250;
 /** Slack for postMessage + the move's trip back to the server. */
 export const OVERHEAD_MS = 100;
 /** No single move may spend more than this share of the remaining clock. */
@@ -73,6 +76,36 @@ const MODES: TimeMode[] = ["engine", "pace", "fixed", "fraction", "nodes"];
 function clampNum(v: unknown, lo: number, hi: number, dflt: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+}
+
+/** Clock reserved per move for the round trip to the server, scaled to the time
+ *  control. NOT a user setting — see below.
+ *
+ *  A flat reserve is not a flat cost. Stockfish's sudden-death manager takes
+ *  `Move Overhead × (2 + movestogo)` off the clock BEFORE it allocates
+ *  anything, and with no `movestogo` it assumes 50 — so a 250ms reserve holds
+ *  back 13 SECONDS. That is 2% of a 10+0 clock and 22% of a 1+0 one, which is
+ *  why a bullet seat fell off a cliff that a rapid seat never reached: below
+ *  13s of clock there was nothing left to allocate and it answered in ~2ms.
+ *  Measured on the shipped search, at 15s left: 100ms of thinking at a 250ms
+ *  reserve, 517ms at 100ms. Same engine, same position.
+ *
+ *  Dividing by 1000 pins the total reserve at ~5.2% of the starting clock
+ *  whatever the time control, which pushes the collapse down into the range
+ *  where instant moves are the right answer anyway.
+ *
+ *  It stays out of the settings panel deliberately: it is a property of the
+ *  network between us and the referee, not a matter of taste, and setting it
+ *  too low doesn't feel like a preference — the seat flags and the player just
+ *  sees a loss. `MIN_MOVE_OVERHEAD_MS` is the real risk knob here; the server
+ *  forgives `LAG_ALLOWANCE_MS` (150ms) on top of whatever we reserve. */
+export function moveOverheadMs(initialMs: number): number {
+  // A missing or nonsensical clock is "we don't know yet", not "reserve
+  // nothing": fall back to the most cautious value rather than the smallest.
+  if (!Number.isFinite(initialMs) || initialMs <= 0) return MAX_MOVE_OVERHEAD_MS;
+  return Math.round(
+    clampNum(initialMs / 1000, MIN_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS),
+  );
 }
 
 /** Validate a policy read from localStorage. Every field is clamped: this blob

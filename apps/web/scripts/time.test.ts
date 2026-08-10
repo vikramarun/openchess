@@ -8,7 +8,10 @@ import {
   timePolicyLabel,
   DEFAULT_TIME_POLICY,
   MAX_CLOCK_FRACTION,
+  MAX_MOVE_OVERHEAD_MS,
   MIN_BUDGET_MS,
+  MIN_MOVE_OVERHEAD_MS,
+  moveOverheadMs,
   OVERHEAD_MS,
   PANIC_MS,
   type TimePolicy,
@@ -185,6 +188,33 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
   check("a high fixed time shows seconds", timePolicyLabel(P({ mode: "fixed", fixedMs: 2500 })), "2.5s/move");
   check("a low movestogo reads as a deep thinker", timePolicyLabel(P({ mode: "pace", movestogo: 15 })), "Deep thinker");
   check("nodes reads in thousands", timePolicyLabel(P({ mode: "nodes", nodes: 250_000 })), "250k nodes");
+}
+
+// --- the network reserve ---------------------------------------------------
+// Not a preference: Stockfish holds back ~52x this number before it allocates
+// anything, so a flat value is a flat fraction of a rapid clock and a fifth of
+// a bullet one. Measured at 15s left on the shipped search: 100ms of thinking
+// at a 250ms reserve, 517ms at 100ms.
+{
+  check("1+0 scales down hard", moveOverheadMs(60_000), 60);
+  check("3+0 scales", moveOverheadMs(180_000), 180);
+  check("5+0 reaches the cap", moveOverheadMs(300_000), MAX_MOVE_OVERHEAD_MS);
+  check("10+0 stays at the cap", moveOverheadMs(600_000), MAX_MOVE_OVERHEAD_MS);
+
+  // The reserve Stockfish actually withholds is `overhead × (2 + 50)`. Pinning
+  // it as a SHARE of the clock is the property that matters — it is what keeps
+  // the collapse inside the range where instant moves are right anyway.
+  for (const initial of [60_000, 180_000]) {
+    const share = (moveOverheadMs(initial) * 52) / initial;
+    check(`${initial / 1000}s reserves about a twentieth of the clock`, share < 0.06, true);
+  }
+
+  // An absent clock means "not known yet", which calls for the most cautious
+  // value, not the smallest. Taking the floor here would risk flagging on
+  // latency in exactly the case where we know least.
+  check("an unknown clock takes the cap", moveOverheadMs(NaN), MAX_MOVE_OVERHEAD_MS);
+  check("a zero clock takes the cap", moveOverheadMs(0), MAX_MOVE_OVERHEAD_MS);
+  check("a tiny clock still reserves something", moveOverheadMs(1_000), MIN_MOVE_OVERHEAD_MS);
 }
 
 process.exit(failed === 0 ? 0 : 1);

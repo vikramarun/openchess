@@ -37,8 +37,14 @@
 #                         the server's RL_MAX_OPEN_OFFERS (default 16).
 #   MOVE_BUDGET           default 80: plan each game as this many moves; the
 #                         per-move search ceiling is initial/MOVE_BUDGET
-#   MOVE_OVERHEAD_MS      default 250: clock reserved per move for the round
-#                         trip to the server
+#   MOVE_OVERHEAD_MS      clock reserved per move for the round trip to the
+#                         server. UNSET BY DEFAULT, and it should stay that
+#                         way: the client scales it to each time control,
+#                         because Stockfish reserves a MULTIPLE of this value
+#                         (~52x) and a number tuned for a 10-minute game holds
+#                         back a fifth of a bullet clock — which is what made
+#                         the bot answer in ~2ms below 13 seconds. Set it only
+#                         if you know this host's latency to the server.
 #   BOOK                  Polyglot .bin played before the engine; defaults to
 #                         the one shipped in the image, else the repo's
 #                         assets/house-book.bin. Set BOOK= (empty) to disable.
@@ -54,7 +60,6 @@ SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
 SEATS="${SEATS:-2}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
-MOVE_OVERHEAD_MS="${MOVE_OVERHEAD_MS:-250}"
 BOOK_MAX_PLY="${BOOK_MAX_PLY:-16}"
 
 # Opening book. `${BOOK+set}` (no colon) distinguishes "not set" from
@@ -155,6 +160,11 @@ run_tc() {
   # Empty BOOK means "no book"; --book with an empty value would be an error.
   local book_args=()
   [[ -n "${BOOK:-}" ]] && book_args=(--book "$BOOK" --book-max-ply "$BOOK_MAX_PLY")
+  # Pass the reserve ONLY when it was pinned. Passing a value unconditionally
+  # is what this used to do, and it defeated the per-time-control scaling the
+  # client now does for itself — a flat 250ms is a fifth of the 1+0 clock.
+  local overhead_args=()
+  [[ -n "${MOVE_OVERHEAD_MS:-}" ]] && overhead_args=(--move-overhead-ms "$MOVE_OVERHEAD_MS")
   # Expanded below as ${book_args[@]+"${book_args[@]}"}: bash 3.2 (still the
   # /bin/bash on macOS) treats "${empty[@]}" as an unset variable under `set -u`
   # and aborts. Only the BOOK= opt-out path hits it — i.e. the path least likely
@@ -168,7 +178,7 @@ run_tc() {
       --name "$NAME" \
       --uci-option "Skill Level=$SKILL" \
       --max-move-ms "$max_move_ms" \
-      --move-overhead-ms "$MOVE_OVERHEAD_MS" \
+      ${overhead_args[@]+"${overhead_args[@]}"} \
       ${book_args[@]+"${book_args[@]}"} \
       --initial-secs "$initial" --increment-secs "$increment" || true
     echo "[${initial}+${increment} #${seat}] autopilot exited; restarting in ${delay}s"

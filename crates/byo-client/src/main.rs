@@ -23,7 +23,7 @@ use protocol::TimeControl;
 
 use crate::book::BookPolicy;
 use crate::engine::UciEngine;
-use crate::net::{play, PlayOpts, TimePolicy, DEFAULT_MOVE_OVERHEAD_MS};
+use crate::net::{play, PlayOpts, TimePolicy};
 
 #[derive(Parser)]
 #[command(
@@ -86,8 +86,13 @@ struct TimeArgs {
     /// Milliseconds reserved per move for the round trip to the server. The
     /// server charges wall-clock, so an engine budgeting purely from `wtime`
     /// (Stockfish reserves 10ms by default) loses the difference every move.
-    #[arg(long, default_value_t = DEFAULT_MOVE_OVERHEAD_MS)]
-    move_overhead_ms: u64,
+    ///
+    /// Unset scales it to the time control, which is almost always what you
+    /// want: Stockfish reserves a MULTIPLE of this value, so a number tuned for
+    /// a 10-minute game silently eats a fifth of a bullet clock. Set it only if
+    /// you know your own latency (see `net::move_overhead_for`).
+    #[arg(long)]
+    move_overhead_ms: Option<u64>,
     /// Ceiling on a single search, in milliseconds. Off by default; worth
     /// setting for a long-running bot, since sudden-death time management will
     /// happily spend tens of seconds on one opening move and then rush the

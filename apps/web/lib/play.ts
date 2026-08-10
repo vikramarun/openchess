@@ -13,7 +13,7 @@ import {
 import { SERVER_WS } from "./config";
 import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
-import { budgetMs, goCommand } from "./timePolicy";
+import { budgetMs, goCommand, moveOverheadMs } from "./timePolicy";
 import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
@@ -124,6 +124,15 @@ export function playSeat(
   // Reassignable: a dead engine is swapped for a replacement mid-game (below).
   let engine = engineIn;
   let onFallback = handlers.onEngineFallback ?? null;
+  // The per-move network reserve, scaled to this game's time control once
+  // `game_start` tells us what it is. Until then the engine keeps the cautious
+  // handshake default — it was prewarmed before this game existed.
+  let overheadMs: number | null = null;
+  // Resolved once that reserve has reached the engine. `your_turn` waits on it
+  // before searching: both handlers are async and the socket invokes them
+  // concurrently, so without an explicit barrier the first search of the game
+  // could race ahead of the `setoption` and be budgeted at the old reserve.
+  let overheadApplied: Promise<void> = Promise.resolve();
   // Warm both book caches; they resolve long before the first your_turn.
   void ensureBookLoaded();
   void ensureRepertoireLoaded();
@@ -182,8 +191,21 @@ export function playSeat(
           send({ type: "ready", game_id: gameId });
           break;
         }
+        case "game_start": {
+          // The clock at game start IS the time control. Read it from the
+          // server rather than a caller-supplied prop: four call sites reach
+          // playSeat and not all of them know the initial time, but every one
+          // of them gets this frame.
+          const initialMs = m.clock?.white_ms;
+          overheadMs = moveOverheadMs(typeof initialMs === "number" ? initialMs : NaN);
+          // A failure here is not worth losing the game over — the engine
+          // simply keeps the cautious default.
+          overheadApplied = engine.setMoveOverhead(overheadMs).catch(() => {});
+          break;
+        }
         case "your_turn": {
           try {
+            await overheadApplied;
             // Replay the server's history ourselves. Two things come out of it:
             // the position (for the book), and the history rewritten to standard
             // UCI. The server accepts castling in EITHER notation from any
@@ -250,6 +272,11 @@ export function playSeat(
                 const swap = onFallback;
                 onFallback = null;
                 engine = await swap();
+                // A replacement arrives with the handshake default, so it needs
+                // this game's reserve too — otherwise surviving a dead worker
+                // silently reintroduces the low-clock collapse for the rest of
+                // the game.
+                if (overheadMs !== null) await engine.setMoveOverhead(overheadMs).catch(() => {});
                 played = await engine.bestMoveWithPlan(history, plan, onInfo);
               }
             }

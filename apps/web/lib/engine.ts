@@ -19,8 +19,12 @@ const ENGINE_URL = "/engines/sf18-lite-single-a8fbc05e/stockfish-18-lite-single.
 /** Transposition-table size (MB). Modest fixed default — bigger helps slightly
  *  at longer time controls; two engines run at once on the self-play page. */
 const HASH_MB = 64;
-/** Clock reserved per move for the round trip to the server (ms). Matches the
- *  native client's default (crates/byo-client `DEFAULT_MOVE_OVERHEAD_MS`). */
+/** Clock reserved per move at handshake time, before any game is in hand.
+ *  Deliberately the most cautious value: a seat sets the real, time-control
+ *  scaled one via `setMoveOverhead` once the game starts (lib/timePolicy.ts
+ *  `moveOverheadMs` explains why it must not stay flat). The engine is
+ *  prewarmed long before we know the time control, so this is what an
+ *  analysis-only engine keeps. */
 const MOVE_OVERHEAD_MS = 250;
 
 /** One `info` line from a search, as the engine reports it: the score is from
@@ -216,6 +220,20 @@ export class BrowserEngine {
   /** Resolves once the engine has completed its UCI handshake. */
   whenReady() {
     return this.ready;
+  }
+
+  /** Re-reserve the per-move round trip, now that the time control is known.
+   *
+   *  Worth being clear about what this option really controls, because the name
+   *  suggests a rounding error and the effect is not one: Stockfish holds back
+   *  a MULTIPLE of it (see `moveOverheadMs`), so this is the single number that
+   *  decides how low the clock can go before the engine stops thinking.
+   *
+   *  Call it between searches — `setoption` during a search is undefined
+   *  behavior in UCI. A seat calls it on `game_start`, when nothing is running. */
+  async setMoveOverhead(ms: number): Promise<void> {
+    await this.ready;
+    this.send(`setoption name Move Overhead value ${Math.round(ms)}`);
   }
 
   /** Drop the engine's accumulated search state (`ucinewgame` clears the hash
