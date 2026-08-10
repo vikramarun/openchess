@@ -7175,6 +7175,83 @@ mod tests {
         );
     }
 
+    /// A BUY-IN tournament's seats still carry their entrants' wallets.
+    ///
+    /// The other half of `ids_are_wallets`, and the one with real money behind
+    /// it. A paid join never writes `entrant_wallets` — the entrant id simply IS
+    /// the SIWE wallet — so `entrant_wallet`'s address-shaped fallback is the
+    /// ENTIRE binding mechanism here. Flip that flag (or narrow the predicate
+    /// that feeds it) and every paid tournament silently records NULL seats:
+    /// no game history, no Elo, nothing to attribute a payout dispute to — with
+    /// every other test still green, because the rest of them are casual.
+    #[tokio::test]
+    async fn a_buy_in_tournament_binds_its_entrants_wallets_to_seats() {
+        let (state, _c, _r) = test_state_with_sink(Arc::new(BankrollStub(Some(50_000_000))));
+        let wa = "0xaa12121212121212121212121212121212121212";
+        let wb = "0xbb13131313131313131313131313131313131313";
+        let ta = state.0.auth.mint_session(wa);
+        let tb = state.0.auth.mint_session(wb);
+        let tid = tourney_create(
+            State(state.clone()),
+            bearer(&ta),
+            Json(TourneyCreateReq {
+                name: "Paid".into(),
+                buy_in: Some("2000000".into()), // 2 USDC, above MIN_OPEN_ENTRY_FEE
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        for tok in [&ta, &tb] {
+            let _ = tourney_join(
+                State(state.clone()),
+                Path(tid),
+                bearer(tok),
+                Json(JoinReq {
+                    player: None, // a paid entrant is named by their session
+                    seat: None,
+                    uci_options: None,
+                    engine: None,
+                    invite: None,
+                }),
+            )
+            .await
+            .expect("join");
+        }
+        // Sanity: the paid path really does leave `entrant_wallets` empty, so the
+        // assertion below is exercising the fallback and not a stored binding.
+        {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).expect("tournament");
+            assert_eq!(t.players.len(), 2);
+            assert!(
+                t.entrant_wallets.is_empty(),
+                "a paid join stores no explicit wallet — the id is the wallet"
+            );
+        }
+        let _ = tourney_start(State(state.clone()), Path(tid), bearer(&ta))
+            .await
+            .expect("start");
+        let live = state.0.live_games.lock();
+        let g = live
+            .values()
+            .next()
+            .expect("round 0 dispatched the pairing");
+        let mut got = [g.white.as_deref(), g.black.as_deref()];
+        got.sort();
+        assert_eq!(
+            got,
+            [Some(wa), Some(wb)],
+            "both paid seats must carry their entrant's wallet"
+        );
+        assert!(g.rated, "a paid tournament's pairings are ranked");
+    }
+
     /// An address-shaped entrant id that reaches `players` WITHOUT going through
     /// the join guard — which is exactly what `recover_tournaments` does, writing
     /// the persisted array back verbatim — must still not bind that wallet.
@@ -7255,6 +7332,8 @@ mod tests {
         .0;
         // The seat exists (it was rehydrated), but it is a GUEST seat: whoever
         // holds the nickname drives it, and it attributes to nobody.
+        eprintln!("PROBE mine.len()={} tokens={:?}", mine.len(), mine.iter().map(|g| (g.seat.clone(), g.token.is_empty())).collect::<Vec<_>>());
+        assert!(!mine.is_empty(), "PROBE: mine is empty -> the all() is vacuous");
         assert!(
             mine.iter().all(|g| g.seat == "browser"),
             "the poisoned id must resolve as a plain guest seat"
