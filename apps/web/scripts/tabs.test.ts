@@ -1,6 +1,6 @@
 // Which bottom tab lights up for a given route (components/TabBar.tsx).
 //
-// Worth its own suite because below 720px that bar is the ONLY navigation —
+// Worth its own suite because below 1100px that bar is the ONLY navigation —
 // the header's `.nav` is display:none there — so a wrong answer is not a
 // cosmetic highlight, it is the user being told they are somewhere they aren't.
 //

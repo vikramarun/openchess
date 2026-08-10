@@ -14,7 +14,7 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
 (cd contracts && forge test)       # Foundry: 25 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
-(cd apps/web && pnpm test:books)   # every uploadable book walks clean (incl. castling)
+(cd apps/web && pnpm test:books)   # every built-in book walks clean (incl. castling)
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
 (cd apps/web && pnpm test:move)   # what a seat sends: never an illegal move
 (cd apps/web && pnpm test:engine) # one bestmove answers one `go`, in order
@@ -41,6 +41,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:profile) # profile: the ranked/casual split (and its old-server fallback)
 (cd apps/web && pnpm test:username) # a username's shape, and what a player is called
 (cd apps/web && pnpm test:csp)     # the CSP origins sign-in depends on
+(cd apps/web && pnpm test:gate)    # which routes need an account, and the one that must not
 cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
@@ -82,8 +83,9 @@ crates/book-gen      dev tool: builds assets/house-book.bin (Polyglot) from a
                      SAN repertoire; not part of any deployed artifact
 contracts/           ChessEscrow.sol (Foundry): pooled balances + EIP-712 settlement
 apps/web             Next.js: landing demo reel (lib/demoReel.ts) + quick play at /, browse at
-                     /lobby, in-browser Stockfish 18 (WASM/NNUE) + uploadable
-                     Polyglot book (lib/polyglot.ts), wallet/SIWE, bot control, spectator, profiles,
+                     /lobby, in-browser Stockfish 18 (WASM/NNUE) + built-in Polyglot
+                     repertoires (lib/books.ts, lib/polyglot.ts), sign-in gate
+                     (components/SignInGate.tsx), wallet/SIWE, bot control, spectator, profiles,
                      board/piece themes (lib/boardPrefs.ts + app/board.css),
                      mobile tab bar (components/TabBar.tsx)
 ```
@@ -148,10 +150,26 @@ wallet.
   two CSS halves (sticky, and ranked under the overlay) by reading `globals.css`;
   the React half — what `inGame` hides — is pinned instead by `pnpm test:demo`,
   which greps `page.tsx` for `<HomeDemo>` inside the `!inGame` branch.
-- **Below 720px the bottom tab bar is the ONLY navigation.** The header's `.nav`
+- **Below 1100px the bottom tab bar is the ONLY navigation.** The header's `.nav`
   is `display: none` there and `components/TabBar.tsx` carries the five
   destinations (it replaced a masked horizontal scroller whose last link sat
-  77px off the right edge at 375px). Three things it must keep. `.tabbar`'s
+  77px off the right edge at 375px). The breakpoint was 720px and that was
+  wrong: the desktop nav is six nowrap links (~480px) in a row that also carries
+  the wordmark, the bankroll pill and an account chip, so between 721px and
+  ~1000px it simply ran **underneath** `.header-actions`. That shipped, and the
+  engine-status pill (since removed, see below) was 144px of it. Three rules keep
+  it fixed. The two `display` switches live in **one** media query — split them
+  and every width in the gap has no navigation at all; `pnpm test:layout` finds
+  the query that hides `.nav` and asserts the bar and the `<body>` clearance are
+  in the same one, rather than pinning the number. `.nav` is `flex: 0 1 auto` +
+  `min-width: 0` + `overflow: hidden`: told to GROW it still can't shrink below
+  its nowrap content, and the clip is the backstop for the fact that
+  `.header-actions` has **no fixed width** — it holds a bankroll figure and a
+  username. That is also why 1100 and not 1000: measured signed in at 1010px, a
+  13-character username left 12px of slack and a four-figure balance
+  ("12,345.67 USDC", 51px wider than "0 USDC") put the nav 39px into the
+  actions. Size the breakpoint against the widest actions row, not the common
+  one. Three more things the bar itself must keep. `.tabbar`'s
   `z-index: 30` sits **under** the header's 40 — `.site-header` is sticky *with*
   a z-index, so it is a stacking context and `.wallet-pop` (z-index 50) is
   scoped inside it, meaning a bar above the header would paint over the bankroll
@@ -163,6 +181,61 @@ wallet.
   trailing slash: `"/player/0xabc".startsWith("/play")` is true, so a bare
   prefix lights "Engine" on every profile. `pnpm test:layout` pins the CSS,
   `pnpm test:tabs` the routing.
+- **Signing in is required to play anything for real, and it is enforced on BOTH
+  sides.** `components/SignInGate.tsx` (`useAuthState` + `RequireSignIn`) gates
+  the homepage Play card, `/lobby`, `/gauntlet` and `/tournament`; `pnpm
+  test:gate` pins which routes are wrapped. Public on purpose and not to be
+  gated: the marketing homepage itself (hero, demo reel, "How stakes work" — a
+  wall in front of them is a wall in front of the only thing explaining the
+  product), `/play`, `/game/[id]`, `/player/[ident]`, `/terms`, `/privacy`. A
+  shared game link is a finished, verifiable record and the growth loop; it is
+  not a door.
+  **The gate is UX; the server is the authority, and every free door now
+  requires a session too** — `park_create`, `park_accept`, `queue_join`,
+  `gauntlet_start` and `tourney_join`, not just the staked/bot paths they used
+  to check (`every_free_matchmaking_door_needs_a_session`). Enforcing it in the
+  browser alone left a hole the gate cannot close: anything scripting
+  `POST /park/offers` still put an anonymous free challenge in the same "Open
+  challenges" table every signed-in player reads, as a row none of them could
+  have created — and a seat with no wallet records no history and moves no Elo,
+  so the finished game never happened for one of its two players. Nothing
+  legitimate lost the right: `chess-client` is wallet-bound by design, and the
+  house bot posts under `HOUSE_WALLET`. **`POST /games` is the one door that
+  stays open** (see `TEST_MODE` below). A client that talks to any of the five
+  must send the bearer unconditionally — `apps/web` routes them all through
+  `authedFetch`, and `chess-client gauntlet` now resolves a session up front
+  rather than sending one only when staked.
+  **Admission LATCHES.** `RequireSignIn` keeps rendering its children for the
+  life of the mount once it has admitted someone, and that is a correctness
+  requirement, not laziness: `<SeatGame>` renders under it, so a gate that
+  retracted would unmount a LIVE BOARD and close its socket the moment a token
+  went away — `authedFetch` dropping a stale one on a 401, the 24h session TTL
+  lapsing mid-game, a wallet disconnect or account switch firing `clearAuth`.
+  A seat that is *gone* (rather than idle) hands the opponent a forfeit win and
+  the whole stake (`room.rs reap_forfeit_winner`), so an expiring session would
+  confiscate the stake of someone sitting right there playing — the same
+  confiscation the decline path is careful to avoid, by a different route.
+  Nothing is lost: the server re-checks every call and 401s, and a fresh visit
+  remounts. The latch is set DURING RENDER, not in an effect, or the wall
+  flashes over the board for a frame first. `test:gate` pins both halves.
+  Two traps in the hook. It **must not block on `/config`**:
+  `useOnchainConfig` retries a failed fetch forever with backoff, so a version
+  that answered "checking" until the config landed turned an unreachable game
+  server into a permanently blank page on every gated route. Unknown config
+  reads as the production truth (wagering on, session required); `test:gate`
+  pins that exactly one branch returns `"checking"`. And a held token answers
+  "in" with no round trip at all, or every returning player waits on a fetch
+  before their own lobby renders. The one honest "checking" is `!mounted`:
+  localStorage is client-only, so neither the server render nor the first client
+  render can see a session that exists.
+- **There is no engine-status pill in the header.** It read the SINGLETON eval
+  engine (`lib/engineContext`), which most routes never load — so it said
+  "Engine ready" on a page with an eval bar and a dim "Engine" everywhere else,
+  describing a worker the visitor has no relationship with rather than whether
+  they can play. It also cost ~144px of the row above. Engine status lives on
+  `/play`, whose subject IS the engine (`.engine-status`), and each seat reports
+  its own through `SeatGame`'s "Status:" line — the one a player is waiting on.
+  Don't put it back in the chrome.
 - **The landing page is a scripted demo, and it must never touch the engine.**
   `/` opens on a coin flip and a canned 33-ply game that ends in mate
   (`lib/demoReel.ts` → `components/HomeDemo.tsx`). Every frame is derived by
@@ -213,9 +286,12 @@ wallet.
   boundary turns that into a blank page — so one unset env var took down
   spectating, replays, profiles and casual play, none of which need a wallet.
   Hence `lib/dynamicEnv.ts`: the provider is omitted entirely when unconfigured,
-  and `AuthButton`/`WalletMenu` check `dynamicConfigured` before calling any
-  Dynamic hook (the context defaults to `undefined`, so a hook without the
-  provider throws too). Don't collapse that branch back.
+  and `AuthButton`/`WalletMenu`/`SignInGate` check `dynamicConfigured` before
+  calling any Dynamic hook (the context defaults to `undefined`, so a hook
+  without the provider throws too). Don't collapse that branch back. It matters
+  more since the sign-in gate landed: those routes are now UNREACHABLE without
+  Dynamic, so the gate has to say "sign-in isn't configured on this deployment"
+  rather than render a button that opens nothing.
   (3) **Dynamic's asset CDN is a different origin from its API.** The connect
   modal fetches its wallet list from `dynamic-static-assets.com`, so with only
   `app.dynamicauth.com` allowlisted the modal opens with **no wallets in it** and
@@ -367,6 +443,23 @@ wallet.
   parses fine and never hits (`book::shipped_book` tests exist to catch exactly
   that); and `BookPolicy::Best` would walk one identical line every game, which
   is why `Weighted` is the default.
+  The browser bot's repertoire (`apps/web/lib/books.ts`) is four slots — White,
+  and Black vs 1.e4 / 1.d4 / anything else — and each slot takes one of six
+  style books, `null`, or the **`ALL_BOOKS` sentinel**, which expands in
+  `selectedBookIds` to every book for that slot. All four on `ALL_BOOKS` (~1 MB,
+  fetched lazily, `immutable` for a year) is the **default**, because the
+  alternative default was no book at all and that is a quarter of a 3+0 clock
+  spent before either side has left theory. A style is a NARROWING of the merged
+  set, not a different corpus: Polyglot is position-keyed, so concatenating the
+  six is free and `weighted` then picks between them by how often the line was
+  played. Two things to keep. `normalizeRepertoire` lets **`null` survive as
+  itself** while every other unusable value falls back to the default —
+  otherwise choosing "No opening book" resets to the full book on the next read.
+  And `repertoireLabel` reads per SLOT, not per selected book id: built from the
+  expanded list, one slot on `ALL_BOOKS` would report a six-style mix and name an
+  arbitrary one of them. There is no **upload** any more — an arbitrary `.bin`
+  was the most advanced control on the most beginner-facing surface, and
+  `chess-client --book` covers it with a real engine behind it.
 - **Castling has two UCI spellings and only one of them is safe.** chessops,
   Polyglot and Chess960 all write castling as king-takes-rook (`e1h1`);
   standard UCI writes the king's two-square move (`e1g1`). shakmaty accepts
@@ -565,6 +658,32 @@ wallet.
   cooldown is a 403, not a 429**: this router already answers 429 from two
   different rate limits, and telling a throttled user "you can change again in 7
   days" is both wrong and unrecoverable-sounding.
+- **A tournament entrant is a WALLET, in every tournament.** The same rule as a
+  seat's display name, arrived at later. A buy-in tournament always keyed
+  entrants on the authenticated wallet, but a casual one keyed them on a display
+  name the joiner typed (with the session merely recorded alongside in
+  `entrant_wallets`) — two identity models for one table, and the weaker one was
+  the client's: an entrant could enter under any handle, including somebody
+  else's, and the standings printed it. `tourney_join_inner`'s casual branch now
+  requires a session and uses the wallet, so `is_wallet_id` is true, and
+  `entrant_labels` resolves the username off it exactly as the buy-in path does.
+  Three riders. **`JoinReq` no longer has a `player` field** — don't reintroduce
+  one. **Re-joining must stay idempotent** (200, one entrant): it is the retry
+  path for a join whose durable write failed, and the old duplicate-name 409 has
+  no analogue when ids can't collide. And `entrant_wallets` stays on
+  `Tournament` (and `legacyIds` in `app/tournament/page.tsx`, read-only) purely
+  to keep name-keyed entrants persisted before this change from being locked out
+  of their own event; both can go once no such tournament is open.
+- **A `TEST_MODE` game is not in the spectate lobby.** `POST /games` is
+  unauthenticated, seats nobody, and exists for one caller: the web app's Test
+  Engine page, which runs two in-browser Stockfish workers against each other on
+  the visitor's own CPU. Both seat wallets are NULL, so it has always been absent
+  from every history and both Elo ladders — but it was listed under "Live now"
+  beside real staked tables, which misreads the room's activity and lets anyone
+  fill it from a loop. `live_games` filters `mode != TEST_MODE`. The mode is
+  named `"test"` rather than left as `"casual"` because that word now means the
+  free half of a real ladder (`games.rated`), and a lobby filtered on a mode
+  string reading "casual" is filtering on the wrong thing.
 - **The house bot is identified by WALLET, not by its name.** The lobby's
   play-now button finds its standing free offer via `house_wallet` on
   `GET /config` (from the `HOUSE_WALLET` env var). It used to match the literal

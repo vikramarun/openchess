@@ -46,7 +46,27 @@ pub async fn run_gauntlet(opts: GauntletOpts) -> Result<()> {
     // Mutable: a server deploy voids every in-memory session mid-run, and the
     // queue loop below re-authenticates rather than aborting the whole session
     // on the first 401 (the same lesson the agent loop learned in connect.rs).
-    let mut auth_token = opts.auth_token.clone();
+    //
+    // Resolved UP FRONT rather than sent only when present. Every gauntlet is
+    // wallet-bound now, casual tiers included, so a run with no credential dies
+    // at `/gauntlet/start` — and it used to die there with a bare HTTP 401,
+    // twenty lines into a command the user thought was working. Resolve the
+    // same way `connect` does (OPENCHESS_WALLET_KEY, or a pasted token), and
+    // say plainly what is missing when there is nothing to resolve.
+    let mut auth_token =
+        match crate::auth::resolve_session(&client, &http, opts.auth_token.clone(), None).await? {
+            Some(s) => {
+                println!("signed in as {}", s.address);
+                Some(s.token)
+            }
+            None => {
+                return Err(anyhow!(
+                    "a gauntlet needs a signed-in wallet (its games count toward your \
+                 record and its stakes settle to you). Set OPENCHESS_WALLET_KEY, or \
+                 pass --auth-token from `chess-client login`."
+                ))
+            }
+        };
 
     let with_auth = |rb: reqwest::RequestBuilder, tok: &Option<String>| match tok {
         Some(t) => rb.bearer_auth(t),

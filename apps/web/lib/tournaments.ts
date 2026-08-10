@@ -211,61 +211,54 @@ export async function fetchTournaments(): Promise<Tournament[]> {
   return rows.map(({ tournament_id, ...view }) => normalize(tournament_id, view));
 }
 
-/** Which entrant am I in this tournament?
+/** Entrant ids stored before an entrant id was always a wallet.
  *
- *  A buy-in tournament keys entrants by the authenticated wallet, so the
- *  connected address answers it. A casual one keys them by the display name the
- *  player chose, which lives only in the browser — so it is persisted here.
- *  Keeping it in React state (as this page used to) meant a reload turned an
- *  entrant into a stranger: no Start button, no games, no way back into an
- *  event they had already joined. */
+ *  A casual tournament used to key its entrants on a display name the joiner
+ *  typed, which existed nowhere but that browser — so it was persisted here,
+ *  because keeping it in React state meant a reload turned an entrant into a
+ *  stranger: no Start button, no games, no way back into an event they had
+ *  already joined.
+ *
+ *  Both kinds key on the authenticated wallet now (`tourney_join_inner`), so
+ *  this is READ-ONLY and nothing writes it. It exists to keep anyone already
+ *  seated in a name-keyed tournament from being locked out of it, and can go
+ *  once every such tournament has been started or swept — they do not outlive
+ *  their round. */
 const IDENTITY_KEY = KEYS.tournamentIdentity;
-
-type Identities = Record<string, string>;
-
-function readIdentities(): Identities {
-  try {
-    const raw = window.localStorage.getItem(IDENTITY_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? (parsed as Identities) : {};
-  } catch {
-    return {};
-  }
-}
 
 export function casualIdentity(tid: string): string | null {
   try {
-    return readIdentities()[tid] ?? null;
+    const raw = window.localStorage.getItem(IDENTITY_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return (parsed && typeof parsed === "object" ? (parsed as Record<string, string>)[tid] : null) ?? null;
   } catch {
     return null;
   }
 }
 
-/** Remember the entrant id the SERVER recorded (not the string we sent — it is
- *  sanitized and capped server-side, and a client that stored its own version
- *  would look up an entrant that doesn't exist). */
-export function rememberCasualIdentity(tid: string, player: string): void {
-  try {
-    window.localStorage.setItem(IDENTITY_KEY, JSON.stringify({ ...readIdentities(), [tid]: player }));
-  } catch {
-    /* private mode — identity just won't survive the reload */
-  }
-}
-
 /** What to call an entrant.
  *
- *  An entrant id is either a wallet (buy-in) or a chosen nickname (casual), and
- *  `labels` maps the ones whose seat has a claimed username. Falls back to a
- *  shortened address for a wallet and to the nickname itself otherwise — never
- *  to a raw 42-character id, which is what the standings printed before the
- *  server started resolving handles.
+ *  An entrant id is a wallet (a legacy casual entry may still be a nickname),
+ *  and the server resolves a label for every one of them: a claimed username, a
+ *  short address, or a `~`-decorated legacy nickname. That map is the authority
+ *  — prefer it always.
+ *
+ *  The fallback below only fires when the server sent none (an old server, or a
+ *  DB hiccup). Even then a bare nickname must not be printed: a legacy entry
+ *  could hold a real user's handle, and rendering it undecorated would read as
+ *  that user. So it gets the same `~` the server's `guest_label` applies (`~` is
+ *  outside the username charset, so it cannot collide with a real handle).
  *
  *  Shared so the crosstable, the pairings and the organizer's request list all
  *  say the same thing about the same person. */
 export function entrantLabel(t: Pick<Tournament, "labels">, id: string): string {
   const named = t.labels[id] ?? t.labels[id.toLowerCase()];
   if (named) return named;
-  return isAddress(id.toLowerCase()) ? shortAddress(id) : id;
+  if (isAddress(id.toLowerCase())) return shortAddress(id);
+  // Prefix unconditionally, exactly as the server's `guest_label` does. Skipping
+  // it for an id that already starts with `~` would render guest `~alice` and
+  // guest `alice` identically — the collision this decoration exists to stop.
+  return `~${id}`;
 }
 
 /** Entrant ids are compared case-insensitively everywhere on the server. */

@@ -86,10 +86,19 @@ const csp = [
   // the local preview exercises the same path production does.
   `img-src 'self' data: blob: https: ${SERVER_HTTP}`, // wallet + social avatars (arbitrary https)
   // Deliberately no CDN, which means Dynamic's modal renders in a fallback font
-  // rather than the DM Sans it fetches from jsDelivr. That's cosmetic — the
-  // modal lays out fine — and re-adding jsDelivr would put back the exact
-  // third-party origin this app removed when it vendored chessground's CSS.
-  // Add it only if the modal's typography turns out to matter more than that.
+  // rather than the DM Sans it fetches from jsDelivr, and logs a handful of CSP
+  // violations doing it. That's cosmetic — the modal lays out fine — and
+  // re-adding jsDelivr would put back the exact third-party origin this app
+  // removed when it vendored chessground's CSS.
+  //
+  // Worth re-weighing rather than inheriting: sign-in is no longer optional.
+  // Play, Lobby, Gauntlet and Tournament are all behind it now
+  // (components/SignInGate.tsx), so this modal is the front door for every
+  // visitor rather than a control a few people used, and its typography is more
+  // visible than it was when this call was made. Still not enough to widen a
+  // money app's CSP to a public CDN by default — but if it is ever wanted, the
+  // better fix is Dynamic's dashboard (set the modal's font to a system stack),
+  // which costs no new origin at all.
   "font-src 'self' data:",
   "worker-src 'self' blob:", // Stockfish web worker
   // Dynamic renders its embedded-wallet key operations in an iframe on

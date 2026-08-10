@@ -196,4 +196,14 @@ jobs:
           # connect modal opens with no wallets in it, or phone wallets stop
           # pairing while every desktop keeps working.
           pnpm test:csp
+          # Which routes need an account, and the one that must not. Both halves
+          # fail silently and in opposite directions: lose the gate on /lobby and
+          # a signed-out visitor is invited to click "Join & play" on a real
+          # staked game, only to be 401'd three steps later; gate /play or the
+          # homepage hero by accident and the only pages a stranger can reach
+          # become a sign-in wall, so the marketing page stops marketing. It also
+          # pins that exactly one branch of useAuthState returns "checking" —
+          # gating that on the /config fetch turns an unreachable game server
+          # into a permanently blank page on every gated route.
+          pnpm test:gate
           pnpm build

@@ -5,6 +5,7 @@ import { useCallback, useState } from "react";
 import { DemoResult, HomeDemo } from "@/components/HomeDemo";
 import { Lobby } from "@/components/Lobby";
 import { Logo } from "@/components/Logo";
+import { RequireSignIn } from "@/components/SignInGate";
 import { useMounted } from "@/lib/useMounted";
 
 export default function Home() {
@@ -15,13 +16,19 @@ export default function Home() {
   // ~1000px, the same height that put the top nav out of reach. Stand it down
   // while you play; it comes back when you do.
   const [inGame, setInGame] = useState(false);
-  // Stable identity: both children report through these from an effect, and a
-  // fresh callback each render would re-run it every render.
-  const onActiveChange = useCallback((active: boolean) => setInGame(active), []);
-
   // The reel's board and its result sit in different columns of .home-hero, so
   // the phase travels up here rather than one of them nesting the other.
   const [demoDone, setDemoDone] = useState(false);
+  // Stable identity: both children report through these from an effect, and a
+  // fresh callback each render would re-run it every render.
+  const onActiveChange = useCallback((active: boolean) => {
+    setInGame(active);
+    // Entering a game unmounts the hero (and its DemoResult). Clear the finished
+    // flag now so that when the hero REMOUNTS after the game, it doesn't paint a
+    // stale "Doubled up! +X USDC" card for a frame before HomeDemo re-reports —
+    // which is especially jarring right after a real, possibly lost, staked game.
+    if (active) setDemoDone(false);
+  }, []);
   const onFinishedChange = useCallback((done: boolean) => setDemoDone(done), []);
 
   const scrollToPlay = () =>
@@ -70,8 +77,20 @@ export default function Home() {
         </section>
       )}
 
+      {/* The PAGE stays public — the hero, the reel and "How stakes work" are
+          the pitch, and a wall in front of them would be a wall in front of the
+          only thing that explains the product. It is the Play card that needs an
+          account: everything it can start seats a real player, lands in a
+          history and moves an Elo. */}
       <div id="play">
-        {mounted ? <Lobby view="quickplay" onActiveChange={onActiveChange} /> : null}
+        {mounted ? (
+          <RequireSignIn
+            title="Sign in to play"
+            lede="Post a challenge, take the House Bot's seat, or stake USDC — all of it is bound to your account, so your games and your rating are yours."
+          >
+            <Lobby view="quickplay" onActiveChange={onActiveChange} />
+          </RequireSignIn>
+        ) : null}
       </div>
 
       {/* The pitch to someone who ISN'T playing yet. Under a live board it's both

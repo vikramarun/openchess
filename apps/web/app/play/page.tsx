@@ -6,7 +6,6 @@ import { Chessboard } from "@/components/Chessboard";
 import { MoveNav, MovePanel } from "@/components/Moves";
 import { PlayerBar } from "@/components/PlayerBar";
 import { lastMoveFromUci, material, sideToMoveFromFen, type Side } from "@/lib/board";
-import { ensureBookLoaded } from "@/lib/browserBot";
 import { other, useFlip } from "@/lib/useFlip";
 import { SERVER_HTTP, SERVER_WS } from "@/lib/config";
 import { BrowserEngine } from "@/lib/engine";
@@ -77,9 +76,6 @@ export default function PlayPage() {
       setStatus("loading engines…");
       await Promise.all([white.whenReady(), black.whenReady()]);
       if (canceled) return;
-      // Warm the uploaded book. Note: the book is a shared cache, so both seats
-      // follow it through the opening — the OpenChess bot diverges once out of book.
-      await ensureBookLoaded();
 
       setStatus("creating game…");
       const resp = await fetch(`${SERVER_HTTP}/games`, {
@@ -100,8 +96,13 @@ export default function PlayPage() {
       spectator.onmessage = (ev) => applyFrame(ev.data, () => setStatus("finished"));
 
       // Two browser engines play the two seats.
-      seats.push(playSeat(game.game_id, game.white_token, white, 300, {}, canceledFn));
-      seats.push(playSeat(game.game_id, game.black_token, black, 300, {}, canceledFn));
+      // `skipRepertoire`: this is the one route a signed-out visitor can reach,
+      // and the default repertoire is ~1 MB of books on top of the engine that
+      // neither of these two engines gives the viewer anything for. The bundled
+      // opening set still answers, so the opening is still instant.
+      const opts = { skipRepertoire: true };
+      seats.push(playSeat(game.game_id, game.white_token, white, 300, opts, canceledFn));
+      seats.push(playSeat(game.game_id, game.black_token, black, 300, opts, canceledFn));
     };
 
     run().catch(() => {
@@ -126,6 +127,31 @@ export default function PlayPage() {
     : null;
 
   const live = !result && status === "playing";
+
+  // The engine readout that used to be a pill in the site header. `status`
+  // tracks the whole run, so map it to the three dot colours globals.css
+  // defines: loading (blue, pulsing), ready (green), error (red).
+  //
+  // The failure wording is separated from the engine's, deliberately: every way
+  // this run can fail after the workers boot is the GAME SERVER, not Stockfish,
+  // and a red dot next to "failed to start" on a page titled Test Engine reads
+  // as "your browser can't run the engine" — which sends the one visitor who
+  // has no account to debug the wrong thing.
+  const failed = status.startsWith("Server error") || status === "failed to start";
+  const dotStatus = failed
+    ? "error"
+    : status === "playing" || status === "finished"
+      ? "ready"
+      : "loading";
+  const statusText = failed
+    ? "Engine ready · can’t reach the game server"
+    : status === "playing"
+      ? "Engine ready · playing"
+      : status === "finished"
+        ? "Engine ready · game over"
+        : status === "creating game…"
+          ? "Engine ready · starting the game…"
+          : "Loading Stockfish…";
   // Clocks and the turn indicator describe the live tip; the board and material
   // follow the ply you're viewing.
   const turn = sideToMoveFromFen(fen);
@@ -198,8 +224,13 @@ export default function PlayPage() {
                 </button>
               ))}
             </div>
-            <div className="muted" style={{ marginTop: 8 }}>
-              Status: {status}
+            {/* Where the header's engine pill went. It belongs on this page and
+                nowhere else: this is the one route whose subject IS the engine,
+                and in the header it reported a worker (the shared eval engine)
+                that most routes never even load. */}
+            <div className="engine-status" title="Stockfish 18 (NNUE), ~7 MB, downloaded once">
+              <span className={`dot ${dotStatus}`} />
+              <span>{statusText}</span>
             </div>
           </div>
 

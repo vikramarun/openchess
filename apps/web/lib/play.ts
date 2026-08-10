@@ -3,13 +3,7 @@
 
 import { Chess } from "chessops/chess";
 
-import {
-  ensureBookLoaded,
-  ensureRepertoireLoaded,
-  getBrowserBotConfig,
-  probeRepertoire,
-  probeUserBook,
-} from "./browserBot";
+import { ensureRepertoireLoaded, getBrowserBotConfig, probeRepertoire } from "./browserBot";
 import { SERVER_WS } from "./config";
 import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
@@ -39,6 +33,19 @@ export type PlayHandlers = {
    *  Returning a working engine lets the seat play on instead of resigning,
    *  which matters because a resignation forfeits a real stake. */
   onEngineFallback?: () => Promise<BrowserEngine>;
+  /** Don't fetch the configured opening repertoire for this seat.
+   *
+   *  For `/play`, the Test Engine sandbox — the ONE route a signed-out visitor
+   *  can reach, and therefore the whole top of the funnel. The default
+   *  repertoire is every book (`ALL_BOOKS`), which is ~1 MB over 24 requests on
+   *  top of a 7 MB engine, and two engines playing each other get nothing from
+   *  it that the visitor can see. Same reasoning as the landing reel never
+   *  touching the engine: the try-it surfaces stay cheap.
+   *
+   *  The seat is NOT bookless — `lib/openings.ts` is bundled JS and still
+   *  answers, so the opening is still played instantly rather than searched.
+   *  Only the downloaded half is skipped. */
+  skipRepertoire?: boolean;
 };
 
 /** Reset the engine and ask once more, for a seat whose engine just answered
@@ -75,32 +82,28 @@ async function retryAfterResync(
   }
 }
 
-/** A book move for `pos` — the user's uploaded Polyglot book first, then the
- *  built-in mainline set — returning the first LEGAL of the two, so a
- *  bad/illegal user-book entry falls through to the built-in book (and then to
- *  the engine) rather than suppressing it. Answers in standard UCI.
+/** A book move for `pos` — the chosen repertoire first, then the built-in
+ *  mainline set — returning the first LEGAL of the two, so a bad entry falls
+ *  through rather than suppressing the next source. Answers in standard UCI.
  *
  *  `history` must already be standard UCI: the built-in book is keyed by
  *  move-sequence PREFIX, so a history in the king-takes-rook notation would
- *  miss every entry from the castle onwards. */
-function legalBookMove(pos: Chess, history: string[]): string | null {
+ *  miss every entry from the castle onwards.
+ *
+ *  There used to be a third source ahead of these, an arbitrary Polyglot `.bin`
+ *  the visitor uploaded, with a depth limit of its own. It is gone with the
+ *  upload control (see components/BrowserBotPanel.tsx); a downloaded
+ *  `chess-client` still takes `--book`, which is where an arbitrary book
+ *  belongs. */
+function legalBookMove(pos: Chess, history: string[], useRepertoire: boolean): string | null {
   const cfg = getBrowserBotConfig();
   const ply = history.length;
-
-  // Two books, two depth settings, each governed by the control next to it:
-  // `bookMaxPly` belongs to the uploaded .bin, `repertoire.maxPly` to the
-  // built-in repertoire (and to the broad fallback book, which is the same
-  // kind of thing). Sharing one of them here meant the repertoire picker's
-  // "leave book after ply" changed the preview and nothing else.
-  const user = probeUserBook(pos, ply, cfg.bookMaxPly);
-  const userStd = user ? toStandardUci(pos, user) : null;
-  if (userStd) return userStd;
 
   // The chosen repertoire. Normalized like everything else: a .bin stores
   // castling as king-takes-rook by spec, so decodeMove already converts it —
   // this is the belt to that braces.
   const repMaxPly = cfg.repertoire.maxPly;
-  const rep = probeRepertoire(pos, ply, repMaxPly, cfg.repertoire.pick);
+  const rep = useRepertoire ? probeRepertoire(pos, ply, repMaxPly, cfg.repertoire.pick) : null;
   const repStd = rep ? toStandardUci(pos, rep) : null;
   if (repStd) return repStd;
 
@@ -133,9 +136,11 @@ export function playSeat(
   // concurrently, so without an explicit barrier the first search of the game
   // could race ahead of the `setoption` and be budgeted at the old reserve.
   let overheadApplied: Promise<void> = Promise.resolve();
-  // Warm both book caches; they resolve long before the first your_turn.
-  void ensureBookLoaded();
-  void ensureRepertoireLoaded();
+  // Warm the repertoire; it resolves long before the first your_turn. Skipped
+  // for the Test Engine sandbox, which is the whole point of the flag — the
+  // fetch is what costs, not the probe.
+  const useRepertoire = !handlers.skipRepertoire;
+  if (useRepertoire) void ensureRepertoireLoaded();
 
   const ws = new WebSocket(`${SERVER_WS}/ws/game/${gameId}?token=${token}`);
   let seq = 0;
@@ -235,7 +240,7 @@ export function playSeat(
             }
             // Opening book first: play known lines instantly instead of burning
             // clock on move 1. Falls through to the engine once out of book.
-            const booked = replay ? legalBookMove(replay.pos, history) : null;
+            const booked = replay ? legalBookMove(replay.pos, history, useRepertoire) : null;
             // Play to the authoritative clock when the server provides one, so
             // the time control is real (the engine self-allocates and can
             // flag). Fall back to a fixed think time if no clock is present.

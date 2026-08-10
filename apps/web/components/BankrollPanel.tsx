@@ -1,13 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import {
-  useAccount,
-  useChainId,
-  usePublicClient,
-  useReadContract,
-  useWriteContract,
-} from "wagmi";
+import { useAccount, usePublicClient, useReadContract, useWriteContract } from "wagmi";
 
 import { ERC20_ABI, ESCROW_ABI, fmtUsdc, parseUsdc } from "@/lib/escrow";
 import { useEnsureChain } from "@/lib/useEnsureChain";
@@ -21,8 +15,10 @@ export function BankrollPanel({
   escrow: `0x${string}`;
   chainId: number;
 }) {
-  const { address, isConnected } = useAccount();
-  const chainId = useChainId();
+  // The connector's REAL chain, not `useChainId()` — which is pinned to the
+  // configured list and so could never report a wrong network, leaving the
+  // "Wrong network" notice below unreachable. See useEnsureChain.
+  const { address, isConnected, chainId } = useAccount();
   const ensureChain = useEnsureChain();
   // Pin the receipt-reading client to the escrow chain: after ensureChain
   // switches, the connected chain's client would otherwise be stale/undefined.
@@ -96,21 +92,29 @@ export function BankrollPanel({
       if (((allowance as bigint) ?? 0n) < amt) {
         setStage("approving USDC…");
         const h = await writeContractAsync({
+          chainId: expected,
+          account: address,
           address: token as `0x${string}`,
           abi: ERC20_ABI,
           functionName: "approve",
           args: [escrow, amt],
         });
-        await publicClient!.waitForTransactionReceipt({ hash: h });
+        const ra = await publicClient!.waitForTransactionReceipt({ hash: h });
+        // A receipt RESOLVES even for a reverted tx — check the status or a
+        // reverted approve would be followed by a doomed deposit.
+        if (ra.status === "reverted") throw new Error("The approval reverted onchain.");
       }
       setStage("depositing…");
       const h2 = await writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "deposit",
         args: [amt],
       });
-      await publicClient!.waitForTransactionReceipt({ hash: h2 });
+      const rd = await publicClient!.waitForTransactionReceipt({ hash: h2 });
+      if (rd.status === "reverted") throw new Error("The deposit reverted onchain.");
       setAmount("");
       refetchAll();
     } catch (e: any) {
@@ -137,12 +141,15 @@ export function BankrollPanel({
       await ensureChain(expected);
       setStage("withdrawing…");
       const h = await writeContractAsync({
+        chainId: expected,
+        account: address,
         address: escrow,
         abi: ESCROW_ABI,
         functionName: "withdraw",
         args: [amt],
       });
-      await publicClient!.waitForTransactionReceipt({ hash: h });
+      const rw = await publicClient!.waitForTransactionReceipt({ hash: h });
+      if (rw.status === "reverted") throw new Error("The withdrawal reverted onchain.");
       setAmount("");
       refetchAll();
     } catch (e: any) {
