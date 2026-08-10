@@ -72,6 +72,17 @@ export default function TournamentPage() {
 /** Sentinel for the "type your own percentages" option in the prizes picker. */
 const CUSTOM_PAYOUT = "custom";
 
+/** Smallest entry fee (USDC base units — so 1 USDC) that lets a POOLED event be
+ *  open to anyone. Below it the organizer must gate admission, because a pool
+ *  can be topped up by sponsors and near-free seats let throwaway entrants take
+ *  a prize far larger than they paid for.
+ *
+ *  Hand-synced with `MIN_OPEN_ENTRY_FEE` in crates/server/src/matchmaking.rs,
+ *  which is the real boundary — this copy only buys a sentence instead of a bare
+ *  400. Divergence fails soft in both directions (a server 400 the client didn't
+ *  predict, or a refusal the server would have allowed). */
+const MIN_OPEN_ENTRY_FEE = 1_000_000n;
+
 /** A tournament's prize structure, by preset name when it matches one. */
 const payoutLabel = (t: Tournament) => presetLabel(t.payout.bps) ?? formatPayout(t.payout.bps);
 
@@ -352,6 +363,11 @@ function TournamentClient() {
     if (buyIn.trim()) {
       if (!token)
         return setErr("Sign in (top right) to create a tournament with an entry fee.");
+      // viem's parseUnits accepts `-`, `.`, `-0` and friends (its regex allows
+      // an empty integer AND fraction), all of which come back as 0n — so a
+      // stray keypress or a half-typed negative would otherwise be read as a
+      // deliberate free event. Require an actual digit before trusting it.
+      if (!/[0-9]/.test(buyIn)) return setErr("Enter a valid USDC entry fee.");
       let base: bigint;
       try {
         base = parseUsdc(buyIn);
@@ -377,7 +393,7 @@ function TournamentClient() {
       // up by sponsors, so an Open one lets throwaway entrants take a prize far
       // bigger than their seats cost. Mirrors the server (MIN_OPEN_ENTRY_FEE),
       // so the creator gets a sentence instead of a bare 400.
-      if (base < 1_000_000n && admission === "open") {
+      if (base < MIN_OPEN_ENTRY_FEE && admission === "open") {
         return setErr(
           base === 0n
             ? "A free-entry event needs an invite or approval gate — otherwise anyone could join for nothing and split the sponsored pool. Set “Who can join” to invite or approval."

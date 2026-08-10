@@ -177,13 +177,24 @@ export function TournamentClaim({
     now > openedAt + settleTimeout;
 
   // Already-claimed is informational only, so it doesn't count toward showing
-  // the parent's "Payouts & refunds" header.
-  const hasAction = (kind != null && kind !== "claimed") || sponsorRefundReady;
+  // the parent's "Payouts & refunds" header — otherwise the panel would stay
+  // open forever restating every payout the wallet has ever collected.
+  //
+  // The exception is a claim made JUST NOW. The parent hides the whole panel
+  // when nothing is claimable, so without this the confirmation of the action
+  // the user just took is rendered into a `display: none` container: the button
+  // disappears on success and nothing replaces it, which reads as the claim
+  // having failed. `justResolved` keeps the panel up for this session only.
+  const [justResolved, setJustResolved] = useState(false);
+  const hasAction = (kind != null && kind !== "claimed") || sponsorRefundReady || justResolved;
   useEffect(() => {
     onResolved?.(hasAction);
   }, [hasAction, onResolved]);
 
-  if (kind == null && !sponsorRefundReady) return null;
+  // `justResolved` keeps the row alive through the moment its own action stops
+  // qualifying — a sponsorship reclaim clears `sponsorRefundReady`, so without
+  // it the confirmation would unmount itself the instant it became true.
+  if (kind == null && !sponsorRefundReady && !justResolved) return null;
 
   const run = async (fn: () => Promise<`0x${string}`>) => {
     setError(null);
@@ -196,6 +207,8 @@ export function TournamentClaim({
       // refund would silently refetch and look like it worked.
       const receipt = await publicClient!.waitForTransactionReceipt({ hash });
       if (receipt.status === "reverted") throw new Error("The transaction reverted onchain.");
+      // Keep this row (and so the parent panel) visible to confirm what landed.
+      setJustResolved(true);
       refetchTourn();
       refetchClaimed();
       refetchSponsored();
@@ -252,6 +265,12 @@ export function TournamentClaim({
     <button className="ghost" onClick={doSponsorRefund} disabled={busy}>
       {busy ? "Reclaiming…" : `Reclaim sponsorship · ${fmtUsdc(mySponsorship)} USDC`}
     </button>
+  ) : justResolved && kind == null ? (
+    // The only thing this row had to offer was a sponsorship reclaim, and it
+    // just went through — say so rather than blanking.
+    <span className="muted" style={{ fontSize: 13 }}>
+      Sponsorship reclaimed ✓
+    </span>
   ) : null;
 
   // The entrant action/state, built from `kind` above. Stays null for a wallet

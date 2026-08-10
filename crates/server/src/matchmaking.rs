@@ -3557,6 +3557,23 @@ fn is_rehydratable(buy_in: Option<&str>, organizer: Option<&str>) -> bool {
     buy_in.is_none() || organizer.is_some()
 }
 
+/// The admission a stored row comes back with.
+///
+/// Normally exactly what was stored — a tournament that came back `Open` would
+/// be a closed door that silently stopped existing. The exception is the
+/// create-time rule this restores under: a pooled event with a ~free entry may
+/// not be `Open` (see `MIN_OPEN_ENTRY_FEE`), and rows written before that rule
+/// existed are still in Postgres. Rehydrating one verbatim would put a drainable
+/// event back in the lobby — the gate undone by the one writer that never went
+/// through it. Tightening is always safe: the organizer can still admit anyone.
+fn rehydrated_admission(stored: Admission, buy_in: Option<&str>) -> Admission {
+    if stored == Admission::Open && has_pool(buy_in) && entry_fee(buy_in) < MIN_OPEN_ENTRY_FEE {
+        Admission::Approval
+    } else {
+        stored
+    }
+}
+
 /// Which ladder a tournament's pairings count for.
 ///
 /// The entry fee is the only money in a tournament — no pairing carries a
@@ -3726,7 +3743,29 @@ pub async fn recover_tournaments(state: &AppState) {
                 // function exists to prevent.
                 let age = Duration::from_secs(r.age_secs.max(0) as u64).min(TOURNEY_TTL);
                 let created_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
-                let players: Vec<String> = serde_json::from_value(r.players).unwrap_or_default();
+                let mut players: Vec<String> =
+                    serde_json::from_value(r.players).unwrap_or_default();
+                // A CASUAL entrant id is a nickname, so an address-shaped one is
+                // a row written before `tourney_join_inner` refused that shape.
+                // `entrant_wallet` already declines to read it as a wallet, so it
+                // is inert — but it would still be RENDERED as the victim's
+                // address in the standings and on the board, and whoever reads it
+                // there can pull its launch token. An `open` row has no schedule
+                // yet (`rounds` is rebuilt at start), so nothing references the
+                // entrant list and dropping the id is safe. Buy-in ids are
+                // wallets by construction and must never be touched here.
+                if r.buy_in.is_none() {
+                    let before = players.len();
+                    players.retain(|p| !is_wallet_id(p));
+                    if players.len() != before {
+                        tracing::warn!(
+                            tournament = %r.id,
+                            dropped = before - players.len(),
+                            "dropped address-shaped entrant id(s) from a casual tournament: a \
+                             nickname may not impersonate a wallet"
+                        );
+                    }
+                }
                 // The prize structure has to come back exactly, or the field is
                 // paid a table it never agreed to — silently, since the money
                 // still moves and the standings still look right. A row whose
@@ -3749,15 +3788,24 @@ pub async fn recover_tournaments(state: &AppState) {
                         continue;
                     }
                 };
+                // Restored, not defaulted — but re-gated on the way back in; see
+                // `rehydrated_admission`.
+                let stored: Admission =
+                    serde_json::from_value(json!(r.admission)).unwrap_or_default();
+                let admission = rehydrated_admission(stored, r.buy_in.as_deref());
+                if admission != stored {
+                    tracing::warn!(
+                        tournament = %r.id,
+                        "rehydrating a cheap pooled event as approval-gated: it was stored Open, \
+                         which today's rules refuse because costless entrants could split a \
+                         sponsored pool"
+                    );
+                }
                 ts.entry(r.id).or_insert_with(|| Tournament {
                     name: r.name,
                     buy_in: r.buy_in,
                     payout,
-                    // Restored, not defaulted: a tournament that came back
-                    // `Open` would be a closed door that silently stopped
-                    // existing — anyone could walk into an invite-only event
-                    // after a deploy.
-                    admission: serde_json::from_value(json!(r.admission)).unwrap_or_default(),
+                    admission,
                     // An invite reserved by a join that was still running when
                     // the process died is stored as the empty-string sentinel.
                     // Nothing is in flight after a restart, so hand those back
@@ -6509,6 +6557,56 @@ mod tests {
         assert!(is_rehydratable(None, Some("0xabc")));
     }
 
+    /// The Open-admission rule is re-applied on the way back from Postgres.
+    ///
+    /// `MIN_OPEN_ENTRY_FEE` is enforced at create, but `recover_tournaments` is a
+    /// second writer into the lobby that never goes through it — and rows
+    /// predating the rule are already stored. Restoring one verbatim would put a
+    /// drainable event back in front of users, which is the same shape of miss
+    /// as trusting an address-shaped id because the join path rejected it.
+    #[test]
+    fn a_cheap_pooled_event_cannot_come_back_open() {
+        use Admission::*;
+        // Stored Open + free/nominal entry → tightened to Approval.
+        assert_eq!(rehydrated_admission(Open, Some("0")), Approval);
+        assert_eq!(rehydrated_admission(Open, Some("1")), Approval);
+        assert_eq!(rehydrated_admission(Open, Some("999999")), Approval);
+        // At or above the threshold, Open is legitimate and survives.
+        assert_eq!(rehydrated_admission(Open, Some("1000000")), Open);
+        assert_eq!(rehydrated_admission(Open, Some("5000000")), Open);
+        // A casual event has no pool to drain, so Open is always fine.
+        assert_eq!(rehydrated_admission(Open, None), Open);
+        // An already-gated event is never loosened, whatever the fee.
+        assert_eq!(rehydrated_admission(Invite, Some("0")), Invite);
+        assert_eq!(rehydrated_admission(Approval, Some("0")), Approval);
+        assert_eq!(rehydrated_admission(Invite, Some("5000000")), Invite);
+        // An unparseable fee reads as 0 and so fails CLOSED, not open.
+        assert_eq!(rehydrated_admission(Open, Some("not-a-number")), Approval);
+    }
+
+    /// A casual entrant id may not be address-shaped, and rehydration is the one
+    /// writer that can still introduce one (rows predate the join guard).
+    /// `entrant_wallet` already refuses to READ it as a wallet, but leaving it in
+    /// the field would still render the victim's address in the standings.
+    #[test]
+    fn rehydration_drops_address_shaped_casual_entrants() {
+        let victim = "0xdead222222222222222222222222222222222222";
+        let stored = vec!["Alice".to_string(), victim.to_string(), "Bob".to_string()];
+
+        // Casual: the poisoned id is dropped, honest nicknames survive in order.
+        let mut casual = stored.clone();
+        casual.retain(|p| !is_wallet_id(p));
+        assert_eq!(casual, vec!["Alice".to_string(), "Bob".to_string()]);
+
+        // Buy-in: ids ARE wallets by construction — dropping them would empty
+        // the field of every paying entrant, so the filter must not run there.
+        // (Guarded by `r.buy_in.is_none()` at the call site.)
+        assert!(
+            is_wallet_id(victim),
+            "the filter's predicate must match entrant_wallet's fallback exactly"
+        );
+    }
+
     #[test]
     fn a_rehydrated_buy_in_tournament_still_dispatches_ranked_games() {
         // The entry fee is the only money in a tournament, so it is the only
@@ -7259,10 +7357,14 @@ mod tests {
     /// This is the half the join-time check cannot cover: a casual row poisoned
     /// before that guard existed comes back live on the next restart. Refusing
     /// the shape at the door is not the invariant; refusing to READ a casual id
-    /// as a wallet is. Without `ids_are_wallets`, both assertions below flip —
-    /// the victim's wallet lands on a live seat, and the launch token that drives
-    /// it is handed to an anonymous caller (the token guard misses it, because a
-    /// poisoned id has no `entrant_wallets` row to match against).
+    /// as a wallet is.
+    ///
+    /// The load-bearing assertion is the first one: without `ids_are_wallets`
+    /// the victim's wallet lands on a live seat. The second is weaker on
+    /// purpose — it records that the poisoned id degrades to an ordinary GUEST
+    /// seat (driven by whoever holds the nickname, attributing to nobody) rather
+    /// than to something wallet-bound. Don't read it as a token-leak guard: seat
+    /// kind is decided by `entrant_bots` alone, so it holds either way.
     #[tokio::test]
     async fn a_rehydrated_address_shaped_entrant_binds_no_wallet() {
         let (state, _c, _r) = test_state();

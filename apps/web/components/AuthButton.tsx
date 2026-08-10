@@ -96,7 +96,18 @@ function AuthButtonInner() {
     setError(null);
     setBusy(true);
     try {
-      await ensureChain(expected);
+      // Deliberately NO `ensureChain` here. SIWE is a `personal_sign` over a
+      // text message; the `Chain ID` line carries the SERVER's expected chain
+      // (`config.chainId`), which is also what the server validates against, so
+      // the wallet's own network is irrelevant to whether the signature
+      // verifies. This effect auto-runs on page load, so switching here would
+      // fire an unsolicited network prompt at a user who only opened the site —
+      // and, since a rejected switch throws, would leave someone who declines
+      // unable to sign in at all (no casual attribution, no tournament join)
+      // over a chain they didn't need to be on. It was harmless only while
+      // `useEnsureChain` read the pinned `useChainId()` and could never fire.
+      // The switch belongs on the money writes, where it is user-initiated and
+      // genuinely required — and each of those calls it itself.
       await signInWithEthereum(address, expected, signMessageAsync);
       // The account may have switched while the signature was pending — never
       // keep a session for a wallet the token wasn't issued to. On success,
@@ -116,7 +127,7 @@ function AuthButtonInner() {
     } finally {
       setBusy(false);
     }
-  }, [address, expected, signMessageAsync, ensureChain]);
+  }, [address, expected, signMessageAsync]);
 
   const ready = isConnected && !!address && expected != null;
 
