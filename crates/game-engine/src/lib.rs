@@ -166,8 +166,19 @@ impl Game {
         let remaining = self.remaining_for_turn();
         if elapsed > remaining + LAG_ALLOWANCE_MS {
             // The side to move flagged. Opponent wins unless they cannot mate.
+            //
+            // The question is about the OPPONENT's material alone (FIDE 6.9:
+            // a flag is a draw when the other side cannot checkmate by any
+            // series of legal moves), which is what `has_insufficient_material`
+            // answers. `is_insufficient_material` is a different question — it
+            // is `has_insufficient_material(White) && …(Black)`, i.e. neither
+            // side can mate — and asking it here awarded the game to a lone
+            // king whenever the flagging side still had material. Flagging with
+            // a queen against a bare king handed that king the win, and in a
+            // staked game the whole stake with it.
             let flagged = self.turn();
-            let result = if self.pos.is_insufficient_material() {
+            let opponent = self.pos.turn().other();
+            let result = if self.pos.has_insufficient_material(opponent) {
                 GameResult {
                     winner: None,
                     reason: GameEndReason::Timeout,
@@ -394,6 +405,42 @@ mod tests {
             .unwrap();
         assert_eq!(result.reason, GameEndReason::Timeout);
         assert_eq!(result.winner, Some(Color::White));
+    }
+
+    /// Drop a position in directly. There is no FEN constructor on `Game` (a
+    /// real game always starts from the initial position), and reaching a bare
+    /// king by legal moves would take fifty of them.
+    fn at(fen: &str) -> Chess {
+        fen.parse::<Fen>()
+            .expect("valid fen")
+            .into_position(shakmaty::CastlingMode::Standard)
+            .expect("legal position")
+    }
+
+    #[test]
+    fn flagging_against_a_bare_king_is_a_draw() {
+        // FIDE 6.9: running out of time only loses if the OPPONENT can still
+        // deliver mate. White is to move and up a queen; Black has a bare king
+        // and cannot mate by any series of legal moves, so this is a draw —
+        // and in a staked game, a refund rather than a payout to the bare king.
+        let mut g = Game::new(TC, 0);
+        g.pos = at("8/8/8/4k3/8/8/3Q4/4K3 w - - 0 1");
+
+        let result = g.flag_if_expired(60_000 + LAG_ALLOWANCE_MS + 1).unwrap();
+        assert_eq!(result.reason, GameEndReason::Timeout);
+        assert_eq!(result.winner, None);
+    }
+
+    #[test]
+    fn flagging_against_mating_material_still_loses() {
+        // The other half: the guard asks about the opponent's material only,
+        // so a bare king that flags against a queen loses exactly as before.
+        let mut g = Game::new(TC, 0);
+        g.pos = at("8/8/8/4k3/8/8/1q6/4K3 w - - 0 1");
+
+        let result = g.flag_if_expired(60_000 + LAG_ALLOWANCE_MS + 1).unwrap();
+        assert_eq!(result.reason, GameEndReason::Timeout);
+        assert_eq!(result.winner, Some(Color::Black));
     }
 
     #[test]
