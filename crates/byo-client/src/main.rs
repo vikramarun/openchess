@@ -99,6 +99,18 @@ struct TimeArgs {
     /// rest of the game.
     #[arg(long)]
     max_move_ms: Option<u64>,
+    /// Floor on a single search, in milliseconds, for when the clock gets low.
+    /// Off by default.
+    ///
+    /// The mirror of `--max-move-ms`, and worth setting for the same kind of
+    /// bot. Sudden-death time management reserves a fixed slice of the clock up
+    /// front and then has nothing to allocate once the clock falls under it —
+    /// Stockfish answers in ~2ms from there, which throws away games it was
+    /// winning. Below that point this client budgets the move itself instead of
+    /// asking the engine (see `net::takeover_ms`). Leave it off for an engine
+    /// whose time manager you trust near zero.
+    #[arg(long)]
+    min_move_ms: Option<u64>,
 }
 
 impl From<TimeArgs> for TimePolicy {
@@ -106,6 +118,7 @@ impl From<TimeArgs> for TimePolicy {
         TimePolicy {
             move_overhead_ms: a.move_overhead_ms,
             max_move_ms: a.max_move_ms,
+            min_move_ms: a.min_move_ms,
         }
     }
 }

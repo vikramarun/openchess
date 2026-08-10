@@ -37,6 +37,12 @@
 #                         the server's RL_MAX_OPEN_OFFERS (default 16).
 #   MOVE_BUDGET           default 80: plan each game as this many moves; the
 #                         per-move search ceiling is initial/MOVE_BUDGET
+#   MIN_MOVE_MS           default 150: floor on a search once the clock is too
+#                         low for Stockfish's own manager to allocate from. It
+#                         reserves a fixed slice up front and then answers in
+#                         ~2ms below it, throwing away won games; under that
+#                         point the client budgets the move itself. Set 0 to
+#                         always delegate.
 #   MOVE_OVERHEAD_MS      clock reserved per move for the round trip to the
 #                         server. UNSET BY DEFAULT, and it should stay that
 #                         way: the client scales it to each time control,
@@ -60,6 +66,7 @@ SKILL="${SKILL:-20}"
 TCS="${TCS:-60:0 180:0 300:0 600:0}"
 SEATS="${SEATS:-2}"
 MOVE_BUDGET="${MOVE_BUDGET:-80}"
+MIN_MOVE_MS="${MIN_MOVE_MS:-150}"
 BOOK_MAX_PLY="${BOOK_MAX_PLY:-16}"
 
 # Opening book. `${BOOK+set}` (no colon) distinguishes "not set" from
@@ -118,6 +125,13 @@ for tc in $TCS; do
     exit 1
   fi
 done
+
+# 0 is meaningful here (always delegate), so only the shape is checked. A
+# non-numeric value would reach clap and abort every seat at once.
+if [[ ! "$MIN_MOVE_MS" =~ ^[0-9]+$ ]]; then
+  echo "MIN_MOVE_MS must be a non-negative integer (ms; 0 disables the floor)." >&2
+  exit 1
+fi
 
 if [[ ! "$MOVE_BUDGET" =~ ^[0-9]+$ ]] || ((MOVE_BUDGET == 0)); then
   echo "MOVE_BUDGET must be a positive integer (moves to plan each game for)." >&2
@@ -178,6 +192,7 @@ run_tc() {
       --name "$NAME" \
       --uci-option "Skill Level=$SKILL" \
       --max-move-ms "$max_move_ms" \
+      --min-move-ms "$MIN_MOVE_MS" \
       ${overhead_args[@]+"${overhead_args[@]}"} \
       ${book_args[@]+"${book_args[@]}"} \
       --initial-secs "$initial" --increment-secs "$increment" || true

@@ -51,6 +51,8 @@ class StubEngine {
   /** What the seat asked of the engine, in order — the reserve has to be set
    *  before the first search, and counting the two separately can't tell. */
   calls: string[] = [];
+  /** Every `go` command the seat built, in order. */
+  plans: string[] = [];
   constructor(
     private answers: string[],
     /** Ticks to stall inside `setMoveOverhead`, standing in for the real
@@ -74,7 +76,8 @@ class StubEngine {
   /** The seat now builds its own `go` command from the configured time policy
    *  (lib/timePolicy.ts) and hands it over, so this is the method the move loop
    *  actually calls. `bestMove` stays because retryAfterResync still uses it. */
-  async bestMoveWithPlan(history: string[]) {
+  async bestMoveWithPlan(history: string[], plan?: { cmd: string }) {
+    if (plan) this.plans.push(plan.cmd);
     return this.next(history);
   }
   async bestMove(history: string[]) {
@@ -129,6 +132,28 @@ async function reserveFor(initialMs: number) {
     clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
   });
   return engine;
+}
+
+/** The `go` this seat builds at a given time control with `remainingMs` on its
+ *  own clock. HISTORY_KTR is 7 plies, so we are Black — put the low clock
+ *  there, or the seat reads the healthy one and nothing is being tested. */
+async function goAt(initialMs: number, remainingMs: number) {
+  const engine = new StubEngine(["f8c5"]);
+  playSeat("game-1", "tok", engine as never, 400);
+  const ws = FakeSocket.last!;
+  ws.onopen?.();
+  await ws.deliver({ type: "welcome" });
+  await ws.deliver({
+    type: "game_start",
+    clock: { white_ms: initialMs, black_ms: initialMs, increment_ms: 0 },
+  });
+  await ws.deliver({
+    type: "your_turn",
+    ply: HISTORY_KTR.length,
+    moves_uci: HISTORY_KTR,
+    clock: { white_ms: initialMs, black_ms: remainingMs, increment_ms: 0 },
+  });
+  return engine.plans[0] ?? "";
 }
 
 const movesSent = (ws: FakeSocket) =>
@@ -238,6 +263,18 @@ async function main() {
     });
     await Promise.all([started, turned]);
     check("the reserve is set before the first search", engine.calls, ["overhead", "search"]);
+  }
+
+  // --- and the seat stops delegating once the clock is low --------------------
+  // The unit tests pin the threshold; this pins that the seat is actually wired
+  // to it, with the scaled reserve rather than a constant. A 10+0 reserve is
+  // 250ms (dead at 13s, handover at 26s); a 1+0 reserve is 60ms (handover at
+  // 6.2s), which is the whole reason bullet can keep delegating at 10s.
+  {
+    checkThat("a 10+0 seat delegates with a healthy clock", (await goAt(600_000, 400_000)).startsWith("go wtime"));
+    checkThat("a 10+0 seat takes over at 20s", (await goAt(600_000, 20_000)).startsWith("go movetime"));
+    checkThat("a 1+0 seat still delegates at 10s", (await goAt(60_000, 10_000)).startsWith("go wtime"));
+    checkThat("a 1+0 seat takes over at 5s", (await goAt(60_000, 5_000)).startsWith("go movetime"));
   }
 
   console.log(failed === 0 ? "\nall checks passed" : `\n${failed} check(s) failed`);

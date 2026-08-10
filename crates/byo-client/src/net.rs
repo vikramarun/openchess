@@ -47,6 +47,22 @@ pub struct TimePolicy {
     /// `GameStart` reveals the clock (see `move_overhead_for`). `Some` pins it,
     /// for an operator who knows their own latency.
     pub move_overhead_ms: Option<u64>,
+    /// Floor on a single search once the clock is too low for the engine's own
+    /// manager to be worth delegating to, or `None` to always delegate.
+    ///
+    /// The mirror of `max_move_ms`, and it has to work differently. A ceiling
+    /// rides along on the normal clock-based `go`; a floor cannot, because a
+    /// `movetime` next to a `wtime` is only ever a ceiling — verified, `go
+    /// wtime 10000 btime 10000 movetime 1000` still spends 2ms. Raising a floor
+    /// means REPLACING the command with a bare `go movetime`, which is a
+    /// takeover: below the threshold this client budgets the move itself and
+    /// the engine's manager is not consulted.
+    ///
+    /// Off by default on purpose. A connected engine's time manager is its
+    /// author's business, and the threshold below assumes Stockfish-style
+    /// sudden-death allocation — true of the house bot and of most BYO setups,
+    /// but not something to impose on an engine we know nothing about.
+    pub min_move_ms: Option<u64>,
     /// Hard ceiling on a single search, or `None` to let the engine decide.
     ///
     /// Worth setting for any long-running bot: Stockfish 17 will spend ~62s on
@@ -79,6 +95,44 @@ pub fn move_overhead_for(initial_ms: Option<u64>) -> u64 {
         Some(ms) if ms > 0 => (ms / 1000).clamp(MIN_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS),
         _ => MAX_MOVE_OVERHEAD_MS,
     }
+}
+
+/// Moves Stockfish assumes remain when a `go` carries no `movestogo`, and how
+/// far above its resulting dead point to stop delegating. See
+/// `apps/web/lib/timePolicy.ts` `takeoverBelowMs`, which must agree: the two
+/// clients play the same games at the same time controls.
+pub const SUDDEN_DEATH_MOVESTOGO: u64 = 50;
+pub const TAKEOVER_FACTOR: u64 = 2;
+/// Share of the remaining clock to spend once we have taken over. Mirrors the
+/// browser seat's engine-mode fallback divisor.
+const TAKEOVER_DIVISOR: u64 = 30;
+
+/// Clock at or below which the engine's own manager stops being worth
+/// delegating to: it subtracts `Move Overhead × (2 + movestogo)` before
+/// allocating anything, so that product is where its allocation hits zero and
+/// it starts answering in ~2ms.
+pub fn takeover_below_ms(overhead_ms: u64) -> u64 {
+    overhead_ms * (2 + SUDDEN_DEATH_MOVESTOGO) * TAKEOVER_FACTOR
+}
+
+/// The `movetime` to spend INSTEAD of delegating, or `None` to hand the clock
+/// to the engine as usual.
+///
+/// An unknown clock keeps delegating: we cannot tell whether we are in the
+/// collapse zone, and taking over on a guess would spend a floor's worth of
+/// time every move of a game we might have plenty of clock for.
+fn takeover_ms(policy: &TimePolicy, overhead_ms: u64, remaining_ms: Option<u64>) -> Option<u64> {
+    let floor = policy.min_move_ms.filter(|m| *m > 0)?;
+    let remaining = remaining_ms?;
+    if remaining > takeover_below_ms(overhead_ms) {
+        return None;
+    }
+    // The floor is a floor, not a target: spend a share of what's left when
+    // that is more, so a seat with 25s does not crawl at the same speed as one
+    // with 3s. Then clamp to time we actually have, and to any explicit ceiling.
+    let want = (remaining / TAKEOVER_DIVISOR).max(floor);
+    let usable = remaining.saturating_sub(overhead_ms).max(1);
+    Some(want.min(usable).min(policy.max_move_ms.unwrap_or(u64::MAX)))
 }
 
 /// The `movetime` ceiling to attach to a `go`, given the policy and how much
@@ -246,18 +300,27 @@ pub async fn play(opts: PlayOpts) -> Result<()> {
                         println!("ply {ply}: book move {m}");
                         m
                     }
-                    None => {
-                        engine
-                            .best_move_with_clock(
-                                &moves_uci,
-                                clock.white_ms,
-                                clock.black_ms,
-                                inc,
-                                inc,
-                                move_cap_ms(&opts.time, overhead_ms, my_clock),
-                            )
-                            .await?
-                    }
+                    // Too little clock left for the engine's own manager to
+                    // allocate from — spend our own budget instead of letting
+                    // it answer in ~2ms. A REPLACEMENT, not an added ceiling.
+                    None => match takeover_ms(&opts.time, overhead_ms, my_clock) {
+                        Some(ms) => {
+                            println!("ply {ply}: low clock, searching {ms}ms");
+                            engine.best_move_movetime(&moves_uci, ms).await?
+                        }
+                        None => {
+                            engine
+                                .best_move_with_clock(
+                                    &moves_uci,
+                                    clock.white_ms,
+                                    clock.black_ms,
+                                    inc,
+                                    inc,
+                                    move_cap_ms(&opts.time, overhead_ms, my_clock),
+                                )
+                                .await?
+                        }
+                    },
                 };
                 println!("ply {ply}: playing {uci_move}");
                 send(
@@ -356,6 +419,62 @@ mod tests {
         // only stops US from asking for ~0ms — the engine can still choose it.
         assert_eq!(move_cap_ms(&capped(5_000), 250, Some(100)), Some(50));
         assert_eq!(move_cap_ms(&capped(5_000), 250, Some(0)), Some(50));
+    }
+
+    fn with_floor(min_move_ms: u64) -> TimePolicy {
+        TimePolicy {
+            min_move_ms: Some(min_move_ms),
+            ..TimePolicy::default()
+        }
+    }
+
+    #[test]
+    fn delegation_continues_while_the_clock_is_healthy() {
+        // The engine's own manager is better than ours when it has something to
+        // work with, and it keeps the search extensions we cannot reproduce.
+        // 250ms reserve → dead at 13s, handover at 26s.
+        assert_eq!(takeover_ms(&with_floor(150), 250, Some(30_000)), None);
+        // And a bot that never asked for a floor never hands over.
+        assert_eq!(takeover_ms(&TimePolicy::default(), 250, Some(1_000)), None);
+    }
+
+    #[test]
+    fn takes_over_once_the_engine_would_answer_instantly() {
+        // Below the handover point the engine allocates ~nothing, so we budget.
+        // A share of what's left, since the floor is a floor and not a target.
+        assert_eq!(takeover_ms(&with_floor(150), 250, Some(24_000)), Some(800));
+        assert_eq!(takeover_ms(&with_floor(150), 250, Some(3_000)), Some(150));
+    }
+
+    #[test]
+    fn the_takeover_never_spends_time_the_clock_does_not_have() {
+        // 200ms left, 250 of it owed to the network: the subtraction saturates,
+        // and handing the engine a floor's worth here would flag outright.
+        assert_eq!(takeover_ms(&with_floor(150), 250, Some(200)), Some(1));
+        // An explicit ceiling still wins over the floor.
+        let both = TimePolicy {
+            min_move_ms: Some(5_000),
+            max_move_ms: Some(400),
+            ..TimePolicy::default()
+        };
+        assert_eq!(takeover_ms(&both, 250, Some(10_000)), Some(400));
+    }
+
+    #[test]
+    fn an_unknown_clock_keeps_delegating() {
+        // Our colour is unknown until GameStart, so we cannot tell whether we
+        // are in the collapse zone. Taking over on a guess would spend a floor
+        // every move of a game that may have plenty of clock.
+        assert_eq!(takeover_ms(&with_floor(150), 250, None), None);
+    }
+
+    #[test]
+    fn the_two_clients_agree_on_where_the_engine_dies() {
+        // Mirrors apps/web/lib/timePolicy.ts `takeoverBelowMs`. They play the
+        // same games at the same time controls; a drift here is a seat that
+        // blunders in one client and not the other.
+        assert_eq!(takeover_below_ms(250), 26_000);
+        assert_eq!(takeover_below_ms(60), 6_240);
     }
 
     #[test]

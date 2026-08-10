@@ -11,6 +11,7 @@ import {
   MAX_MOVE_OVERHEAD_MS,
   MIN_BUDGET_MS,
   MIN_MOVE_OVERHEAD_MS,
+  takeoverBelowMs,
   moveOverheadMs,
   OVERHEAD_MS,
   PANIC_MS,
@@ -139,46 +140,97 @@ const P = (patch: Partial<TimePolicy>): TimePolicy => ({ ...DEFAULT_TIME_POLICY,
 // --- go commands -----------------------------------------------------------
 {
   const clock = { whiteMs: 60_000, blackMs: 59_000, incMs: 1_000 };
+  // A healthy clock: well above the takeover point at every reserve below, so
+  // these pin delegation rather than the handover.
+  const go = (
+    policy: TimePolicy,
+    ctx: { clock: typeof clock | null; budgetMs: number; remainingMs?: number; overheadMs?: number },
+  ) =>
+    goCommand(policy, {
+      clock: ctx.clock,
+      budgetMs: ctx.budgetMs,
+      remainingMs: ctx.remainingMs ?? 600_000,
+      overheadMs: ctx.overheadMs ?? 250,
+    });
 
   // The default must be byte-identical to what the engine sent before this
   // existed, or every existing game changes strength silently.
   check(
     "engine mode reproduces today's command exactly",
-    goCommand(P({ mode: "engine" }), { clock, budgetMs: 1234 }),
+    go(P({ mode: "engine" }), { clock, budgetMs: 1234 }),
     { cmd: "go wtime 60000 btime 59000 winc 1000 binc 1000" },
   );
   check(
     "pace appends a constant movestogo",
-    goCommand(P({ mode: "pace", movestogo: 18 }), { clock, budgetMs: 1234 }).cmd,
+    go(P({ mode: "pace", movestogo: 18 }), { clock, budgetMs: 1234 }).cmd,
     "go wtime 60000 btime 59000 winc 1000 binc 1000 movestogo 18",
   );
-  check("fixed uses movetime", goCommand(P({ mode: "fixed" }), { clock, budgetMs: 300 }).cmd, "go movetime 300");
-  check("fraction uses movetime", goCommand(P({ mode: "fraction" }), { clock, budgetMs: 900 }).cmd, "go movetime 900");
+  check("fixed uses movetime", go(P({ mode: "fixed" }), { clock, budgetMs: 300 }).cmd, "go movetime 300");
+  check("fraction uses movetime", go(P({ mode: "fraction" }), { clock, budgetMs: 900 }).cmd, "go movetime 900");
 
-  const nodes = goCommand(P({ mode: "nodes", nodes: 250_000 }), { clock, budgetMs: 2_500 });
+  const nodes = go(P({ mode: "nodes", nodes: 250_000 }), { clock, budgetMs: 2_500 });
   check("nodes uses go nodes", nodes.cmd, "go nodes 250000");
   // Without the wall a slow device would search 250k nodes past its flag.
   check("nodes carries a wall-clock stop", nodes.hardStopMs, 2_500);
-  check("clock modes need no wall", goCommand(P({ mode: "engine" }), { clock, budgetMs: 1 }).hardStopMs, undefined);
+  check("clock modes need no wall", go(P({ mode: "engine" }), { clock, budgetMs: 1 }).hardStopMs, undefined);
 
   // Clockless games (the /play page can run without one).
   check(
     "engine mode degrades to movetime with no clock",
-    goCommand(P({ mode: "engine" }), { clock: null, budgetMs: 400 }).cmd,
+    go(P({ mode: "engine" }), { clock: null, budgetMs: 400 }).cmd,
     "go movetime 400",
   );
   check(
     "pace degrades to movetime with no clock",
-    goCommand(P({ mode: "pace" }), { clock: null, budgetMs: 400 }).cmd,
+    go(P({ mode: "pace" }), { clock: null, budgetMs: 400 }).cmd,
     "go movetime 400",
   );
 
   // We must never report a clock we don't have.
   check(
     "a near-zero clock is floored, never inflated",
-    goCommand(P({ mode: "engine" }), { clock: { whiteMs: 3, blackMs: 0, incMs: -5 }, budgetMs: 50 }).cmd,
+    go(P({ mode: "engine" }), {
+      clock: { whiteMs: 3, blackMs: 0, incMs: -5 },
+      budgetMs: 50,
+      // Above the takeover point, so this still pins the clock command itself.
+      remainingMs: 600_000,
+    }).cmd,
     "go wtime 50 btime 50 winc 0 binc 0",
   );
+}
+
+// --- the takeover ----------------------------------------------------------
+// Below `Move Overhead × (2 + movestogo)` Stockfish has nothing left to
+// allocate and answers in ~2ms, so the seat stops delegating and spends its own
+// budget. It must be a REPLACEMENT: a `movetime` appended to a `wtime` command
+// is only a ceiling, so the collapsed search would survive it.
+{
+  const clock = { whiteMs: 12_000, blackMs: 12_000, incMs: 0 };
+  const at = (remainingMs: number, overheadMs: number, policy = P({ mode: "engine" })) =>
+    goCommand(policy, { clock, budgetMs: 400, remainingMs, overheadMs });
+
+  // 250ms reserve → dead at 13.0s, handover at 26.0s.
+  check("a healthy clock still delegates", at(30_000, 250).cmd.startsWith("go wtime"), true);
+  check("the collapse zone is taken over", at(20_000, 250).cmd, "go movetime 400");
+  check("and so is everything below it", at(5_000, 250).cmd, "go movetime 400");
+
+  // 60ms (1+0) → dead at 3.1s, handover at 6.2s. The whole point of scaling the
+  // reserve is that a bullet seat delegates far further down than a rapid one.
+  check("a bullet seat still delegates at 10s", at(10_000, 60).cmd.startsWith("go wtime"), true);
+  check("a bullet seat takes over at 5s", at(5_000, 60).cmd, "go movetime 400");
+
+  // The threshold is derived, so a policy that states its own movestogo moves
+  // it — the coupling that made `pace` a safety setting wearing a taste label.
+  check("engine mode assumes 50 moves to go", takeoverBelowMs(P({ mode: "engine" }), 100), 10_400);
+  check("pace uses its own movestogo", takeoverBelowMs(P({ mode: "pace", movestogo: 10 }), 100), 2_400);
+  check(
+    "a low movestogo hands over later, not earlier",
+    at(5_000, 100, P({ mode: "pace", movestogo: 10 })).cmd.startsWith("go wtime"),
+    true,
+  );
+
+  // The modes that already spend their own budget are unaffected either way.
+  check("fixed is unchanged in the takeover zone", at(1_000, 250, P({ mode: "fixed" })).cmd, "go movetime 400");
 }
 
 // --- labels ----------------------------------------------------------------

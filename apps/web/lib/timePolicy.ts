@@ -175,6 +175,35 @@ export function budgetMs(policy: TimePolicy, ctx: ClockCtx): number {
   return Math.floor(Math.min(want, Math.max(1, remainingMs - OVERHEAD_MS)));
 }
 
+/** Moves Stockfish assumes remain when the `go` carries no `movestogo`. A
+ *  hardcoded horizon in its time manager, not a guess of ours. */
+export const SUDDEN_DEATH_MOVESTOGO = 50;
+/** How far above the engine's own dead point to stop delegating.
+ *
+ *  1 would hand over only where a delegated search is provably worthless; the
+ *  band just above it is merely bad, and measurably worse than our own budget.
+ *  At 2, with a 250ms reserve, we take over below 26s: measured, the engine
+ *  allocates 209ms at 20s and 100ms at 15s there, where the budget below gives
+ *  666ms and 500ms. Above the threshold the engine is better than we are and
+ *  keeps the search extensions we cannot reproduce, so this is a floor on
+ *  handing over, not an eagerness to. Provisional: the time-based bench arm is
+ *  what should tune it. */
+export const TAKEOVER_FACTOR = 2;
+
+/** Clock below which the engine's own time manager stops being worth
+ *  delegating to.
+ *
+ *  Derived, not guessed. Stockfish subtracts `Move Overhead × (2 + movestogo)`
+ *  from the clock before allocating anything (see `moveOverheadMs`), so that
+ *  product is exactly where its allocation reaches zero and it starts answering
+ *  in ~2ms. `pace` states its own `movestogo`, which is why a lower one moves
+ *  this threshold EARLIER — the same coupling that made "Pace, 15 moves" look
+ *  like a taste setting while it was really editing a safety cliff. */
+export function takeoverBelowMs(policy: TimePolicy, overheadMs: number): number {
+  const movestogo = policy.mode === "pace" ? policy.movestogo : SUDDEN_DEATH_MOVESTOGO;
+  return overheadMs * (2 + movestogo) * TAKEOVER_FACTOR;
+}
+
 export type GoPlan = {
   /** The UCI `go …` command. */
   cmd: string;
@@ -194,15 +223,32 @@ export function goCommand(
     /** Server clock, or null for a clockless game. */
     clock: { whiteMs: number; blackMs: number; incMs: number } | null;
     budgetMs: number;
+    /** OUR remaining clock. `clock` carries both sides and this says which of
+     *  them we are spending, which is what the takeover has to read. */
+    remainingMs: number;
+    /** The reserve currently set on the engine (`moveOverheadMs`). Required,
+     *  not optional: the takeover point is derived from it, and a caller that
+     *  forgot to pass it would silently get the old collapse back. */
+    overheadMs: number;
   },
 ): GoPlan {
-  const { clock, budgetMs: budget } = ctx;
+  const { clock, budgetMs: budget, remainingMs, overheadMs } = ctx;
 
   if (policy.mode === "nodes") return { cmd: `go nodes ${policy.nodes}`, hardStopMs: budget };
   if (policy.mode === "fixed" || policy.mode === "fraction") return { cmd: `go movetime ${budget}` };
 
   // engine / pace need a real clock; without one they degrade to a budget.
   if (!clock) return { cmd: `go movetime ${budget}` };
+
+  // Low enough that the engine's own manager has (nearly) nothing left to
+  // allocate: stop delegating and spend the budget ourselves. It has to be a
+  // REPLACEMENT — a `movetime` alongside `wtime` is only ever a ceiling, so
+  // appending one here would still leave a 2ms search (verified in
+  // `pnpm test:time`).
+  if (remainingMs <= takeoverBelowMs(policy, overheadMs)) {
+    return { cmd: `go movetime ${budget}` };
+  }
+
   const w = Math.max(50, Math.floor(clock.whiteMs));
   const b = Math.max(50, Math.floor(clock.blackMs));
   const inc = Math.max(0, Math.floor(clock.incMs));

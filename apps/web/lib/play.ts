@@ -13,7 +13,7 @@ import {
 import { SERVER_WS } from "./config";
 import { BrowserEngine, type EngineInfo } from "./engine";
 import { bookMove } from "./openings";
-import { budgetMs, goCommand, moveOverheadMs } from "./timePolicy";
+import { budgetMs, goCommand, MAX_MOVE_OVERHEAD_MS, moveOverheadMs } from "./timePolicy";
 import { anyLegalUci, replayHistory, toStandardUci, type Replay } from "./uci";
 
 export type PlayHandlers = {
@@ -241,15 +241,20 @@ export function playSeat(
                 ? m.deadline_server_ms - serverOffsetMs - Date.now()
                 : undefined;
             const policy = getBrowserBotConfig().time;
+            const remainingMs = ourMs ?? movetimeMs * 20;
             const plan = goCommand(policy, {
               clock: c
                 ? { whiteMs: c.white_ms, blackMs: c.black_ms, incMs: c.increment_ms ?? 0 }
                 : null,
               budgetMs: budgetMs(policy, {
-                remainingMs: ourMs ?? movetimeMs * 20,
+                remainingMs,
                 incrementMs: c?.increment_ms ?? 0,
                 deadlineInMs,
               }),
+              remainingMs,
+              // What the engine actually has set: the scaled value once
+              // `game_start` has landed, else the cautious handshake default.
+              overheadMs: overheadMs ?? MAX_MOVE_OVERHEAD_MS,
             });
             // The seat's eval bar rides on the search it is already running for
             // its own move (#39), so it has to survive the time policy taking

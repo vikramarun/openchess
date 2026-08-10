@@ -290,9 +290,29 @@ wallet.
 - **A `movetime` alongside `wtime`/`btime` is a CEILING, never a floor.**
   Verified: `go wtime 10000 btime 10000 movetime 1000` still spends 2ms. So
   `--max-move-ms` works, but nothing of that shape can lift an engine off the
-  collapse above — raising a floor means *replacing* the command with a bare
-  `go movetime N` (which is exact: 500 → 501ms). That is the delegation-takeover
-  work, and it is why `engine`/`pace` collapse while `fixed`/`fraction` don't.
+  collapse above — a floor means *replacing* the command with a bare
+  `go movetime N` (which is exact: 500 → 501ms). It is why `engine`/`pace`
+  collapse where `fixed`/`fraction` never did, and why the fix is a **takeover**
+  rather than a clamp: below the threshold the seat budgets the move itself and
+  the engine's manager is not consulted at all.
+- **Where the seat stops delegating is DERIVED, not picked.**
+  `takeoverBelowMs` (and `net.rs takeover_below_ms`) is
+  `Move Overhead × (2 + movestogo) × TAKEOVER_FACTOR` — the first part is
+  exactly where Stockfish's allocation reaches zero, the factor (2) covers the
+  band just above it where the allocation is merely bad. The two clients play
+  the same games at the same time controls, so **the two must agree**;
+  `the_two_clients_agree_on_where_the_engine_dies` is the pin, and there is no
+  cross-language test, so a change to one is a change to both. Shipped result:
+  no clock value at any lobby time control produces a sub-50ms search any more
+  (1+0 delegates to 6.2s then budgets; 5+0 and 10+0 hand over below 26s).
+  The factor is **provisional** — it was chosen against measured allocations,
+  not a match result, and the time-based bench arm is what should tune it.
+  Note `pace` moves this threshold because it states its own `movestogo`: a
+  taste knob reaching a safety property is exactly the coupling that made the
+  original bug so hard to see, and it is why `pace` is slated to go.
+  On the native side the takeover is **opt-in** (`--min-move-ms`, off by
+  default, set by `house-bot.sh`): a connected engine's time manager belongs to
+  its author, and the threshold assumes Stockfish-style allocation.
 - **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is
   `has_insufficient_material(flagged.opposite())` — not `is_insufficient_material()`,
   which shakmaty defines as *neither* side being able to mate. Asking the latter
