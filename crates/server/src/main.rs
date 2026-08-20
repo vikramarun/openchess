@@ -482,13 +482,26 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/game/{game_id}", get(ws::ws_handler))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = std::env::var("BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("chess-server listening on http://{addr}");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown({
+            let state = state.clone();
+            async move {
+                shutdown_signal().await;
+                // BEFORE handing back to axum, not after. Axum's graceful
+                // shutdown waits for open connections, and a live game holds an
+                // upgraded WebSocket that never closes on its own — so a drain
+                // placed after the `serve` future would not run until Fly's
+                // kill timeout had already fired. Draining here also gives each
+                // socket a real `GameOver` and lets the room drop its channels,
+                // which is what makes those connections close at all.
+                drain_live_rooms(&state).await;
+            }
+        })
         .await?;
     Ok(())
 }
@@ -812,6 +825,72 @@ async fn cleanup_task(state: AppState, rx: Arc<tokio::sync::Mutex<mpsc::Receiver
         state.0.tokens.lock().retain(|_, (g, _)| *g != game_id);
         state.0.agents.game_ended(game_id);
         tracing::debug!(%game_id, "evicted finished game state");
+    }
+}
+
+/// How long the shutdown drain may spend ending live games. Must stay well
+/// under Fly's `kill_timeout` (see fly.toml) or the process is killed mid-drain
+/// and the games it had not reached are back to the 24h-claimTimeout path.
+const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// End every live game before the process exits, so a wagered stake settles now
+/// instead of staying locked until the contract's 24h `claimTimeout`.
+///
+/// Without this a restart simply killed every room actor: no outcome was
+/// produced, nothing reached the settlement outbox, and the stake sat locked
+/// until a player noticed (`unsettled_wagered_games` only surfaces it after six
+/// hours) and claimed the refund by hand. Now each game ends as an unrated
+/// aborted draw and its refund is enqueued durably.
+///
+/// **Durable, not onchain.** The ack means the result is committed to Postgres
+/// and sitting in the settlement outbox; the worker that drains it onchain is
+/// about to die with the process, and the next boot picks the rows up. Blocking
+/// shutdown on real transactions would need seconds per game and would blow the
+/// kill timeout — the outbox exists precisely so we don't have to.
+async fn drain_live_rooms(state: &AppState) {
+    let rooms: Vec<(GameId, mpsc::Sender<room::RoomCmd>)> = state
+        .0
+        .rooms
+        .lock()
+        .iter()
+        .map(|(id, h)| (*id, h.cmd_tx.clone()))
+        .collect();
+    if rooms.is_empty() {
+        return;
+    }
+    tracing::info!(games = rooms.len(), "shutdown: draining live games");
+
+    // Concurrently: these are Postgres writes and a local signature, so the
+    // whole set should finish in well under the budget. One slow room must not
+    // spend the budget the others need.
+    let drained = tokio::time::timeout(
+        DRAIN_BUDGET,
+        futures_util::future::join_all(rooms.into_iter().map(|(_id, tx)| async move {
+            let (resp, rx) = tokio::sync::oneshot::channel();
+            if tx.send(room::RoomCmd::Shutdown { resp }).await.is_err() {
+                return false; // room already gone: nothing left to settle
+            }
+            rx.await.is_ok()
+        })),
+    )
+    .await;
+
+    match drained {
+        Ok(results) => {
+            let ok = results.iter().filter(|r| **r).count();
+            tracing::info!(drained = ok, "shutdown: live games ended and settlements enqueued");
+        }
+        Err(_) => {
+            // Whatever was not reached falls back to the pre-existing path:
+            // recoverable, but only via the contract timeout.
+            tracing::error!(
+                "shutdown: drain exceeded {DRAIN_BUDGET:?}; some stakes will wait for claimTimeout"
+            );
+            alert::fire(
+                "⚠️ OpenChess: the shutdown drain timed out. Some live games did not settle                  and their stakes are locked until the contract's claimTimeout."
+                    .to_string(),
+            );
+        }
     }
 }
 

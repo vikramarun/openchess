@@ -352,6 +352,28 @@ wallet.
   wagmi; that's the fix if it shows up there.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
+- **A restart ends every live game, and it must SETTLE them on the way out.**
+  Rooms are per-process actors, so a restart kills them — and before the
+  shutdown drain that produced no outcome at all: nothing reached the
+  settlement outbox, and both stakes stayed locked until the escrow's 24h
+  `claimTimeout`, with `unsettled_wagered_games` only surfacing the game to a
+  player six hours later to claim by hand. `drain_live_rooms` (`main.rs`) now
+  sends every room a `RoomCmd::Shutdown`, which ends the game as an aborted
+  draw — a refund — and enqueues it durably. Four things to keep. It runs
+  **inside the graceful-shutdown future, before it resolves**, because axum
+  waits for open connections and a live game holds an upgraded WebSocket that
+  never closes on its own; placed after `serve().await` it would not run until
+  Fly's kill timeout had already fired. The drain is what makes those sockets
+  close at all (the room drops its seat channels, the writer sends `Close`), so
+  the room actor has to actually exit — that is `Room::closing`. The abort is
+  **unrated whatever the ply count** (`finish_inner(.., rate: false)`): the
+  usual `contested` rule would put a draw on the record of someone who was
+  winning a 40-move game because we deployed. And the ack means DURABLE, not
+  onchain — the outbox row survives and the next boot settles it, since
+  blocking shutdown on real transactions would blow the kill timeout.
+  `DRAIN_BUDGET` (10s) must stay under `kill_timeout` in `fly.toml` (20s;
+  Fly's default of 5s is shorter than the drain). None of this covers a hard
+  kill or a panic — the contract timeout is still the backstop for those.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
   `main`). The Fly server needs `./scripts/deploy-server.sh`, and the house bot
   needs `fly deploy --config fly.housebot.toml --ha=false`. A change to

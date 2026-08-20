@@ -23,6 +23,13 @@
 app = "openchess"
 primary_region = "iad"
 
+# Time the server gets after SIGTERM before Fly kills it. MUST exceed
+# `DRAIN_BUDGET` in crates/server/src/main.rs (10s), because that drain is what
+# ends live games and enqueues their refunds — a stake it doesn't reach stays
+# locked until the escrow's 24h claimTimeout. Fly's default is 5s, which is
+# shorter than the drain and would cut it off partway through.
+kill_timeout = "20s"
+
 [build]
   dockerfile = "Dockerfile"
 

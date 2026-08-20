@@ -64,6 +64,11 @@ pub enum RoomCmd {
     /// A spectator joined: reply with the current game state so it can rebuild
     /// the board from the full move history (it otherwise only sees new moves).
     Snapshot { resp: oneshot::Sender<Snapshot> },
+    /// The process is going away: end this game as an aborted draw so a wagered
+    /// stake settles now instead of sitting locked until the contract's 24h
+    /// `claimTimeout`. Acks once the result is DURABLE (persisted + enqueued),
+    /// not once it is onchain — see `Room::shutdown`.
+    Shutdown { resp: oneshot::Sender<()> },
 }
 
 /// Current game state for a mid-join spectator.
@@ -116,6 +121,7 @@ pub fn spawn_room(
         bready: false,
         wrejects: 0,
         brejects: 0,
+        closing: false,
         started: false,
         started_flag: started_flag.clone(),
         spectate: spectate_tx.clone(),
@@ -154,6 +160,10 @@ struct Room {
     /// pointless loop from crowding out the frames the client actually needs.
     wrejects: u32,
     brejects: u32,
+    /// Set by `RoomCmd::Shutdown`, so the actor exits its loop and drops the
+    /// seat channels — which is what makes each player's socket send `Close`
+    /// rather than hang while the process tears down around it.
+    closing: bool,
     started: bool,
     started_flag: Arc<AtomicBool>,
     spectate: broadcast::Sender<ServerMessage>,
@@ -242,6 +252,10 @@ impl Room {
                 _ = tick.tick() => {
                     self.on_tick().await;
                 }
+            }
+            // Told to go away: the result is already recorded and delivered.
+            if self.closing {
+                break;
             }
             // Stop once the game is finished and the result has been delivered.
             if self.started && self.game.as_ref().map(|g| g.is_over()).unwrap_or(false) {
@@ -346,6 +360,10 @@ impl Room {
                     }
                 }
                 tracing::info!(game_id = %self.game_id, ?color, "player detached");
+            }
+            RoomCmd::Shutdown { resp } => {
+                self.shutdown().await;
+                let _ = resp.send(());
             }
             RoomCmd::Ready { color } => {
                 match color {
@@ -622,7 +640,43 @@ impl Room {
         );
     }
 
+    /// End this game because the SERVER is going away, not because anything
+    /// happened on the board.
+    ///
+    /// An aborted draw refunds a wagered stake, and routing it through `finish`
+    /// enqueues that settlement durably — so a deploy costs the players a
+    /// restart instead of leaving both stakes locked until the contract's 24h
+    /// `claimTimeout` with nothing enqueued to retry (the room actor dies with
+    /// the process, so no outcome is ever produced otherwise).
+    ///
+    /// **Unrated, whatever the ply count.** `finish`'s usual `contested` rule
+    /// would move both players' Elo at ply ≥ 2, which for a game 40 moves deep
+    /// means someone who was winning takes a draw on their record because we
+    /// deployed. The refund is right; the rating change is not ours to make.
+    async fn shutdown(&mut self) {
+        if self.game.as_ref().map(|g| g.is_over()).unwrap_or(false) {
+            self.closing = true;
+            return; // already resolved; its settlement is already enqueued
+        }
+        tracing::info!(game_id = %self.game_id, "shutdown: aborting live game so its stake settles");
+        self.finish_inner(
+            GameResult {
+                winner: None,
+                reason: GameEndReason::Aborted,
+            },
+            false,
+        )
+        .await;
+        self.closing = true;
+    }
+
     async fn finish(&mut self, result: GameResult) {
+        self.finish_inner(result, true).await
+    }
+
+    /// `rate: false` suppresses the Elo write regardless of ply — see
+    /// `shutdown`, the only caller that passes it.
+    async fn finish_inner(&mut self, result: GameResult, rate: bool) {
         // A never-started game (a no-show forfeit / abort reaped in `run`) has
         // no board: settle with an empty move log and ply 0 (never rated).
         let (pgn, ply) = match self.game.as_ref() {
@@ -635,7 +689,7 @@ impl Room {
         // LOSES the game/stake, but their Elo is untouched. Applies to every
         // mode. Note this decides WHETHER a rating moves; `games.rated` (set at
         // creation) decides WHICH ladder it moves.
-        let contested = ply >= 2;
+        let contested = rate && ply >= 2;
         // Cryptographic commitment to the full game (move log via PGN).
         let result_hash = sha256_hex(&pgn);
         // Oracle-sign it now (before persisting) so the signature is stored with
@@ -894,6 +948,135 @@ mod tests {
                 || tokio::time::timeout(Duration::from_secs(2), rx).await.is_ok(),
             "a snapshot must not hang behind a stalled seat"
         );
+    }
+
+    /// A restart must not strand a live stake.
+    ///
+    /// The room actor dies with the process, so before this a restart produced
+    /// no outcome at all: nothing reached the settlement outbox and both stakes
+    /// stayed locked until the contract's 24h `claimTimeout`, with the players
+    /// left to notice and claim by hand. The drain ends each game as an aborted
+    /// draw, which refunds.
+    #[tokio::test]
+    async fn shutdown_settles_a_live_staked_game_instead_of_stranding_it() {
+        /// Records what the server asked the chain to do.
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<(uuid::Uuid, Option<Address>)>>);
+        #[async_trait::async_trait]
+        impl ledger::SettlementSink for Recorder {
+            async fn open_escrow(
+                &self,
+                _g: uuid::Uuid,
+                _w: Address,
+                _b: Address,
+                _s: ledger::U256,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn report_result(
+                &self,
+                game_id: uuid::Uuid,
+                winner: Option<Address>,
+            ) -> anyhow::Result<()> {
+                self.0.lock().unwrap().push((game_id, winner));
+                Ok(())
+            }
+            fn is_onchain(&self) -> bool {
+                true
+            }
+        }
+
+        let sink = Arc::new(Recorder::default());
+        let (cleanup_tx, _cleanup_rx) = mpsc::channel(8);
+        let (results_tx, mut results_rx) = mpsc::channel(8);
+        let game_id = uuid::Uuid::new_v4();
+        let handle = spawn_room(
+            game_id,
+            TimeControl {
+                initial_ms: 600_000,
+                increment_ms: 0,
+            },
+            sink.clone(),
+            Some(StakeInfo {
+                white: Address::from([0x11; 20]),
+                black: Address::from([0x22; 20]),
+            }),
+            [
+                protocol::OpponentInfo {
+                    name: "white".into(),
+                    username: None,
+                    declared_engine: None,
+                },
+                protocol::OpponentInfo {
+                    name: "black".into(),
+                    username: None,
+                    declared_engine: None,
+                },
+            ],
+            None,
+            cleanup_tx,
+            results_tx,
+        );
+
+        // A real game, under way and nowhere near its clock.
+        let mut outs = Vec::new();
+        for color in [Color::White, Color::Black] {
+            let (tx, rx) = mpsc::channel::<ServerMessage>(64);
+            let (resp, ack) = oneshot::channel();
+            handle
+                .cmd_tx
+                .send(RoomCmd::AttachPlayer {
+                    color,
+                    out: tx,
+                    resp,
+                })
+                .await
+                .unwrap();
+            assert!(ack.await.unwrap());
+            outs.push(rx);
+            handle.cmd_tx.send(RoomCmd::Ready { color }).await.unwrap();
+        }
+        for (color, mv) in [(Color::White, "e2e4"), (Color::Black, "e7e5")] {
+            handle
+                .cmd_tx
+                .send(RoomCmd::Move {
+                    color,
+                    ply: 0,
+                    uci_move: mv.into(),
+                })
+                .await
+                .unwrap();
+        }
+
+        // The server goes away.
+        let (resp, ack) = oneshot::channel();
+        handle.cmd_tx.send(RoomCmd::Shutdown { resp }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), ack)
+            .await
+            .expect("the drain must not hang")
+            .expect("the room acks its shutdown");
+
+        // The stake was refunded, not left locked: a draw settles both sides.
+        let calls = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(game_id, None)],
+            "a drained game must settle as a refund"
+        );
+
+        // The outcome is a draw that nobody played, and the room let go of its
+        // seats so the sockets can close rather than hang through teardown.
+        let outcome = results_rx.recv().await.expect("an outcome");
+        assert_eq!(outcome.game_id, game_id);
+        assert_eq!(outcome.winner, None);
+        for mut rx in outs {
+            let saw_game_over = std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|m| matches!(m, ServerMessage::GameOver { .. }));
+            assert!(saw_game_over, "each seat is told the game ended");
+        }
+        tokio::time::timeout(Duration::from_secs(5), handle.cmd_tx.closed())
+            .await
+            .expect("the room task must exit so its channels drop");
     }
 
     #[test]
