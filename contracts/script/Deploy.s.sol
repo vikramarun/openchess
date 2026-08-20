@@ -20,13 +20,14 @@ interface VmScript {
 ///     --rpc-url $BASE_SEPOLIA_RPC --private-key $DEPLOYER_KEY --broadcast --verify
 ///
 /// Base mainnet:
-///   ORACLE=0x.. FEE_RECIPIENT=0x.. FEE_BPS=100 SETTLE_TIMEOUT=86400 \
+///   ORACLE=0x.. FEE_RECIPIENT=0x.. FEE_BPS=100 SETTLE_TIMEOUT=86400 ENTRY_WINDOW=14400 \
 ///   forge script script/Deploy.s.sol:Deploy \
 ///     --rpc-url $BASE_RPC --private-key $DEPLOYER_KEY --broadcast --verify
 ///
 /// `TOKEN` defaults to the canonical Circle USDC for the connected chain
 /// (Base mainnet / Base Sepolia); override for anything else. `FEE_RECIPIENT`
-/// defaults to ORACLE, `FEE_BPS` to 100 (1%), `SETTLE_TIMEOUT` to 24h.
+/// defaults to ORACLE, `FEE_BPS` to 100 (1%), `SETTLE_TIMEOUT` to 24h, and
+/// `ENTRY_WINDOW` to 4h (it must be strictly less than `SETTLE_TIMEOUT`).
 contract Deploy {
     VmScript constant vm = VmScript(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
 
@@ -41,9 +42,12 @@ contract Deploy {
         address feeRecipient = vm.envOr("FEE_RECIPIENT", oracle);
         uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(100))); // 1%
         uint64 settleTimeout = uint64(vm.envOr("SETTLE_TIMEOUT", uint256(86400))); // 24h
+        // Entries close well before settlement must happen, leaving the rest of
+        // the window for the games themselves. Default 4h of a 24h window.
+        uint64 entryWindow = uint64(vm.envOr("ENTRY_WINDOW", uint256(4 * 3600)));
 
         vm.startBroadcast();
-        escrow = new ChessEscrow(token, oracle, feeRecipient, feeBps, settleTimeout);
+        escrow = new ChessEscrow(token, oracle, feeRecipient, feeBps, settleTimeout, entryWindow);
         vm.stopBroadcast();
     }
 }

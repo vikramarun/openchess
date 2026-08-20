@@ -67,7 +67,45 @@ const MAX_TOURNAMENT_PLAYERS: usize = 128;
 /// `sponsorTournament`'s own docs warn that sponsorship is irrevocable.
 const MIN_OPEN_ENTRY_FEE: u128 = 1_000_000;
 
+/// Plies of increment to budget per game when sizing a tournament's schedule
+/// against the contract's settle window.
+///
+/// A game's worst case is `2 × initial + plies × increment`, and `plies` has no
+/// tight bound (the fifty-move rule permits absurd games), so this is an
+/// explicit, generous approximation rather than a proof: 200 plies is 100 moves
+/// a side, past where all but a small tail of real games end.
+const SCHEDULE_PLY_BUDGET: u64 = 200;
+
+/// Fraction of the remaining settle window a schedule is allowed to fill,
+/// as a percentage. The slack absorbs the approximation above plus dispatch,
+/// settlement and RPC latency.
+const SCHEDULE_MARGIN_PCT: u64 = 80;
+
+/// Worst-case seconds for a full round-robin: rounds × (both clocks + budgeted
+/// increment + the no-show reap window). Rounds are sequential — the next one
+/// is dispatched only when the last resolves — so they add rather than overlap.
+fn worst_case_schedule_secs(players: usize, initial_secs: u64, increment_secs: u64) -> u64 {
+    let rounds = round_robin_rounds(players).len() as u64;
+    let per_game = initial_secs
+        .saturating_mul(2)
+        .saturating_add(increment_secs.saturating_mul(SCHEDULE_PLY_BUDGET))
+        .saturating_add(crate::room::START_WINDOW.as_secs());
+    rounds.saturating_mul(per_game)
+}
+
+/// Unix seconds, for comparing against the contract's own deadlines.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 const OFFER_TTL: Duration = Duration::from_secs(3600);
+/// How long an offer may sit in `matching` before the sweep may reclaim it.
+/// Covers escrow-open plus room creation with room to spare; see
+/// `Lobby::sweep_expired` for why it must exceed the room's `START_WINDOW`.
+const MATCHING_LEASE: Duration = Duration::from_secs(300);
 const TICKET_TTL: Duration = Duration::from_secs(3600);
 const TOURNEY_TTL: Duration = Duration::from_secs(24 * 3600);
 const GAUNTLET_TTL: Duration = Duration::from_secs(24 * 3600);
@@ -86,16 +124,69 @@ pub struct Lobby {
 }
 
 impl Lobby {
-    pub fn sweep_expired(&self) {
-        self.park
-            .lock()
-            .retain(|_, o| o.created_at.elapsed() < OFFER_TTL);
-        self.tickets
-            .lock()
-            .retain(|_, t| t.created_at.elapsed() < TICKET_TTL);
-        self.tournaments
-            .lock()
-            .retain(|_, t| t.created_at.elapsed() < TOURNEY_TTL);
+    /// Expire stale lobby state — **by lifecycle state, never by age alone**.
+    ///
+    /// Age was the only predicate here once, and it deleted objects that had a
+    /// game attached to them. The park case cost a player their whole stake:
+    /// `park_accept` flips an offer to `matching`, releases the lock, and then
+    /// awaits escrow-open and room creation, writing the poster's launch token
+    /// only afterwards and only `if let Some(offer)`. A sweep landing inside
+    /// that await deleted the row, so the token was never stored, `park_get`
+    /// answered `not_found`, and the poster had no other way to reach their
+    /// seat. Sixty seconds later the room reaped them as a no-show and
+    /// `reap_forfeit_winner` handed the acceptor the win and the entire pot —
+    /// a player who was sitting right there, refreshing, lost the stake to a
+    /// timer. Timing an accept against an offer near its TTL made that
+    /// repeatable, and an honest accept near the hour mark hit it by accident.
+    ///
+    /// So: an offer is discardable only while nobody has committed anything to
+    /// it. `matching` is in flight, and `matched` owns a token the poster may
+    /// not have collected yet — neither may be dropped on a clock.
+    ///
+    /// `live` is the set of games with a room still resident, and it is what
+    /// makes a bound possible at all: a `matched` offer is released once its
+    /// game is gone, so the row lives exactly as long as the thing it points
+    /// at rather than forever.
+    pub fn sweep_expired(&self, live: &std::collections::HashSet<GameId>) {
+        self.park.lock().retain(|_, o| match o.status.as_str() {
+            // In flight. The lease is the only bound, and it is deliberately
+            // far longer than the work it covers (escrow open + room creation,
+            // seconds) — past it the accept task is dead, and the room it may
+            // have created has already reaped itself through the 60s
+            // START_WINDOW, so there is no live seat left to strand.
+            "matching" => o
+                .matching_since
+                .is_none_or(|t| t.elapsed() < MATCHING_LEASE),
+            // Holds the poster's launch token: keep it while the game exists.
+            "matched" => o.game_id.is_some_and(|g| live.contains(&g)),
+            // Nothing committed — the original TTL applies.
+            _ => o.created_at.elapsed() < OFFER_TTL,
+        });
+        self.tickets.lock().retain(|_, t| {
+            // Being paired right now: `queue_join` leaves a ticket `waiting`
+            // while it awaits escrow-open and room creation, so status alone
+            // cannot tell an idle ticket from one mid-pairing.
+            if t.matching_since
+                .is_some_and(|at| at.elapsed() < MATCHING_LEASE)
+            {
+                return true;
+            }
+            match t.status.as_str() {
+                "matched" => t.game_id.is_some_and(|g| live.contains(&g)),
+                _ => t.created_at.elapsed() < TICKET_TTL,
+            }
+        });
+        self.tournaments.lock().retain(|_, t| {
+            // A running or paused event owns real games and, if it charged a
+            // buy-in, a real onchain pool. Deleting it mid-flight orphans every
+            // outcome still to come and abandons the pool to `claimRefund`.
+            // It is also reachable on the clock: a full 128-entrant field plays
+            // 127 sequential rounds, which does not fit in TOURNEY_TTL.
+            if matches!(t.status.as_str(), "running" | "paused") {
+                return true;
+            }
+            t.created_at.elapsed() < TOURNEY_TTL
+        });
         self.gauntlets
             .lock()
             .retain(|_, g| g.created_at.elapsed() < GAUNTLET_TTL);
@@ -180,7 +271,13 @@ impl Lobby {
                     g.result = Some(winner);
                     score_pair(&mut t.scores, &w, &b, winner);
                 }
-                if t.status == "running" {
+                // Never advance while a round is still being dispatched: the
+                // counter still describes the PREVIOUS round, so a decrement
+                // can reach zero and start the next round concurrently with the
+                // loop creating this one. `dispatch_round` reconciles the
+                // counter when it finishes and `dispatch_from_current` advances
+                // on a zero, so the advance is deferred, not dropped.
+                if t.status == "running" && !t.dispatching {
                     t.round_remaining = t.round_remaining.saturating_sub(1);
                     if t.round_remaining == 0 {
                         t.current_round += 1; // move to the next round to dispatch
@@ -387,6 +484,10 @@ struct ParkOffer {
     /// casual offers. Not exposed to clients.
     owner_key: String,
     created_at: Instant,
+    /// When this offer entered `matching`, i.e. when an acceptor committed to
+    /// it. Bounds how long the sweep must leave an in-flight offer alone
+    /// (`MATCHING_LEASE`); `None` in every other state.
+    matching_since: Option<Instant>,
 }
 
 #[derive(Deserialize)]
@@ -513,6 +614,7 @@ async fn park_create(
                 owner_key,
                 opponent: None,
                 created_at: Instant::now(),
+                matching_since: None,
             },
         );
     }
@@ -654,6 +756,7 @@ async fn park_accept(
             return Err(StatusCode::CONFLICT);
         }
         offer.status = "matching".into();
+        offer.matching_since = Some(Instant::now());
         (
             offer.poster_addr.clone(),
             SeatMeta {
@@ -676,6 +779,7 @@ async fn park_accept(
     let unclaim = || {
         if let Some(o) = state.0.lobby.park.lock().get_mut(&id) {
             o.status = "open".into();
+            o.matching_since = None;
         }
     };
     // Wallets whose agents we claimed; any failure before the game exists
@@ -823,13 +927,42 @@ async fn park_accept(
     let [poster_token, acceptor_token] = seats(poster_white, resp.white_token, resp.black_token);
     let [poster_color, acceptor_color] = seats(poster_white, "white", "black");
 
-    if let Some(offer) = state.0.lobby.park.lock().get_mut(&id) {
-        offer.status = "matched".into();
-        offer.game_id = Some(resp.game_id);
-        // A bot-held seat's token stays server-side — the agent has it.
-        offer.poster_token = (!poster_bot).then(|| poster_token.clone());
-        offer.poster_color = Some(poster_color.into());
-        offer.opponent = Some(resp.players[acceptor_idx].clone());
+    // The offer MUST still be here. `sweep_expired` no longer age-deletes a
+    // `matching` row, so its absence means something removed it out from under
+    // a committed accept (a cancel racing the claim, a future edit to the
+    // sweep). Handing the acceptor a token while the poster's is dropped on the
+    // floor is precisely the forfeit this finding is about, so abort the game
+    // and refund instead — a failed accept costs a retry, a half-delivered one
+    // costs the poster their stake.
+    // One acquisition: the offer becomes `matched` and gains the poster's token
+    // in the same critical section, so there is no instant at which it claims a
+    // game it cannot hand a seat for.
+    let stored = {
+        let mut park = state.0.lobby.park.lock();
+        match park.get_mut(&id) {
+            Some(offer) => {
+                offer.status = "matched".into();
+                offer.matching_since = None;
+                offer.game_id = Some(resp.game_id);
+                // A bot-held seat's token stays server-side — the agent has it.
+                offer.poster_token = (!poster_bot).then(|| poster_token.clone());
+                offer.poster_color = Some(poster_color.into());
+                offer.opponent = Some(resp.players[acceptor_idx].clone());
+                true
+            }
+            None => false,
+        }
+    };
+    if !stored {
+        tracing::error!(
+            offer = %id,
+            game_id = %resp.game_id,
+            "park offer vanished after the room was created — aborting rather than \
+             stranding the poster's seat"
+        );
+        state.abort_started_game(resp.game_id, wager).await;
+        release(&claimed);
+        return Err(StatusCode::CONFLICT);
     }
     Ok(Json(ParkAcceptResp {
         game_id: resp.game_id,
@@ -929,6 +1062,12 @@ struct Ticket {
     /// UCI option overrides for a bot seat, relayed to the agent on dispatch.
     uci_options: Vec<(String, String)>,
     created_at: Instant,
+    /// When this ticket was pulled out of the queue to be paired, i.e. when a
+    /// game started being created for it. Same job as `ParkOffer::matching_since`
+    /// and for the same reason: the ticket stays `waiting` across
+    /// `start_game`'s awaits, so without this the age sweep could delete it
+    /// mid-pairing and the player would never receive their launch token.
+    matching_since: Option<Instant>,
 }
 
 #[derive(Deserialize)]
@@ -1040,6 +1179,7 @@ async fn queue_join(
             seat_bot: bot,
             uci_options: my_uci.clone(),
             created_at: Instant::now(),
+            matching_since: None,
         },
     );
 
@@ -1102,6 +1242,20 @@ async fn queue_join(
         state.0.lobby.tickets.lock().remove(&my_id);
         code
     };
+
+    // Both tickets are now committed to this pairing and will stay `waiting`
+    // in the map until the game exists. Stamp the lease so the age sweep leaves
+    // them alone in the meantime — deleting one here loses its launch token,
+    // and a player who cannot reach their seat is reaped as a no-show and
+    // forfeits the stake (the park-side version of this is H-02).
+    {
+        let mut tickets = state.0.lobby.tickets.lock();
+        for id in [opp_id, my_id] {
+            if let Some(t) = tickets.get_mut(&id) {
+                t.matching_since = Some(Instant::now());
+            }
+        }
+    }
 
     // Guard a stopped gauntlet session from being dragged into a NEW wagered
     // game right before we commit. The entry check (~"status != running" above)
@@ -1262,12 +1416,14 @@ async fn queue_join(
     let mut tickets = state.0.lobby.tickets.lock();
     if let Some(t) = tickets.get_mut(&opp_id) {
         t.status = "matched".into();
+        t.matching_since = None;
         t.game_id = Some(resp.game_id);
         t.token = (!opp_bot).then_some(opp_token);
         t.color = Some(opp_side.into());
     }
     if let Some(t) = tickets.get_mut(&my_id) {
         t.status = "matched".into();
+        t.matching_since = None;
         t.game_id = Some(resp.game_id);
         t.token = (!bot).then_some(my_token);
         t.color = Some(my_side.into());
@@ -1498,6 +1654,18 @@ struct Tournament {
     /// Real (non-forfeit) games still unfinished in the current round; when it
     /// hits 0 the next round is dispatched (or the pool settles).
     round_remaining: usize,
+    /// True while `dispatch_round` is mid-loop for this tournament.
+    ///
+    /// Games are now registered before their seats are deliverable, so one CAN
+    /// finish while later pairings of the same round are still being created.
+    /// Its result must be recorded — that is the whole point — but the round
+    /// must not ADVANCE from underneath the loop: `round_remaining` still holds
+    /// the previous round's count, so a decrement can reach zero and fire
+    /// `AdvanceTournament`, dispatching the next round concurrently with this
+    /// one. `dispatch_round` reconciles `round_remaining` when it finishes and
+    /// `dispatch_from_current` advances on a zero, so nothing is lost by
+    /// waiting.
+    dispatching: bool,
     /// Pairings awarded without a game (a bot seat that was offline at its
     /// round's dispatch). They score exactly like a played game, so a standings
     /// table that omitted them would not add up — every point has to be
@@ -1826,6 +1994,7 @@ async fn tourney_create(
             rounds: Vec::new(),
             current_round: 0,
             round_remaining: 0,
+            dispatching: false,
             forfeits: Vec::new(),
             entrant_bots: HashMap::new(),
             entrant_engines: HashMap::new(),
@@ -2129,6 +2298,20 @@ async fn tourney_join_inner(
     }
     if full {
         return Err(StatusCode::CONFLICT); // entrant cap reached
+    }
+    // Past the contract's entry window this join can only fail, and failing at
+    // the door beats failing as a reverted oracle transaction: `enterTournament`
+    // now refuses late entries, and before the redeploy that added that refusal
+    // the entry would have "succeeded" into an event with no time left to be
+    // settled. Only meaningful for a real pool — a casual event has no chain
+    // state and `tournament_deadlines` returns None.
+    if state.0.settlement.is_onchain() {
+        if let Some((entry_deadline, _)) = state.0.settlement.tournament_deadlines(id).await {
+            if unix_now() > entry_deadline {
+                tracing::info!(tournament = %id, "refusing a join past the entry window");
+                return Err(StatusCode::CONFLICT);
+            }
+        }
     }
 
     let bot = is_bot_seat(&req.seat);
@@ -3145,9 +3328,49 @@ async fn tourney_start(
         }
     }
 
+    // Refuse a schedule that cannot finish inside the contract's settle window.
+    //
+    // The settle clock starts at `openTournament` — creation, not start — and
+    // both settle paths revert permanently once it lapses, while `claimRefund`
+    // opens at the same instant. An event that runs past it therefore cannot
+    // pay its winners at all: the standings are discarded and everyone takes
+    // their buy-in back. That is reachable without any malice (a full 128-entrant
+    // field plays 127 sequential rounds, which does not fit in 24h at most time
+    // controls) and deliberately: an organizer who waits until the window is
+    // nearly gone before starting hands any participant the ability to push the
+    // event over the edge just by using the clock they are entitled to.
+    //
+    // Checked here rather than at creation because this is where the field size
+    // is finally known, and re-checked against the LIVE deadline so a
+    // long-filling event is measured from now, not from when it opened.
+    if state.0.settlement.is_onchain() {
+        let terms = {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+            (t.players.len(), t.initial_secs, t.increment_secs)
+        };
+        let (players, initial_secs, increment_secs) = terms;
+        if let Some((_, settle_deadline)) = state.0.settlement.tournament_deadlines(id).await {
+            let remaining = settle_deadline.saturating_sub(unix_now());
+            let need = worst_case_schedule_secs(players, initial_secs, increment_secs);
+            let budget = remaining.saturating_mul(SCHEDULE_MARGIN_PCT) / 100;
+            if need > budget {
+                tracing::warn!(
+                    tournament = %id, players, initial_secs, increment_secs,
+                    need_secs = need, budget_secs = budget,
+                    "refusing to start: the schedule cannot finish inside the settle window"
+                );
+                return Err(StatusCode::CONFLICT);
+            }
+        }
+    }
+
+    let fresh_start;
+    let rollback_to;
     {
         let mut ts = state.0.lobby.tournaments.lock();
         let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+        let prev_status = t.status.clone();
         // Buy-in tournaments (money at stake) may only be started by the
         // organizer — an anonymous caller must not lock the field before it
         // fills. Casual tournaments have no pool, so anyone may start.
@@ -3195,7 +3418,32 @@ async fn tourney_start(
             t.current_round = 0;
         }
         t.status = "running".into();
+        // Only a FRESH start begins the onchain clock; a resume is already
+        // started and `startTournament` would revert `AlreadyStarted`.
+        fresh_start = prev_status == "open" && t.buy_in.is_some();
+        rollback_to = prev_status;
     }
+
+    // Begin the onchain settle clock. This is the transition that gives the
+    // games the whole of `settleTimeout` instead of whatever was left after the
+    // field finished filling — see `startTournament` in ChessEscrow.
+    //
+    // On failure roll the status back rather than dispatching: a tournament
+    // running in memory with no onchain start cannot be settled at all (both
+    // settle paths require `startedAt`), so proceeding would play a full
+    // schedule for a pool that can only ever be refunded. The schedule and
+    // scores are rebuilt from scratch on the next attempt, so there is nothing
+    // else to undo.
+    if fresh_start && state.0.settlement.is_onchain() {
+        if let Err(e) = state.0.settlement.start_tournament(id).await {
+            tracing::error!(tournament = %id, "onchain tournament start failed: {e:#}");
+            if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
+                t.status = rollback_to;
+            }
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    }
+
     if let Some(db) = &state.0.db {
         let _ = db.set_tournament_status(id, "running").await;
     }
@@ -3398,7 +3646,11 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
         }
     };
 
-    let mut created: Vec<TourneyGame> = Vec::new();
+    // Held for the whole create loop; see `Tournament::dispatching`.
+    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+        t.dispatching = true;
+    }
+    let mut created: Vec<(GameId, String, String)> = Vec::new();
     let mut forfeits: Vec<(String, String, Option<Color>)> = Vec::new();
     let mut blocked: Option<StatusCode> = None;
     for (white, black) in pairings {
@@ -3415,26 +3667,47 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
         };
         match (wd, bd) {
             (Ok(wd), Ok(bd)) => {
+                // Register outcome routing INSIDE start_game, before either
+                // seat can be played. Doing it after the loop (as this used to)
+                // meant an early pairing was live and resignable while later
+                // pairings were still starting, and an outcome arriving with no
+                // `game_to_tournament` entry is dropped on the floor by
+                // `record_outcome` — `round_remaining` never reaches zero and
+                // the event stalls with its pool open.
+                let register = |gid: GameId, wtok: &str, btok: &str| {
+                    // Routing AND the tournament's own record of the game, in
+                    // one critical section, before either seat is playable.
+                    // Registering only the routing left `record_outcome` able
+                    // to find the tournament but not the game, so it wrote the
+                    // result nowhere and the round still hung.
+                    state.0.lobby.game_to_tournament.lock().insert(gid, tid);
+                    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+                        t.games.push(TourneyGame {
+                            game_id: gid,
+                            white: white.clone(),
+                            black: black.clone(),
+                            round: round_idx,
+                            result: None,
+                            white_token: wtok.to_string(),
+                            black_token: btok.to_string(),
+                        });
+                    }
+                };
                 match state
-                    .start_game(
+                    .start_game_registered(
                         tc,
                         "tournament",
                         None, // the buy-in is a pool, never a per-game wager
                         ladder,
                         [seat_meta(&white), seat_meta(&black)],
                         [wd, bd],
+                        Some(&register),
                     )
                     .await
                 {
-                    Ok(resp) => created.push(TourneyGame {
-                        game_id: resp.game_id,
-                        white: white.clone(),
-                        black: black.clone(),
-                        round: round_idx,
-                        result: None,
-                        white_token: resp.white_token,
-                        black_token: resp.black_token,
-                    }),
+                    // The hook above already pushed this game into `t.games`;
+                    // keep only what the durable write below needs.
+                    Ok(resp) => created.push((resp.game_id, white.clone(), black.clone())),
                     // The agent vanished between the claim and the dispatch:
                     // neither side got to play → score it a draw (start_game has
                     // already aborted the game and refunded any escrow).
@@ -3454,7 +3727,7 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
                     Err(e) => {
                         release(&claimed);
                         blocked = Some(e);
-                        break;
+                        break; // falls through to the reconciliation below
                     }
                 }
             }
@@ -3476,12 +3749,11 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
     // game can't finish in this sub-ms window, but doing it the other way would
     // let a game that finished during dispatch drop its outcome and stall the
     // round forever; this keeps it correct regardless.
-    {
-        let mut map = state.0.lobby.game_to_tournament.lock();
-        for g in &created {
-            map.insert(g.game_id, tid);
-        }
-    }
+    // Every started game is ALREADY in `t.games` with its routing entry (the
+    // hook ran before its seats were deliverable). Re-adding them here would
+    // duplicate a game that finished during the loop — and a duplicate row with
+    // `result: None` keeps the round permanently unresolved. Only the forfeits,
+    // which never had a game at all, are recorded here.
     {
         let mut ts = state.0.lobby.tournaments.lock();
         if let Some(t) = ts.get_mut(&tid) {
@@ -3494,7 +3766,6 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
                     winner: *winner,
                 });
             }
-            t.games.extend(created.iter().cloned());
         }
     }
     let live = {
@@ -3526,15 +3797,17 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
             candidates.iter().filter(|id| map.contains_key(id)).count()
         };
         if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&tid) {
+            // Authoritative: recomputed from what is actually still in flight,
+            // so any decrement `record_outcome` made mid-loop is superseded
+            // rather than double-counted.
             t.round_remaining = live;
+            t.dispatching = false;
         }
         live
     };
     if let Some(db) = &state.0.db {
-        for g in &created {
-            let _ = db
-                .add_tournament_game(tid, g.game_id, &g.white, &g.black)
-                .await;
+        for (gid, w, b) in &created {
+            let _ = db.add_tournament_game(tid, *gid, w, b).await;
         }
     }
     RoundDispatch { live, blocked }
@@ -3949,6 +4222,7 @@ pub async fn recover_tournaments(state: &AppState) {
                     rounds: Vec::new(),
                     current_round: 0,
                     round_remaining: 0,
+            dispatching: false,
                     forfeits: Vec::new(),
                     entrant_bots,
                     entrant_engines: serde_json::from_value(r.entrant_engines).unwrap_or_default(),
@@ -4415,6 +4689,7 @@ mod tests {
             limits: crate::ratelimit::RateLimits::from_env(),
             maintenance: std::sync::atomic::AtomicBool::new(false),
             admin_wallet: Mutex::new(None),
+            admin_configured: false,
             cleanup_tx,
             results_tx,
         }));
@@ -4692,6 +4967,133 @@ mod tests {
         );
     }
 
+    /// H-02: the TTL sweep must never delete an offer that has a game behind
+    /// it. Age alone used to be the whole predicate, so a sweep landing while
+    /// `park_accept` awaited escrow-open dropped the row before the poster's
+    /// launch token was written into it — `park_get` then answered
+    /// `not_found`, the poster could not reach their seat, and 60 seconds
+    /// later the room reaped them as a no-show and paid the acceptor the
+    /// entire stake.
+    ///
+    /// Both surviving states are checked, because they strand the poster by
+    /// different routes: `matching` has no token yet, and `matched` holds the
+    /// only copy of one.
+    #[tokio::test]
+    async fn the_sweep_cannot_delete_an_offer_with_a_game_behind_it() {
+        let (state, _c, _r) = test_state();
+        let poster = player(&state, 1);
+        let acceptor = player(&state, 2);
+
+        let offer_id = park_create(
+            State(state.clone()),
+            poster.clone(),
+            Json(ParkCreateReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .offer_id;
+
+        // An offer nobody has committed to is still discardable on age.
+        {
+            let mut park = state.0.lobby.park.lock();
+            let o = park.get_mut(&offer_id).unwrap();
+            o.created_at = Instant::now() - OFFER_TTL - Duration::from_secs(1);
+        }
+        state.0.lobby.sweep_expired(&Default::default());
+        assert!(
+            !state.0.lobby.park.lock().contains_key(&offer_id),
+            "an untouched open offer past its TTL should still be swept"
+        );
+
+        // Now the real case: an aged offer that an acceptor has committed to.
+        let offer_id = park_create(
+            State(state.clone()),
+            poster.clone(),
+            Json(ParkCreateReq {
+                stake: None,
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .offer_id;
+
+        // Mid-accept: claimed, escrow/room still in flight, no token written.
+        {
+            let mut park = state.0.lobby.park.lock();
+            let o = park.get_mut(&offer_id).unwrap();
+            o.status = "matching".into();
+            o.matching_since = Some(Instant::now());
+            o.created_at = Instant::now() - OFFER_TTL - Duration::from_secs(1);
+        }
+        state.0.lobby.sweep_expired(&Default::default());
+        assert!(
+            state.0.lobby.park.lock().contains_key(&offer_id),
+            "an offer being matched must survive its TTL — deleting it here is \
+             what forfeits the poster's stake"
+        );
+
+        // Hand it back to the real accept path (which requires `open`) so the
+        // `matched` row below is built by production code, not by hand.
+        {
+            let mut park = state.0.lobby.park.lock();
+            let o = park.get_mut(&offer_id).unwrap();
+            o.status = "open".into();
+            o.matching_since = None;
+        }
+        let acc = park_accept(
+            State(state.clone()),
+            Path(offer_id),
+            acceptor,
+            Some(Json(ParkAcceptReq::default())),
+        )
+        .await
+        .expect("accept")
+        .0;
+
+        {
+            let mut park = state.0.lobby.park.lock();
+            let o = park.get_mut(&offer_id).unwrap();
+            assert_eq!(o.status, "matched");
+            o.created_at = Instant::now() - OFFER_TTL - Duration::from_secs(1);
+        }
+
+        // The game is live, so the row that holds the poster's token stays.
+        let live = std::collections::HashSet::from([acc.game_id]);
+        state.0.lobby.sweep_expired(&live);
+        let got = park_get(State(state.clone()), Path(offer_id), poster)
+            .await
+            .expect("offer")
+            .0;
+        assert_eq!(got.status, "matched");
+        assert!(
+            got.token.is_some(),
+            "the poster must still be able to collect their launch token"
+        );
+
+        // Once the game is gone the row has nothing left to protect.
+        state.0.lobby.sweep_expired(&Default::default());
+        assert!(
+            !state.0.lobby.park.lock().contains_key(&offer_id),
+            "a matched offer whose game has ended must not leak"
+        );
+    }
+
     #[tokio::test]
     async fn queue_colour_is_a_coin() {
         // Same bug on the queue side: the player already waiting took White
@@ -4754,6 +5156,63 @@ mod tests {
         assert!(
             first_whites > 0 && first_whites < N,
             "colour must vary across games, got {first_whites}/{N} white for the waiter"
+        );
+    }
+
+    /// The queue side of H-02. `queue_join` leaves BOTH tickets in `waiting`
+    /// while it awaits escrow-open and room creation, so status alone cannot
+    /// distinguish an idle ticket from one already committed to a pairing —
+    /// and an aged ticket deleted in that window loses the launch token its
+    /// player needs, which is a forfeit and, on a staked tier, their stake.
+    #[tokio::test]
+    async fn the_sweep_cannot_delete_a_ticket_mid_pairing() {
+        let (state, _c, _r) = test_state();
+        let id = Uuid::new_v4();
+        state.0.lobby.tickets.lock().insert(
+            id,
+            Ticket {
+                addr: Some(test_wallet(1)),
+                meta: SeatMeta::default(),
+                status: "waiting".into(),
+                game_id: None,
+                token: None,
+                color: None,
+                session_id: None,
+                seat_bot: false,
+                uci_options: vec![],
+                created_at: Instant::now() - TICKET_TTL - Duration::from_secs(1),
+                matching_since: None,
+            },
+        );
+
+        // Idle and past its TTL: still discardable.
+        state.0.lobby.sweep_expired(&Default::default());
+        assert!(
+            !state.0.lobby.tickets.lock().contains_key(&id),
+            "an idle expired ticket should still be swept"
+        );
+
+        // The same ticket, now committed to a pairing that is still in flight.
+        state.0.lobby.tickets.lock().insert(
+            id,
+            Ticket {
+                addr: Some(test_wallet(1)),
+                meta: SeatMeta::default(),
+                status: "waiting".into(),
+                game_id: None,
+                token: None,
+                color: None,
+                session_id: None,
+                seat_bot: false,
+                uci_options: vec![],
+                created_at: Instant::now() - TICKET_TTL - Duration::from_secs(1),
+                matching_since: Some(Instant::now()),
+            },
+        );
+        state.0.lobby.sweep_expired(&Default::default());
+        assert!(
+            state.0.lobby.tickets.lock().contains_key(&id),
+            "a ticket being paired must survive its TTL"
         );
     }
 
@@ -6115,6 +6574,156 @@ mod tests {
         }
     }
 
+    /// M-01, first half: outcome routing must exist BEFORE a seat is playable.
+    ///
+    /// The agent's channel is the observation point. `start_game_registered`
+    /// pushes `AssignSeat` onto it, and that message is the capability to play
+    /// the game — nobody can finish a game they have not been assigned. So if
+    /// the routing entry is already present at the moment the assignment is
+    /// received, no outcome can ever arrive without one. Registering after the
+    /// round's start loop (the old order) failed exactly this.
+    #[tokio::test]
+    async fn a_seat_is_never_deliverable_before_its_outcome_routing() {
+        let (state, _c, _r) = test_state();
+        let tid = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel::<protocol::ServerToAgent>(4);
+
+        let register = |gid: GameId, _w: &str, _b: &str| {
+            state.0.lobby.game_to_tournament.lock().insert(gid, tid);
+        };
+        let resp = state
+            .start_game_registered(
+                protocol::TimeControl {
+                    initial_ms: 60_000,
+                    increment_ms: 0,
+                },
+                "tournament",
+                None,
+                Ladder::Casual,
+                [SeatMeta::default(), SeatMeta::default()],
+                [
+                    SeatDelivery::Agent {
+                        wallet: test_wallet(1),
+                        tx,
+                        uci_options: vec![],
+                    },
+                    SeatDelivery::Browser,
+                ],
+                Some(&register),
+            )
+            .await
+            .expect("game starts");
+
+        let assigned = rx.try_recv().expect("the agent was handed its seat");
+        let protocol::ServerToAgent::AssignSeat { game_id, .. } = assigned else {
+            panic!("expected an AssignSeat");
+        };
+        assert_eq!(game_id, resp.game_id);
+        assert_eq!(
+            state.0.lobby.game_to_tournament.lock().get(&game_id),
+            Some(&tid),
+            "the routing entry must already exist the moment a seat becomes playable"
+        );
+    }
+
+    /// M-01, the half that registering routing alone does NOT fix.
+    ///
+    /// Registering `game_to_tournament` early stops `record_outcome` from
+    /// dropping the outcome, but it still has to find the tournament's own
+    /// record of the game to write a result onto. When games were appended to
+    /// `t.games` only after the whole dispatch loop, a game that finished
+    /// mid-loop got its routing entry consumed and its result written nowhere —
+    /// so it stayed `result: None` forever and the round never resolved. Both
+    /// registrations have to happen before the seats are deliverable.
+    #[tokio::test]
+    async fn an_outcome_during_dispatch_is_recorded_on_its_game() {
+        let (state, _c, _r) = test_state();
+        let tid = started_tournament(&state, 4).await;
+
+        // Take a game this round actually created, and resolve it the way the
+        // results path does.
+        let (gid, white) = {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).expect("tournament");
+            let g = t.games.first().expect("the round created games");
+            (g.game_id, g.white.clone())
+        };
+        assert_eq!(
+            state.0.lobby.game_to_tournament.lock().get(&gid),
+            Some(&tid),
+            "routing was registered for it"
+        );
+
+        state.0.lobby.record_outcome(&crate::GameOutcome {
+            game_id: gid,
+            winner: Some(Color::White),
+            plies: 40,
+            white_showed_up: true,
+            black_showed_up: true,
+        });
+
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).expect("tournament");
+        let g = t.games.iter().find(|g| g.game_id == gid).expect("the game");
+        assert_eq!(
+            g.result,
+            Some(Some(Color::White)),
+            "the result must land on the tournament's own record of the game"
+        );
+        assert!(
+            t.scores.get(&white).copied().unwrap_or(0.0) > 0.0,
+            "and the winner must be scored"
+        );
+    }
+
+    /// M-01, second half: an agent that stops reading its socket must not be
+    /// able to hold `start_game` open.
+    ///
+    /// Delivery pushed onto a 16-slot channel with a bare `.await`, so an
+    /// entrant whose agent went quiet stalled the caller indefinitely — in a
+    /// tournament that is the whole round's dispatch loop, with every other
+    /// pairing behind it. It now times out and is scored as a no-show, which
+    /// `dispatch_round` already knows how to handle.
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_stops_reading_cannot_stall_dispatch() {
+        let (state, _c, _r) = test_state();
+        // Capacity 1, pre-filled, never drained: a stalled agent socket.
+        let (tx, _rx_held) = mpsc::channel::<protocol::ServerToAgent>(1);
+        tx.send(protocol::ServerToAgent::Error {
+            code: "x".into(),
+            message: "pre-filled".into(),
+        })
+        .await
+        .expect("fill the only slot");
+
+        let started = state
+            .start_game(
+                protocol::TimeControl {
+                    initial_ms: 60_000,
+                    increment_ms: 0,
+                },
+                "tournament",
+                None,
+                Ladder::Casual,
+                [SeatMeta::default(), SeatMeta::default()],
+                [
+                    SeatDelivery::Agent {
+                        wallet: test_wallet(1),
+                        tx,
+                        uci_options: vec![],
+                    },
+                    SeatDelivery::Browser,
+                ],
+            )
+            .await;
+
+        assert_eq!(
+            started.err(),
+            Some(StatusCode::FAILED_DEPENDENCY),
+            "an unreachable agent is scored as a no-show, not waited on"
+        );
+    }
+
     #[tokio::test]
     async fn the_prize_table_a_player_sees_is_the_one_that_pays() {
         // The view must not compute prizes its own way: a table that disagrees
@@ -6881,6 +7490,218 @@ mod tests {
             .await
             .expect("start");
         tid
+    }
+
+    /// A tournament that is running in memory but never started onchain cannot
+    /// be settled at all — both settle paths require `startedAt` — so a full
+    /// schedule would be played for a pool that can only ever be refunded.
+    /// The start must therefore roll back, not proceed.
+    #[tokio::test]
+    async fn a_failed_onchain_start_does_not_leave_a_tournament_running() {
+        struct StartFails;
+        #[async_trait::async_trait]
+        impl ledger::SettlementSink for StartFails {
+            async fn open_escrow(
+                &self,
+                _g: Uuid,
+                _w: Address,
+                _b: Address,
+                _s: U256,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn report_result(&self, _g: Uuid, _w: Option<Address>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn is_onchain(&self) -> bool {
+                true
+            }
+            async fn bankroll_of(&self, _who: Address) -> Option<U256> {
+                Some(U256::from(1_000_000_000u64))
+            }
+            async fn tournament_pool(&self, _tid: Uuid) -> Option<U256> {
+                Some(U256::from(10_000_000u64))
+            }
+            async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
+                Some((unix_now() + 3600, unix_now() + 86_400))
+            }
+            async fn start_tournament(&self, _tid: Uuid) -> anyhow::Result<()> {
+                anyhow::bail!("startTournament REVERTED onchain")
+            }
+        }
+
+        let (state, _c, _r) = test_state_with_sink(Arc::new(StartFails));
+        let organizer = test_wallet(0);
+        let tok = state.0.auth.mint_session(&organizer);
+        let tid = tourney_create(
+            State(state.clone()),
+            bearer(&tok),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: Some("1000000".into()),
+                initial_secs: 60,
+                increment_secs: 1,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        seat_entrants(&state, tid, 2).await;
+
+        let started = tourney_start(State(state.clone()), Path(tid), bearer(&tok)).await;
+        assert_eq!(
+            started.err(),
+            Some(StatusCode::BAD_GATEWAY),
+            "a failed onchain start must fail the request"
+        );
+        let t = state.0.lobby.tournaments.lock();
+        let t = t.get(&tid).expect("still present");
+        assert_eq!(
+            t.status, "open",
+            "and must leave the event startable, not running"
+        );
+        assert!(t.games.is_empty(), "no games were dispatched");
+    }
+
+    /// M-02, the pure arithmetic: which schedules fit a 24h settle window.
+    ///
+    /// A round-robin's rounds run one after another, so they add up. The limits
+    /// the server accepts per field (128 entrants) and per game (3h + 180s)
+    /// multiply out well past any window the contract offers, and the failure
+    /// is total — past `openedAt + settleTimeout` both settle paths revert
+    /// forever and every entrant falls through to `claimRefund`, so the whole
+    /// event pays nobody.
+    #[test]
+    fn a_schedule_that_cannot_be_settled_is_recognised() {
+        const DAY: u64 = 86_400;
+        let budget = DAY * SCHEDULE_MARGIN_PCT / 100;
+
+        // Ordinary events fit with room to spare.
+        assert!(worst_case_schedule_secs(8, 300, 3) < budget, "8 @ 5+3");
+        assert!(worst_case_schedule_secs(16, 600, 5) < budget, "16 @ 10+5");
+        assert!(worst_case_schedule_secs(128, 60, 0) < budget, "128 @ 1+0");
+
+        // A full field at anything but bullet does not.
+        assert!(
+            worst_case_schedule_secs(128, 180, 2) > budget,
+            "127 sequential rounds at 3+2 cannot fit a 24h window"
+        );
+        // The maximum time control is settleable as a one-off match (worst
+        // case ~16h of a 24h window) and stops being settleable the moment it
+        // is a field: three rounds of it is two days. The per-game and
+        // per-field limits are each individually fine and cannot be multiplied
+        // together, which is why this is checked against the live deadline at
+        // start rather than validated at creation.
+        assert!(
+            worst_case_schedule_secs(2, crate::MAX_INITIAL_SECS, crate::MAX_INCREMENT_SECS)
+                < budget,
+            "a single game at the maximum time control still fits"
+        );
+        assert!(
+            worst_case_schedule_secs(4, crate::MAX_INITIAL_SECS, crate::MAX_INCREMENT_SECS)
+                > budget,
+            "but a four-player field at the same time control cannot"
+        );
+
+        // Monotonic in every direction a caller can push it.
+        assert!(
+            worst_case_schedule_secs(32, 300, 3) > worst_case_schedule_secs(16, 300, 3),
+            "more entrants means more rounds"
+        );
+        assert!(
+            worst_case_schedule_secs(16, 600, 3) > worst_case_schedule_secs(16, 300, 3),
+            "longer clocks cost more"
+        );
+    }
+
+    /// The guard is wired into `tourney_start` and reads the LIVE deadline, so
+    /// an event that sat open too long is refused even if its schedule would
+    /// have fitted at creation.
+    #[tokio::test]
+    async fn a_tournament_is_not_started_without_time_to_settle_it() {
+        struct Window(Mutex<u64>);
+        #[async_trait::async_trait]
+        impl ledger::SettlementSink for Window {
+            async fn open_escrow(
+                &self,
+                _g: Uuid,
+                _w: Address,
+                _b: Address,
+                _s: U256,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn report_result(&self, _g: Uuid, _w: Option<Address>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn is_onchain(&self) -> bool {
+                true
+            }
+            async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
+                let left = *self.0.lock();
+                Some((unix_now() + left, unix_now() + left))
+            }
+        }
+
+        let sink = Arc::new(Window(Mutex::new(86_400)));
+        let (state, _c, _r) = test_state_with_sink(sink.clone());
+        let tid = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T".into(),
+                buy_in: None,
+                initial_secs: 600, // 10+5
+                increment_secs: 5,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        seat_entrants(&state, tid, 8).await;
+
+        // A full day left: 7 rounds at 10+5 fit comfortably.
+        let _ = tourney_start(State(state.clone()), Path(tid), HeaderMap::new())
+            .await
+            .expect("a schedule that fits must start");
+
+        // Same event, same schedule, but the window has nearly run out.
+        let tid2 = tourney_create(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(TourneyCreateReq {
+                name: "T2".into(),
+                buy_in: None,
+                initial_secs: 600,
+                increment_secs: 5,
+                payout: None,
+                admission: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .tournament_id;
+        seat_entrants(&state, tid2, 8).await;
+        *sink.0.lock() = 1_800; // 30 minutes left
+
+        let refused = tourney_start(State(state.clone()), Path(tid2), HeaderMap::new()).await;
+        assert_eq!(
+            refused.err(),
+            Some(StatusCode::CONFLICT),
+            "an event with no time left to settle must not start"
+        );
+        assert_eq!(
+            state.0.lobby.tournaments.lock().get(&tid2).unwrap().status,
+            "open",
+            "and it stays open rather than being left half-running"
+        );
     }
 
     #[tokio::test]

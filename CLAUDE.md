@@ -122,6 +122,41 @@ wallet.
 - **Money paths fail closed.** No stake is accepted unless onchain settlement is
   configured; seats are bound to the SIWE-authenticated wallet, never a request
   body. Keep it that way.
+- **A fetched receipt is not a successful transaction.** Alloy's `get_receipt()`
+  resolves `Ok` for a transaction that mined with `status = 0`, so awaiting it
+  and dropping the value — which every write path did — turned each revert into
+  `Ok(())`. `.send()` gas-estimates first, so the reverts that reach the receipt
+  are the ones where state moved between estimation and inclusion: race your own
+  `withdraw` against the oracle's transaction and you get one on demand. Each of
+  the three had its own payoff. A reverted `enterTournament` added an entrant who
+  paid nothing, and settlement divides the **onchain** pool across the
+  **off-chain** standings, so they took a cut of everyone else's buy-ins (nothing
+  in `settleTournament` requires a payee to have entered). A reverted `openGame`
+  locked neither stake while the server ran and advertised the game as staked. A
+  reverted `settleGame` was recorded terminally `"settled"`, so the winner was
+  never paid and nothing retried. Everything now goes through
+  `OnchainSettlement::confirm`; **never call `get_receipt()` directly**, and both
+  outbox workers re-read the chain before writing a terminal `"settled"`. Each
+  write also verifies its POSTCONDITION (the game exists with those seats and
+  stake, the entry flag is set, `startedAt` moved) — `confirm` proves the
+  transaction did not revert, the read proves the chain holds the state the
+  caller is about to run a real game on. `SETTLE_CONFIRMATIONS` (default 1,
+  inclusion) is the dial for waiting out reorgs; raising it costs latency on the
+  path a player is watching, which is why it is an operator choice.
+- **Never age-delete lobby state that has a game behind it.** `sweep_expired`
+  used to keep rows purely on `created_at`, regardless of lifecycle. `park_accept`
+  flips an offer to `matching`, releases the lock, awaits escrow-open and room
+  creation, and only then writes the poster's launch token — a sweep landing
+  inside that await deleted the row, `park_get` answered `not_found`, and 60s
+  later the room reaped the poster as a no-show and `reap_forfeit_winner` handed
+  the acceptor the win and the whole pot. A player sitting right there lost their
+  stake to a timer, repeatably if you timed an accept near an offer's TTL. The
+  sweep now branches on state: `matching` survives on a lease
+  (`MATCHING_LEASE`, deliberately longer than the room's `START_WINDOW`),
+  `matched` survives while its game is in the `live` set, and `running`/`paused`
+  tournaments are never aged out at all. The queue has the SAME shape and needed
+  the same lease — `queue_join` leaves both tickets `waiting` across
+  `start_game`, so status alone cannot tell idle from mid-pairing.
 - **Maintenance/drain is owner-gated + fail-closed.** `POST /admin/maintenance`
   only accepts a SIWE session whose wallet equals the onchain escrow `owner()`
   (set `ADMIN_WALLET` to override, e.g. local dev; else nobody is admin). When
@@ -317,6 +352,28 @@ wallet.
   wagmi; that's the fix if it shows up there.
 - **Never emit a private/oracle key** to output/logs. The oracle key is the
   crown jewel; a leak lets anyone forge results and drain stakes.
+- **A restart ends every live game, and it must SETTLE them on the way out.**
+  Rooms are per-process actors, so a restart kills them — and before the
+  shutdown drain that produced no outcome at all: nothing reached the
+  settlement outbox, and both stakes stayed locked until the escrow's 24h
+  `claimTimeout`, with `unsettled_wagered_games` only surfacing the game to a
+  player six hours later to claim by hand. `drain_live_rooms` (`main.rs`) now
+  sends every room a `RoomCmd::Shutdown`, which ends the game as an aborted
+  draw — a refund — and enqueues it durably. Four things to keep. It runs
+  **inside the graceful-shutdown future, before it resolves**, because axum
+  waits for open connections and a live game holds an upgraded WebSocket that
+  never closes on its own; placed after `serve().await` it would not run until
+  Fly's kill timeout had already fired. The drain is what makes those sockets
+  close at all (the room drops its seat channels, the writer sends `Close`), so
+  the room actor has to actually exit — that is `Room::closing`. The abort is
+  **unrated whatever the ply count** (`finish_inner(.., rate: false)`): the
+  usual `contested` rule would put a draw on the record of someone who was
+  winning a 40-move game because we deployed. And the ack means DURABLE, not
+  onchain — the outbox row survives and the next boot settles it, since
+  blocking shutdown on real transactions would blow the kill timeout.
+  `DRAIN_BUDGET` (10s) must stay under `kill_timeout` in `fly.toml` (20s;
+  Fly's default of 5s is shorter than the drain). None of this covers a hard
+  kill or a panic — the contract timeout is still the backstop for those.
 - **Merged ≠ deployed.** Only the web app auto-deploys (Vercel, on merge to
   `main`). The Fly server needs `./scripts/deploy-server.sh`, and the house bot
   needs `fly deploy --config fly.housebot.toml --ha=false`. A change to
@@ -425,6 +482,74 @@ wallet.
   `an_empty_clock_cannot_be_played_through` is what fails. Clamping is for the
   WIRE only (`to_wire`) — `protocol::Clock` is unsigned and nobody should watch a
   negative clock.
+- **Never await delivery to a client from inside an actor or a create path.**
+  Two instances, same shape. `Room::send_to` awaited a bounded 64-slot seat
+  channel whose writer awaits the socket, so a player who simply stopped reading
+  filled the queue and parked the room actor — and the actor owns the 250ms
+  clock tick, so the clock, the opponent's moves, resignation and settlement all
+  stopped with it. A player about to flag could hold their own loss open
+  indefinitely, topping the queue up with out-of-turn moves since each is
+  answered with a `MoveRejected` straight back to the sender. It is `try_send`
+  now, and a full queue drops the frame: disconnecting instead would clear
+  `*_occupied` and turn an unstarted room's abort-with-refund into a forfeit
+  that hands the opponent the stake. Same bug on the agent side —
+  `AssignSeat` went out with a bare `.await` on a 16-slot channel, so one bot
+  agent that stopped reading stalled `start_game`, and inside `dispatch_round`
+  that is the whole tournament round. Bounded by `AGENT_DISPATCH_TIMEOUT`, after
+  which the seat is scored as a no-show. Inbound frames are bounded too
+  (`ws.rs` `InboundBudget`, a per-socket token bucket): not to protect the room,
+  which no longer blocks, but to cap the CPU one connection can make a
+  single-node server spend parsing moves it has no right to make. Over-budget
+  frames are DROPPED, never answered — a reply is what a flood wants amplified.
+- **Register a game's outcome routing AND the mode's own record of it before
+  its seats are deliverable.** `dispatch_round` did both after its entire start
+  loop, on the reasoning that no real game finishes in the gap. With the
+  unbounded agent await above, the gap was attacker-controlled: an earlier
+  pairing was live and resignable the whole time. Use `start_game_registered`,
+  whose hook runs after the room/row/tokens exist and **before the first
+  `AssignSeat`**. Registering only the ROUTING is not enough and looks like it
+  is: `record_outcome` would then find the tournament, fail to find the game in
+  `t.games` to write a result onto, and the round would hang exactly as before —
+  so the hook takes the launch tokens and pushes the `TourneyGame` too, and the
+  post-loop code must NOT re-add them (a duplicate row with `result: None`
+  never resolves). One consequence to keep: a game CAN now finish mid-loop, so
+  `Tournament::dispatching` stops `record_outcome` from advancing the round
+  while `round_remaining` still describes the previous one. The result is still
+  recorded; only the advance is deferred, and `dispatch_round`'s reconciliation
+  plus `dispatch_from_current`'s zero-check pick it up.
+- **Chain-derived admin authority must be re-read, not cached.** The escrow is
+  `Ownable2Step`, and the owner was read once at boot and cached for the process
+  lifetime — so after a completed transfer the server still authorized the OLD
+  owner and rejected the new one. Revocation did not take, and since maintenance
+  is DB-persisted the former owner could block every new game across the
+  restarts meant to undo it. `AppState::admin_wallet` now re-reads `owner()` per
+  privileged call (only `set_maintenance` reaches it) and fails closed on RPC
+  error; an explicitly configured `ADMIN_WALLET` stays static, which is the
+  point of `admin_configured`. `/config` still publishes a cached copy — that is
+  advisory, for drawing a button, and never authorizes.
+- **A tournament has TWO onchain clocks, and they are disjoint on purpose.**
+  It used to have one, started at `openTournament` — i.e. at CREATION — so time
+  spent filling a field came out of the time available to play it, and entry had
+  no deadline at all. A field could still be filling after settlement had become
+  impossible, and past the window both settle paths revert permanently while
+  `claimRefund` opens, so the event pays nobody and discards its standings. Now:
+  `openedAt + entryWindow` closes entry **and the right to start**, and opens
+  refunds for an event that never started; `startedAt + settleTimeout` bounds
+  settlement for one that did. `startTournament` is refused past the first, so a
+  pool is never simultaneously settleable and refundable — that disjointness is
+  the safety property, and `_canSettle`/`_canRefund` are where it lives. Three
+  riders. **The contract is ahead of the live deployment** (constructor change ⇒
+  redeploy + migration, see [DEPLOYMENTS.md](DEPLOYMENTS.md)); the server runs
+  against both because `has_start_transition` probes `entryWindow()` once and
+  skips the transition on an older escrow — a CAPABILITY check only, never a
+  catch-all that would swallow a real revert. **A failed onchain start must roll
+  the tournament back to `open`**, since a schedule played for a pool with no
+  `startedAt` cannot be settled at all. And the clock fix does not replace the
+  SCHEDULE check: rounds are sequential, so 128 entrants is 127 rounds, and the
+  per-game limits (3h + 180s) and the per-field limit are each fine alone but
+  cannot be multiplied together — `tourney_start` still sizes
+  `worst_case_schedule_secs` against the live onchain deadline and refuses what
+  cannot finish.
 - **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is
   `has_insufficient_material(flagged.opposite())` — not `is_insufficient_material()`,
   which shakmaty defines as *neither* side being able to mate. Asking the latter

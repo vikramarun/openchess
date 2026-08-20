@@ -44,6 +44,19 @@ contract ChessEscrow {
     // would retroactively move those boundaries for in-flight games/tournaments.
     // If it ever must change, snapshot it per-game like `feeBps`.
     uint64 public settleTimeout;
+    // How long after `openTournament` new entries are still accepted. Set once
+    // at construction alongside `settleTimeout`, and for the same reason:
+    // `openedAt + entryWindow` is read live, so a setter would retroactively
+    // move the boundary for tournaments already open.
+    //
+    // Why it exists at all: the settle clock starts at `openTournament`, and
+    // both settlement paths revert permanently once it lapses, but entry used
+    // to have no deadline of its own. A field could therefore still be filling
+    // as the window closed, and an event that is legal to enter but impossible
+    // to settle is one that pays nobody — every entrant falls through to
+    // `claimRefund` and the standings are thrown away. Closing entry first
+    // leaves `settleTimeout - entryWindow` for the games to actually be played.
+    uint64 public entryWindow;
     bool public paused;
 
     mapping(address => uint256) public bankroll; // total deposited per user
@@ -79,6 +92,18 @@ contract ChessEscrow {
         uint256 claimedAmount; // sum credited via root-claims so far
         uint32 entrants;
         uint64 openedAt;
+        // When play actually began, 0 until `startTournament`. The SETTLE clock
+        // runs from here, not from `openedAt` — an event's games get the whole
+        // of `settleTimeout` rather than whatever was left after the field
+        // finished filling. `openedAt` still bounds entry (and the start
+        // itself), so the two clocks measure two different things:
+        //   openedAt  + entryWindow   — entry closes, and so does the right to
+        //                               start; refunds open at this instant for
+        //                               a tournament that never started.
+        //   startedAt + settleTimeout — settlement closes for one that did.
+        // Those two intervals are disjoint by construction, which is what stops
+        // a refund racing a settlement.
+        uint64 startedAt;
         bool settled;
         bytes32 payoutRoot; // non-zero only in root/claim mode
         bool exists;
@@ -115,6 +140,7 @@ contract ChessEscrow {
     event GameRefunded(bytes32 indexed gameId);
     event TournamentOpened(bytes32 indexed tournamentId, uint256 buyIn);
     event TournamentEntered(bytes32 indexed tournamentId, address indexed player);
+    event TournamentStarted(bytes32 indexed tournamentId, uint32 entrants);
     event TournamentSponsored(bytes32 indexed tournamentId, address indexed sponsor, uint256 amount);
     event TournamentSponsorRefunded(
         bytes32 indexed tournamentId, address indexed sponsor, uint256 amount
@@ -155,6 +181,10 @@ contract ChessEscrow {
     error NoRoot();
     error InvalidProof();
     error SettleWindowClosed();
+    error EntryWindowClosed();
+    error StartWindowClosed();
+    error AlreadyStarted();
+    error NotStarted();
     error NotSponsor();
 
     // --- modifiers --------------------------------------------------------
@@ -183,16 +213,22 @@ contract ChessEscrow {
         address oracle_,
         address feeRecipient_,
         uint16 feeBps_,
-        uint64 settleTimeout_
+        uint64 settleTimeout_,
+        uint64 entryWindow_
     ) {
         require(token_ != address(0) && oracle_ != address(0) && feeRecipient_ != address(0), "zero addr");
         require(feeBps_ <= 1_000, "fee too high");
+        // An entry window at or past the settle window is no window at all —
+        // it would re-admit the very state this exists to prevent (a field
+        // still filling when settlement is already impossible).
+        require(entryWindow_ < settleTimeout_, "entry window must close first");
         token = IERC20(token_);
         oracle = oracle_;
         owner = msg.sender;
         feeRecipient = feeRecipient_;
         feeBps = feeBps_;
         settleTimeout = settleTimeout_;
+        entryWindow = entryWindow_;
 
         _CACHED_CHAIN_ID = block.chainid;
         _CACHED_DOMAIN_SEPARATOR = _buildDomainSeparator();
@@ -302,6 +338,27 @@ contract ChessEscrow {
 
     // --- tournaments ------------------------------------------------------
 
+    /// Whether `tid` can still be settled: it started, and its settle window
+    /// has not lapsed. A tournament that never started can never be settled —
+    /// no games were played, so there is nothing to settle and everyone
+    /// refunds instead.
+    function _canSettle(Tournament storage t) internal view returns (bool) {
+        return t.startedAt != 0 && block.timestamp <= t.startedAt + settleTimeout;
+    }
+
+    /// Whether entrants and sponsors may take their money back: the event
+    /// either ran out of settle time, or was never started and can no longer
+    /// be (the right to start expires with entry).
+    ///
+    /// Exactly complementary to `_canSettle` once a tournament has started, and
+    /// `startTournament` refuses past `openedAt + entryWindow` — so there is no
+    /// instant at which a pool is both settleable and refundable.
+    function _canRefund(Tournament storage t) internal view returns (bool) {
+        return t.startedAt == 0
+            ? block.timestamp > t.openedAt + entryWindow
+            : block.timestamp > t.startedAt + settleTimeout;
+    }
+
     /// Open a tournament with a uniform buy-in. Oracle-only.
     ///
     /// `buyIn` MAY be zero: a free-entry event whose prize pool is funded by
@@ -316,6 +373,7 @@ contract ChessEscrow {
             claimedAmount: 0,
             entrants: 0,
             openedAt: uint64(block.timestamp),
+            startedAt: 0,
             settled: false,
             payoutRoot: bytes32(0),
             exists: true
@@ -327,11 +385,20 @@ contract ChessEscrow {
     /// leave the entrant's bankroll now, so losers never need touching at
     /// settle (which is what lets settlement/claims be O(1) per winner).
     /// Oracle-only; one entry per address.
+    ///
+    /// Refused once `entryWindow` has elapsed. Without that an entrant could
+    /// join a tournament that had already run out of time to be settled: both
+    /// settle paths revert past `openedAt + settleTimeout`, so the event could
+    /// only ever resolve into `claimRefund` and its standings would be
+    /// discarded. Note this is the entry window, not the settle window — the
+    /// gap between them is the time the games themselves get.
     function enterTournament(bytes32 tid, address player) external whenNotPaused {
         if (msg.sender != oracle) revert NotOracle();
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
+        if (t.startedAt != 0) revert AlreadyStarted(); // the schedule is fixed
+        if (block.timestamp > t.openedAt + entryWindow) revert EntryWindowClosed();
         if (player == feeRecipient) revert BadPlayers();
         if (tournamentEntered[tid][player]) revert AlreadyEntered();
         if (available(player) < t.buyIn) revert InsufficientUnlocked();
@@ -341,6 +408,30 @@ contract ChessEscrow {
         t.entrants += 1;
         tournamentEntered[tid][player] = true;
         emit TournamentEntered(tid, player);
+    }
+
+    /// Begin play, starting the settle clock. Oracle-only, once per tournament.
+    ///
+    /// Must happen within the entry window, which is the same instant refunds
+    /// open for a never-started event — so starting and refunding can never
+    /// both be available, and an organizer cannot revive a pool that entrants
+    /// have already begun reclaiming.
+    ///
+    /// Separating this from `openTournament` is what gives the games the full
+    /// settle window. With the clock running from creation, the time spent
+    /// filling a field came out of the time available to play it, and a large
+    /// enough field simply could not be settled — every entrant fell through to
+    /// `claimRefund` and the standings were discarded.
+    function startTournament(bytes32 tid) external whenNotPaused {
+        if (msg.sender != oracle) revert NotOracle();
+        Tournament storage t = tournaments[tid];
+        if (!t.exists) revert UnknownTournament();
+        if (t.settled) revert AlreadySettled();
+        if (t.startedAt != 0) revert AlreadyStarted();
+        if (block.timestamp > t.openedAt + entryWindow) revert StartWindowClosed();
+
+        t.startedAt = uint64(block.timestamp);
+        emit TournamentStarted(tid, t.entrants);
     }
 
     /// Fund a tournament's prize pool from your own unlocked bankroll.
@@ -364,7 +455,10 @@ contract ChessEscrow {
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (amount == 0) revert ZeroStake();
-        if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+        // Allowed right up until the money could no longer be paid out as
+        // prizes — before the start (the ordinary case: funding a pool up
+        // front) and during play, but never once refunds have opened.
+        if (_canRefund(t)) revert SettleWindowClosed();
         if (available(msg.sender) < amount) revert InsufficientUnlocked();
 
         bankroll[msg.sender] -= amount; // moved into the pool, exactly like an entry
@@ -385,7 +479,7 @@ contract ChessEscrow {
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
-        if (block.timestamp <= t.openedAt + settleTimeout) revert TimeoutNotReached();
+        if (!_canRefund(t)) revert TimeoutNotReached();
         uint256 amount = sponsorship[tid][sponsor];
         if (amount == 0) revert NotSponsor();
 
@@ -411,7 +505,8 @@ contract ChessEscrow {
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (block.timestamp > deadline) revert Expired();
-        if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+        if (t.startedAt == 0) revert NotStarted();
+        if (!_canSettle(t)) revert SettleWindowClosed();
         if (winners.length != payouts.length) revert BadDistribution();
 
         bytes32 digest = digestTournamentResult(tid, winners, payouts, deadline);
@@ -450,7 +545,8 @@ contract ChessEscrow {
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (block.timestamp > deadline) revert Expired();
-        if (block.timestamp > t.openedAt + settleTimeout) revert SettleWindowClosed();
+        if (t.startedAt == 0) revert NotStarted();
+        if (!_canSettle(t)) revert SettleWindowClosed();
         if (totalPayout > t.pool) revert BadDistribution();
 
         bytes32 digest = digestTournamentRoot(tid, payoutRoot, totalPayout, deadline);
@@ -501,7 +597,7 @@ contract ChessEscrow {
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
         if (t.buyIn == 0) revert ZeroStake();
-        if (block.timestamp <= t.openedAt + settleTimeout) revert TimeoutNotReached();
+        if (!_canRefund(t)) revert TimeoutNotReached();
         if (!tournamentEntered[tid][account]) revert NotEntered();
         if (tournamentClaimed[tid][account]) revert AlreadyClaimed();
 

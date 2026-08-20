@@ -60,7 +60,7 @@ contract ChessEscrowTest {
         oracle = vm.addr(oracleKey);
         usdc = new MockUSDC();
         // 1% rake, 1 hour timeout
-        escrow = new ChessEscrow(address(usdc), oracle, fee, 100, 3600);
+        escrow = new ChessEscrow(address(usdc), oracle, fee, 100, 3600, 1800);
 
         _fund(white, 10 * STAKE);
         _fund(black, 10 * STAKE);
@@ -233,6 +233,15 @@ contract ChessEscrowTest {
         escrow.enterTournament(tid, black);
         vm.prank(oracle);
         escrow.enterTournament(tid, carol);
+        _startT(tid);
+    }
+
+    /// Begin play. Settlement is keyed on `startedAt`, so a tournament that was
+    /// never started cannot be settled — which is the point, but it means every
+    /// test that settles has to come through here first.
+    function _startT(bytes32 tid) internal {
+        vm.prank(oracle);
+        escrow.startTournament(tid);
     }
 
     function _players3() internal view returns (address[] memory p) {
@@ -255,7 +264,7 @@ contract ChessEscrowTest {
         _enterAll(tid);
         // buy-in moved out of each entrant's bankroll into the pool at entry
         _assert(escrow.bankroll(white) == 9 * STAKE && escrow.bankroll(carol) == 9 * STAKE, "post-entry");
-        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        (, uint256 pool,,,,,,,) = escrow.tournaments(tid);
         _assert(pool == 3 * STAKE, "pool");
 
         // pool = 3 STAKE; pay white 2, black 1, carol 0 (no rake)
@@ -342,7 +351,7 @@ contract ChessEscrowTest {
         vm.prank(sponsor);
         escrow.sponsorTournament(tid, 6 * STAKE);
 
-        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        (, uint256 pool,,,,,,,) = escrow.tournaments(tid);
         _assert(pool == 9 * STAKE, "3 entries + 6 sponsored");
         _assert(escrow.bankroll(sponsor) == 4 * STAKE, "left the sponsor's bankroll");
         _assert(escrow.sponsorship(tid, sponsor) == 6 * STAKE, "recorded per sponsor");
@@ -371,7 +380,7 @@ contract ChessEscrowTest {
         vm.prank(sponsor);
         escrow.sponsorTournament(tid, STAKE); // topping up again accumulates
 
-        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        (, uint256 pool,,,,,,,) = escrow.tournaments(tid);
         _assert(pool == 9 * STAKE, "3 entries + 6 sponsored across two sponsors");
         _assert(escrow.sponsorship(tid, sponsor) == 3 * STAKE, "sponsor total accumulates");
         _assert(escrow.sponsorship(tid, sponsor2) == 3 * STAKE, "second sponsor tracked apart");
@@ -395,6 +404,7 @@ contract ChessEscrowTest {
 
         vm.prank(sponsor);
         escrow.sponsorTournament(tid, 5 * STAKE);
+        _startT(tid);
 
         uint256[] memory payouts = new uint256[](3);
         payouts[0] = 3 * STAKE;
@@ -427,7 +437,7 @@ contract ChessEscrowTest {
 
         _assert(escrow.bankroll(sponsor) == 10 * STAKE, "sponsor whole");
         _assert(escrow.bankroll(white) == 10 * STAKE, "entrant whole");
-        (, uint256 pool,,,,,,) = escrow.tournaments(tid);
+        (, uint256 pool,,,,,,,) = escrow.tournaments(tid);
         _assert(pool == 0, "pool fully unwound");
 
         // Not twice.
@@ -465,6 +475,169 @@ contract ChessEscrowTest {
         vm.prank(sponsor);
         vm.expectRevert();
         escrow.sponsorTournament(tid, STAKE);
+    }
+
+    function test_entering_past_the_entry_window_rejected() public {
+        // M-02: the settle clock starts at openTournament, and both settle
+        // paths revert once it lapses — but entry had no deadline of its own.
+        // A player could therefore be admitted (and charged) into an event that
+        // was already impossible to settle, whose only remaining outcome was
+        // claimRefund with the standings discarded.
+        bytes32 tid = keccak256("ew1");
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white); // inside the window
+
+        vm.warp(block.timestamp + 1801); // entryWindow is 1800 in this suite
+        vm.prank(oracle);
+        vm.expectRevert(); // EntryWindowClosed
+        escrow.enterTournament(tid, black);
+
+        _assert(escrow.tournamentEntered(tid, white), "the early entry stands");
+        _assert(!escrow.tournamentEntered(tid, black), "the late one does not");
+    }
+
+    function test_entry_window_closes_before_the_settle_window() public {
+        // The gap between the two IS the time the games get. A settlement that
+        // is still possible after entry closes is the whole point, so pin the
+        // ordering rather than the numbers.
+        _assert(escrow.entryWindow() < escrow.settleTimeout(), "entry closes first");
+
+        bytes32 tid = keccak256("ew2");
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+        _startT(tid);
+
+        // Past entry, still settleable — the state an event plays out in. The
+        // settle clock runs from the START, so crossing the entry deadline
+        // costs the games nothing.
+        vm.warp(block.timestamp + 1801);
+        uint256[] memory payouts = new uint256[](2);
+        payouts[0] = 2 * STAKE;
+        address[] memory who = new address[](2);
+        who[0] = white;
+        who[1] = black;
+        _settleT(tid, who, payouts, DEADLINE);
+        _assert(escrow.bankroll(white) == 11 * STAKE, "the winner was paid");
+    }
+
+    function test_settle_clock_runs_from_the_start_not_the_open() public {
+        // The root cause of M-02: with the clock running from openTournament,
+        // time spent filling a field came out of the time available to play it.
+        // Now a tournament that starts late still gets the whole window.
+        bytes32 tid = keccak256("st1");
+        _fund(carol, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+
+        // Start near the end of the entry window...
+        vm.warp(block.timestamp + 1799);
+        _startT(tid);
+        // ...and settlement is still open a full settleTimeout later, which
+        // under the old rule would have been long past.
+        vm.warp(block.timestamp + 3500);
+
+        uint256[] memory payouts = new uint256[](2);
+        payouts[0] = 2 * STAKE;
+        address[] memory who = new address[](2);
+        who[0] = white;
+        who[1] = black;
+        _settleT(tid, who, payouts, DEADLINE);
+        _assert(escrow.bankroll(white) == 11 * STAKE, "paid inside the real window");
+    }
+
+    function test_settle_and_refund_windows_are_disjoint() public {
+        // The safety property of the two-clock design. `startTournament` is
+        // refused at exactly the instant refunds open, so a pool can never be
+        // both settleable and refundable — no race between an organizer
+        // starting and an entrant reclaiming.
+        bytes32 tid = keccak256("st2");
+        _fund(carol, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+
+        // Before the entry deadline: cannot refund (it might still be played).
+        vm.expectRevert(); // TimeoutNotReached
+        escrow.claimRefund(tid, white);
+
+        // Past it: cannot start any more...
+        vm.warp(block.timestamp + 1801);
+        vm.prank(oracle);
+        vm.expectRevert(); // StartWindowClosed
+        escrow.startTournament(tid);
+        // ...and refunds are open instead. A never-started event lets its
+        // entrants out as soon as it can no longer begin, rather than making
+        // them wait out the full settle timeout.
+        escrow.claimRefund(tid, white);
+        _assert(escrow.bankroll(white) == 10 * STAKE, "buy-in returned");
+    }
+
+    function test_entering_or_restarting_after_the_start_rejected() public {
+        // Once play begins the schedule is fixed: a late entrant would be in a
+        // round-robin nobody scheduled them into, and a second start would move
+        // the settle deadline out from under the entrants.
+        bytes32 tid = keccak256("st3");
+        _fund(carol, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        _startT(tid);
+
+        vm.prank(oracle);
+        vm.expectRevert(); // AlreadyStarted
+        escrow.enterTournament(tid, black);
+
+        vm.prank(oracle);
+        vm.expectRevert(); // AlreadyStarted
+        escrow.startTournament(tid);
+    }
+
+    function test_an_unstarted_tournament_cannot_be_settled() public {
+        // No games were played, so there is nothing to settle. Refusing here is
+        // what makes "never started" resolve to refunds rather than to an
+        // oracle-chosen distribution over a field that never competed.
+        bytes32 tid = keccak256("st4");
+        _fund(carol, 10 * STAKE);
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+
+        uint256[] memory payouts = new uint256[](2);
+        payouts[0] = 2 * STAKE;
+        address[] memory who = new address[](2);
+        who[0] = white;
+        who[1] = black;
+        uint256 deadline = DEADLINE;
+        bytes32 digest = escrow.digestTournamentResult(tid, who, payouts, deadline);
+        (uint8 v, bytes32 r, bytes32 s2) = vm.sign(oracleKey, digest);
+        vm.expectRevert(); // NotStarted
+        escrow.settleTournament(tid, who, payouts, deadline, v, r, s2);
+    }
+
+    function test_startTournament_is_oracle_only() public {
+        bytes32 tid = keccak256("st5");
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(white);
+        vm.expectRevert(); // NotOracle
+        escrow.startTournament(tid);
     }
 
     function test_sponsor_cannot_exceed_unlocked_bankroll() public {
