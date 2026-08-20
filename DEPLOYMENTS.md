@@ -1,18 +1,39 @@
 # Deployments
 
 > **⚠️ `contracts/src/ChessEscrow.sol` is AHEAD of the live v2 deployment.**
-> A pre-launch review found that `enterTournament` had no deadline of its own
-> while both settle paths close at `openedAt + settleTimeout`, so a player could
-> be admitted (and charged) into a tournament that was already impossible to
-> settle. The fix adds an immutable **`entryWindow`** and a matching
-> `EntryWindowClosed` revert — a **constructor signature change**, so it needs a
-> fresh deployment and a bankroll migration, not an upgrade. Until that happens:
+> A pre-launch review found that the tournament settle clock started at
+> `openTournament` — i.e. at CREATION — while `enterTournament` had no deadline
+> of its own, so a field could still be filling after settlement had already
+> become impossible. Both settle paths revert permanently past the window and
+> `claimRefund` opens at the same instant, so such an event pays nobody and
+> discards its standings.
+>
+> Two changes, both needing a **fresh deployment** (the constructor signature
+> changed, so this is a redeploy plus a bankroll migration, not an upgrade):
+> - an immutable **`entryWindow`** with an `EntryWindowClosed` revert, and
+> - **`startTournament`**, an oracle-only transition that starts the settle
+>   clock when play begins. Entry and the right to start both close at
+>   `openedAt + entryWindow`; settlement runs from `startedAt + settleTimeout`;
+>   refunds open exactly when the ability to start closes. Those windows are
+>   disjoint by construction, so a pool is never both settleable and
+>   refundable. An event now gets the WHOLE settle window for its games instead
+>   of whatever was left after the field filled.
+>
+> Until the redeploy:
 > - The vendored ABI (`crates/ledger/abi/ChessEscrow.json`) is built from the
 >   NEW source, so it advertises `entryWindow()`. The live v2 has no such
 >   function.
 > - That is handled, not ignored: `OnchainSettlement::tournament_deadlines`
->   treats a reverting `entryWindow()` as "no separate entry window" and falls
->   back to the settle deadline, which is exactly what v2 enforces.
+>   treats a reverting `entryWindow()` as "no separate entry window" and a
+>   missing `startedAt` as a clock already running from `openedAt` — which is
+>   exactly what v2 enforces.
+> - `start_tournament` probes for the transition once (`entryWindow()` is the
+>   marker, since the two shipped together) and **skips it on v2**, whose settle
+>   clock has been running since `openTournament` anyway. So the server runs
+>   correctly against either contract and **the deploy order does not matter**.
+>   The probe is a capability check only: on a contract that HAS the transition,
+>   a failing `startTournament` is fatal and `tourney_start` rolls the event
+>   back to `open` rather than playing a schedule for a pool it cannot settle.
 > - So the **server-side** half of the fix (refusing to start a schedule that
 >   cannot finish inside the settle window, and refusing joins past the entry
 >   deadline) is live-safe against v2 today and should be deployed now. The
@@ -20,6 +41,8 @@
 >
 > When redeploying, set `ENTRY_WINDOW` (default 4h against a 24h
 > `SETTLE_TIMEOUT`; it must be strictly less) and update the table below.
+> `SETTLE_CONFIRMATIONS` (server-side, default 1) is the separate dial for how
+> many blocks a money-backed write waits before it is treated as real.
 
 ## Base mainnet (chain 8453) — **v2, live**
 

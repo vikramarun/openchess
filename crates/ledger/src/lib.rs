@@ -230,6 +230,14 @@ pub trait SettlementSink: Send + Sync {
         Ok(())
     }
 
+    /// Begin play, which is what starts the onchain SETTLE clock. Must be
+    /// called before the entry window closes; after it, entry is refused and
+    /// the tournament can only ever resolve into refunds.
+    async fn start_tournament(&self, tid: Uuid) -> anyhow::Result<()> {
+        tracing::info!(%tid, "settlement(log): start tournament");
+        Ok(())
+    }
+
     /// Distribute a tournament pool directly to a small winners list.
     async fn settle_tournament(
         &self,
@@ -340,6 +348,22 @@ pub struct OnchainSettlement {
     provider: DynProvider,
     escrow: Address,
     oracle: PrivateKeySigner,
+    /// Whether the deployed escrow has the `startTournament` transition:
+    /// 0 unknown, 1 yes, 2 no. Immutable per deployment, so it is probed once
+    /// and remembered; a benign race just probes twice for the same answer.
+    has_start_transition: std::sync::atomic::AtomicU8,
+    /// Blocks to wait before a write is treated as real, from
+    /// `SETTLE_CONFIRMATIONS`.
+    ///
+    /// Default 1 — inclusion, which is what `get_receipt()` has always waited
+    /// for. Raising it costs latency on the path a player is watching (a staked
+    /// game cannot start until `openGame` is confirmed), which is why it is a
+    /// dial rather than a hardcoded increase: Base reorgs are rare and shallow,
+    /// `MAX_STAKE` is small, and a reorged-out `openGame` is now DETECTED —
+    /// the postcondition read fails, and settlement of a game that no longer
+    /// exists errors and alerts instead of silently succeeding. An operator who
+    /// wants more margin, or who raises `MAX_STAKE`, can buy it here.
+    confirmations: u64,
 }
 
 impl OnchainSettlement {
@@ -354,11 +378,51 @@ impl OnchainSettlement {
             .wallet(EthereumWallet::from(oracle.clone()))
             .connect_http(rpc_url)
             .erased();
+        let confirmations = std::env::var("SETTLE_CONFIRMATIONS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(1);
+        if confirmations > 1 {
+            tracing::info!(confirmations, "settlement: waiting extra confirmations");
+        }
         OnchainSettlement {
             provider,
             escrow,
             oracle,
+            has_start_transition: std::sync::atomic::AtomicU8::new(0),
+            confirmations,
         }
+    }
+
+    /// Whether this deployment has the two-clock tournament lifecycle
+    /// (`entryWindow` + `startTournament`), probed once against the chain.
+    ///
+    /// The server is deployed independently of the contract, so it has to run
+    /// correctly against BOTH — otherwise shipping the server first would pause
+    /// every buy-in tournament until the redeploy landed. `entryWindow()` is
+    /// the marker: it and `startTournament` were added together, and a call to
+    /// a function an older deployment does not have reverts (there is no
+    /// fallback on this contract).
+    ///
+    /// This is a CAPABILITY check, deliberately not a catch-all. It never
+    /// swallows a real revert from `startTournament` itself — on a new contract
+    /// the transition is required and its failure is fatal.
+    async fn has_start_transition(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        match self.has_start_transition.load(Ordering::Relaxed) {
+            1 => return true,
+            2 => return false,
+            _ => {}
+        }
+        let present = self.contract().entryWindow().call().await.is_ok();
+        self.has_start_transition
+            .store(if present { 1 } else { 2 }, Ordering::Relaxed);
+        tracing::info!(
+            two_clock_lifecycle = present,
+            "settlement: escrow tournament lifecycle probed"
+        );
+        present
     }
 
     fn contract(&self) -> ChessEscrow::ChessEscrowInstance<DynProvider> {
@@ -388,7 +452,10 @@ impl OnchainSettlement {
         pending: alloy::providers::PendingTransactionBuilder<alloy::network::Ethereum>,
         what: &str,
     ) -> anyhow::Result<()> {
-        let receipt = pending.get_receipt().await?;
+        let receipt = pending
+            .with_required_confirmations(self.confirmations)
+            .get_receipt()
+            .await?;
         if receipt.status() {
             return Ok(());
         }
@@ -437,6 +504,24 @@ impl SettlementSink for OnchainSettlement {
         let escrow = self.contract();
         let pending = escrow.openGame(gid, white, black, stake).send().await?;
         self.confirm(pending, "openGame").await?;
+        // Postcondition. `confirm` proves the transaction did not revert; this
+        // proves the chain now holds the state the caller is about to rely on,
+        // with the seats and stake it asked for. The caller's next act is to
+        // run a game it will describe to two people as backed by money, so the
+        // cost of one view call is not worth arguing about — and a mismatch
+        // here (a reorg between inclusion and now, a wrong-contract config)
+        // would otherwise surface only at settlement, after the game is played.
+        match escrow.games(gid).call().await {
+            Ok(g) if g.exists && g.white == white && g.black == black && g.stake == stake => {}
+            Ok(g) if g.exists => anyhow::bail!(
+                "openGame landed with unexpected terms (white {:?} black {:?} stake {})",
+                g.white,
+                g.black,
+                g.stake
+            ),
+            Ok(_) => anyhow::bail!("openGame reported success but no game exists onchain"),
+            Err(e) => anyhow::bail!("could not verify openGame landed: {e:#}"),
+        }
         tracing::info!(%game_id, %white, %black, %stake, "settlement(onchain): opened escrow");
         Ok(())
     }
@@ -505,17 +590,66 @@ impl SettlementSink for OnchainSettlement {
 
     async fn open_tournament(&self, tid: Uuid, buy_in: U256) -> anyhow::Result<()> {
         let tidb = game_id_to_bytes32(tid);
-        let pending = self.contract().openTournament(tidb, buy_in).send().await?;
+        let escrow = self.contract();
+        let pending = escrow.openTournament(tidb, buy_in).send().await?;
         self.confirm(pending, "openTournament").await?;
+        // Postcondition: entries are refused against a pool that doesn't exist,
+        // so a lobby advertising one that never opened collects joins that can
+        // only fail.
+        match escrow.tournaments(tidb).call().await {
+            Ok(t) if t.exists && t.buyIn == buy_in => {}
+            Ok(t) if t.exists => {
+                anyhow::bail!("openTournament landed with buy-in {} not {buy_in}", t.buyIn)
+            }
+            Ok(_) => anyhow::bail!("openTournament reported success but no tournament exists"),
+            Err(e) => anyhow::bail!("could not verify openTournament landed: {e:#}"),
+        }
         tracing::info!(%tid, %buy_in, "settlement(onchain): opened tournament");
         Ok(())
     }
 
     async fn enter_tournament(&self, tid: Uuid, player: Address) -> anyhow::Result<()> {
         let tidb = game_id_to_bytes32(tid);
-        let pending = self.contract().enterTournament(tidb, player).send().await?;
+        let escrow = self.contract();
+        let pending = escrow.enterTournament(tidb, player).send().await?;
         self.confirm(pending, "enterTournament").await?;
+        // Postcondition: the entry flag is the thing the caller acts on — it
+        // adds this wallet to a field whose standings divide a real pool, so
+        // "they paid" has to be read off the chain rather than inferred from a
+        // transaction that didn't revert.
+        match escrow.tournamentEntered(tidb, player).call().await {
+            Ok(true) => {}
+            Ok(false) => {
+                anyhow::bail!("enterTournament reported success but the entry flag is not set")
+            }
+            Err(e) => anyhow::bail!("could not verify enterTournament landed: {e:#}"),
+        }
         tracing::info!(%tid, %player, "settlement(onchain): tournament entry");
+        Ok(())
+    }
+
+    async fn start_tournament(&self, tid: Uuid) -> anyhow::Result<()> {
+        // An escrow predating the two-clock lifecycle has no transition to
+        // make: its settle clock has been running since `openTournament`, which
+        // is exactly what the caller wants to have happened. Skipping is right
+        // there, and lets the server deploy ahead of the contract.
+        if !self.has_start_transition().await {
+            tracing::info!(%tid, "settlement(onchain): escrow predates startTournament; skipping");
+            return Ok(());
+        }
+        let tidb = game_id_to_bytes32(tid);
+        let escrow = self.contract();
+        let pending = escrow.startTournament(tidb).send().await?;
+        self.confirm(pending, "startTournament").await?;
+        // Postcondition: without `startedAt` the pool cannot be settled at all,
+        // so the caller must not dispatch a schedule on the strength of a
+        // transaction it merely believes landed.
+        match escrow.tournaments(tidb).call().await {
+            Ok(t) if t.startedAt != 0 => {}
+            Ok(_) => anyhow::bail!("startTournament reported success but startedAt is still 0"),
+            Err(e) => anyhow::bail!("could not verify startTournament landed: {e:#}"),
+        }
+        tracing::info!(%tid, "settlement(onchain): tournament started");
         Ok(())
     }
 
@@ -605,14 +739,30 @@ impl SettlementSink for OnchainSettlement {
         // A contract predating `entryWindow` has no such function and the call
         // reverts; fall back to the settle deadline, which is the only bound it
         // actually enforces. Don't fail the whole read over it.
-        let entry_window = escrow
-            .entryWindow()
+        // Same fallback as the capability probe: no `entryWindow` means no
+        // separate entry window, which is what that deployment enforces.
+        let entry_window = escrow.entryWindow().call().await.unwrap_or(settle_timeout);
+        // The settle clock runs from `startedAt` once play begins, and only the
+        // entry deadline is knowable before that. For an unstarted tournament
+        // report the deadline it WOULD get by starting right now — which is
+        // what the schedule guard needs: "if I start this event at this moment,
+        // can it finish?" A contract predating `startedAt` reads back 0 here
+        // and falls into the same branch, which matches what it enforces
+        // (a clock already running from `openedAt`).
+        let started_at = escrow
+            .tournaments(tidb)
             .call()
             .await
-            .unwrap_or(settle_timeout);
+            .map(|t| t.startedAt)
+            .unwrap_or(0);
+        let settle_from = if started_at != 0 {
+            started_at
+        } else {
+            unix_now().max(opened_at)
+        };
         Some((
             opened_at.saturating_add(entry_window),
-            opened_at.saturating_add(settle_timeout),
+            settle_from.saturating_add(settle_timeout),
         ))
     }
 
@@ -869,6 +1019,61 @@ mod tests {
         Ok(())
     }
 
+    /// The server deploys independently of the contract, so it must run
+    /// against a deployment that has the two-clock tournament lifecycle and one
+    /// that predates it. The probe is what makes the deploy order irrelevant:
+    /// against an old escrow `start_tournament` is a no-op (its settle clock
+    /// has been running since `openTournament`), and settlement still works.
+    ///
+    /// MockUSDC stands in for "a contract at this address without
+    /// `entryWindow()`" — the probe only asks whether the marker function
+    /// answers, which is exactly what an older ChessEscrow would fail to do.
+    #[tokio::test]
+    async fn start_tournament_is_skipped_on_an_escrow_without_the_transition() -> anyhow::Result<()>
+    {
+        let anvil = Anvil::new().try_spawn()?;
+        let url = anvil.endpoint_url();
+        let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
+        let oracle: PrivateKeySigner = anvil.keys()[1].clone().into();
+        let dep = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(deployer.clone()))
+            .connect_http(url.clone());
+        let not_an_escrow = MockUSDC::deploy(&dep).await?;
+
+        let sink = OnchainSettlement::new(url.clone(), *not_an_escrow.address(), oracle.clone());
+        assert!(
+            !sink.has_start_transition().await,
+            "a contract with no entryWindow() must probe as pre-transition"
+        );
+        // And the transition becomes a no-op rather than an error, which is
+        // what keeps buy-in tournaments startable against the old escrow.
+        sink.start_tournament(Uuid::new_v4()).await?;
+
+        // A real escrow probes the other way, and there the transition is real.
+        let usdc = MockUSDC::deploy(&dep).await?;
+        let escrow = ChessEscrow::deploy(
+            &dep,
+            *usdc.address(),
+            oracle.address(),
+            deployer.address(),
+            100u16,
+            3600u64,
+            1800u64,
+        )
+        .await?;
+        let live = OnchainSettlement::new(url, *escrow.address(), oracle);
+        assert!(
+            live.has_start_transition().await,
+            "the current escrow must probe as having the transition"
+        );
+        // Required, not optional: an unknown tournament cannot be started.
+        assert!(
+            live.start_tournament(Uuid::new_v4()).await.is_err(),
+            "a failing startTournament on a capable contract must stay fatal"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn opens_enters_settles_tournament() -> anyhow::Result<()> {
         let anvil = Anvil::new().try_spawn()?;
@@ -934,6 +1139,9 @@ mod tests {
             U256::from(1_000_000u64),
             U256::from(0u64),
         ];
+        // Play begins: this is what starts the onchain settle clock, and
+        // settlement is refused without it.
+        sink.start_tournament(tid).await?;
         sink.settle_tournament(tid, addrs.clone(), payouts).await?;
 
         let read = ChessEscrow::new(escrow_addr, &dep);
@@ -1045,6 +1253,7 @@ mod tests {
             (players[0].address(), U256::from(2_000_000u64)),
             (players[1].address(), U256::from(1_000_000u64)),
         ];
+        sink.start_tournament(tid).await?;
         sink.settle_tournament_root(tid, leaves.clone()).await?;
 
         // Each winner claims with a Rust-built proof verified by the Solidity tree.
@@ -1203,6 +1412,9 @@ mod tests {
             .await?
             .get_receipt()
             .await?; // pool = 17 USDC
+        // Begin play — settlement is keyed on `startedAt` and is refused
+        // without it.
+        pay.startTournament(gid).send().await?.get_receipt().await?;
 
         // 17 leaves: index 0 is our test winner, the rest synthetic. Total == pool.
         let winner = Address::from([0x11; 20]);

@@ -248,6 +248,12 @@ pub enum SeatDelivery {
     },
 }
 
+/// Hook a mode passes to [`AppState::start_game_registered`]: called with
+/// `(game_id, white_token, black_token)` once the game exists and before either
+/// seat can be played, so a mode can record everything it needs to route the
+/// outcome. See that method for why the ordering is load-bearing.
+pub type SeatRegistration<'a> = dyn Fn(GameId, &str, &str) + Send + Sync + 'a;
+
 /// Onchain seats + stake for a wagered game.
 #[derive(Clone, Copy)]
 pub struct WagerSeats {
@@ -1213,7 +1219,11 @@ impl AppState {
     /// unable to advance or settle.
     ///
     /// The hook is therefore called after the room, the persisted row and the
-    /// launch tokens exist, and before the first `AssignSeat` goes out.
+    /// launch tokens exist, and before the first `AssignSeat` goes out. It
+    /// receives both launch tokens because registering the ROUTING alone is not
+    /// enough: `record_outcome` also needs the mode's own record of the game to
+    /// exist, or it finds the routing entry, fails to find the game to write a
+    /// result onto, and the round still never resolves.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_game_registered(
         &self,
@@ -1223,7 +1233,7 @@ impl AppState {
         ladder: Ladder,              // ranked only when money is upstream (buy-in)
         meta: [SeatMeta; 2],         // [white, black] self-declared identity
         delivery: [SeatDelivery; 2], // [white, black] seat delivery
-        register: Option<&(dyn Fn(GameId) + Send + Sync)>,
+        register: Option<&SeatRegistration<'_>>,
     ) -> Result<CreateGameResp, StatusCode> {
         // Maintenance/drain: the single chokepoint every mode funnels through,
         // so one guard blocks all new games while existing ones play out.
@@ -1423,7 +1433,7 @@ impl AppState {
         // the only safe point to register outcome routing — see the doc
         // comment above.
         if let Some(register) = register {
-            register(game_id);
+            register(game_id, &white_token, &black_token);
         }
 
         let stake_str = wager.map(|w| w.stake.to_string());
