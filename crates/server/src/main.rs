@@ -50,6 +50,11 @@ pub const MAX_INCREMENT_SECS: u64 = 180;
 /// it once those are addressed. Also bounds the U256→u128 conversion.
 pub const MAX_STAKE: u128 = 25_000_000;
 
+/// How long a connected bot agent has to accept a seat assignment before it is
+/// treated as gone. Generous for a socket that is being read at all, and short
+/// enough that one unresponsive agent cannot stall a tournament round.
+pub const AGENT_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct AppState(pub Arc<Inner>);
 
@@ -71,7 +76,14 @@ pub struct Inner {
     /// boot lookup failed (`None`) it is resolved lazily on first admin use, so
     /// a transient boot-time RPC error can't lock the owner out for the whole
     /// process. `None` after a lazy attempt ⇒ admin disabled (fail-closed).
+    /// The admin wallet. When `admin_configured` this is authoritative; when
+    /// it is chain-derived this is only a CACHE for display (`/config`) and is
+    /// never used to authorize — see `AppState::admin_wallet`.
     pub admin_wallet: Mutex<Option<String>>,
+    /// `ADMIN_WALLET` was explicitly set. A configured admin is static by
+    /// definition; a chain-derived one is not, and the difference decides
+    /// whether authorization may be answered from memory.
+    pub admin_configured: bool,
     pub lobby: Lobby,
     pub auth: auth::Auth,
     /// Connected user-run engines (bots), keyed by owner wallet.
@@ -284,7 +296,7 @@ async fn main() -> anyhow::Result<()> {
     let settlement = ledger::from_env();
     // Who may toggle maintenance: ADMIN_WALLET override, else the onchain
     // escrow owner (read live so it tracks ownership transfers).
-    let admin_wallet = resolve_admin_wallet(&*settlement).await;
+    let (admin_wallet, admin_configured) = resolve_admin_wallet(&*settlement).await;
     // Restore the durable maintenance flag. A read failure defaults OFF but is
     // logged loudly — silently dropping a persisted pause would resume wagered
     // games during the exact drain window it was set to protect.
@@ -313,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         maintenance: AtomicBool::new(maintenance),
         admin_wallet: Mutex::new(admin_wallet),
+        admin_configured,
         lobby: Lobby::default(),
         auth: auth::Auth::default(),
         agents: agents::Agents::default(),
@@ -478,13 +491,17 @@ async fn main() -> anyhow::Result<()> {
 /// `ADMIN_WALLET` if set and valid, else the escrow contract owner read live
 /// from chain. Returns a lowercased `0x…` address, or `None` (admin disabled,
 /// fail-closed) when neither is available.
-async fn resolve_admin_wallet(settlement: &dyn SettlementSink) -> Option<String> {
+/// Returns `(wallet, configured)`. `configured` distinguishes an explicitly
+/// set `ADMIN_WALLET` — static, and safe to answer from memory forever — from
+/// an owner read off the escrow contract, which can change under us and must
+/// be re-read before it authorizes anything.
+async fn resolve_admin_wallet(settlement: &dyn SettlementSink) -> (Option<String>, bool) {
     if let Ok(raw) = std::env::var("ADMIN_WALLET") {
         match raw.trim().parse::<Address>() {
             Ok(a) => {
                 let a = format!("{a:?}").to_lowercase();
                 tracing::info!(admin = %a, "admin wallet from ADMIN_WALLET");
-                return Some(a);
+                return (Some(a), true);
             }
             Err(_) => tracing::warn!("ADMIN_WALLET is not a valid address; ignoring"),
         }
@@ -493,14 +510,14 @@ async fn resolve_admin_wallet(settlement: &dyn SettlementSink) -> Option<String>
         Some(owner) => {
             let a = format!("{owner:?}").to_lowercase();
             tracing::info!(admin = %a, "admin wallet from escrow owner()");
-            Some(a)
+            (Some(a), false)
         }
         None => {
             tracing::warn!(
                 "no admin wallet resolved (ADMIN_WALLET unset, escrow owner() unavailable); \
                  maintenance toggle disabled"
             );
-            None
+            (None, false)
         }
     }
 }
@@ -749,6 +766,9 @@ async fn config_info(State(state): State<AppState>) -> Json<ConfigInfo> {
         wager_enabled: state.0.settlement.is_onchain(),
         siwe_domain: auth::expected_domain(),
         maintenance: state.maintenance_on(),
+        // Advisory: lets the owner's browser show the admin controls. The
+        // server re-derives the real answer per request in `is_admin`, so a
+        // stale value here can only mis-draw a button, never grant anything.
         admin_wallet: state.0.admin_wallet.lock().clone(),
         house_wallet: house_wallet(),
     })
@@ -796,11 +816,14 @@ async fn sweep_task(state: AppState) {
     loop {
         tick.tick().await;
         state.0.auth.sweep_expired();
-        state.0.lobby.sweep_expired();
         state.0.limits.sweep();
-        // Prune game->mode routing entries for games that no longer exist.
+        // The live-game set gates BOTH passes: `sweep_expired` keeps a matched
+        // offer/ticket only while its game still exists (so a launch token is
+        // never dropped out from under a seated player), and `prune_games`
+        // drops routing entries for games that are gone.
         let live: std::collections::HashSet<GameId> =
             state.0.rooms.lock().keys().copied().collect();
+        state.0.lobby.sweep_expired(&live);
         state.0.lobby.prune_games(&live);
     }
 }
@@ -850,6 +873,29 @@ async fn settlement_worker(db: Arc<Db>, settlement: Arc<dyn SettlementSink>) {
             };
             match settlement.report_result(row.game_id, winner).await {
                 Ok(()) => {
+                    // Confirm against the CHAIN before recording terminal
+                    // success. `report_result` already fails on a reverted
+                    // receipt (`OnchainSettlement::confirm`), so this is the
+                    // second lock on the same door: "settled" is the one status
+                    // with no retry behind it, and marking it on a payout that
+                    // did not happen strands the winner's stake until the 24h
+                    // `refundGame` timeout turns their win into a refund. Read
+                    // the flag rather than trusting the submit path to stay
+                    // honest through future edits.
+                    if settlement.is_onchain() && !settlement.is_settled(row.game_id).await {
+                        // Requeue rather than fail: the likeliest cause is an
+                        // RPC lagging the block we just mined in, and a retry
+                        // self-heals (the resubmit reverts `AlreadySettled`,
+                        // and the Err arm below reads the flag as success).
+                        let _ = db
+                            .requeue_settlement(row.id, Some("submitted but not settled onchain"))
+                            .await;
+                        tracing::warn!(
+                            game_id = %row.game_id,
+                            "outbox: submit reported success but the chain says unsettled; requeued"
+                        );
+                        continue;
+                    }
                     let _ = db
                         .finalize_settlement(row.id, row.game_id, "settled", None)
                         .await;
@@ -904,6 +950,25 @@ async fn tournament_settlement_worker(db: Arc<Db>, settlement: Arc<dyn Settlemen
         for row in rows {
             match settle_tournament_row(&settlement, &row).await {
                 Ok(()) => {
+                    // Same second lock as the game worker above: never record
+                    // terminal success on a pool the chain doesn't agree was
+                    // settled. Requeue instead, so an RPC lagging the block
+                    // self-heals on the next tick.
+                    if settlement.is_onchain() && !settlement.is_tournament_settled(row.tid).await {
+                        let _ = db
+                            .set_tournament_settlement_status(
+                                row.id,
+                                "pending",
+                                Some("submitted but not settled onchain"),
+                            )
+                            .await;
+                        tracing::warn!(
+                            tid = %row.tid,
+                            "tournament outbox: submit reported success but the chain says \
+                             unsettled; requeued"
+                        );
+                        continue;
+                    }
                     let _ = db
                         .set_tournament_settlement_status(row.id, "settled", None)
                         .await;
@@ -1126,6 +1191,40 @@ impl AppState {
         meta: [SeatMeta; 2],         // [white, black] self-declared identity
         delivery: [SeatDelivery; 2], // [white, black] seat delivery
     ) -> Result<CreateGameResp, StatusCode> {
+        self.start_game_registered(tc, mode, wager, ladder, meta, delivery, None)
+            .await
+    }
+
+    /// `start_game`, plus a hook that runs once the game exists but **before
+    /// any seat can be played**.
+    ///
+    /// A mode that routes a game's outcome somewhere (today: tournaments, via
+    /// `game_to_tournament`) has to have that routing in place before it hands
+    /// out the capability to play, because the outcome can arrive the instant
+    /// it does. `dispatch_round` used to register the whole round after its
+    /// start loop finished, on the reasoning that a real game cannot end in the
+    /// sub-millisecond gap — but the gap was not sub-millisecond. Delivering a
+    /// seat to a bot agent pushes onto a 16-slot channel drained by a task that
+    /// awaits the agent's socket, so an entrant whose agent simply stops
+    /// reading held the loop open for as long as it liked. Their earlier
+    /// pairing was live and playable that whole time, and an outcome with no
+    /// routing entry is silently dropped by `record_outcome` — leaving
+    /// `round_remaining` stuck above zero and the event, with its real pool,
+    /// unable to advance or settle.
+    ///
+    /// The hook is therefore called after the room, the persisted row and the
+    /// launch tokens exist, and before the first `AssignSeat` goes out.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_game_registered(
+        &self,
+        tc: TimeControl,
+        mode: &str,
+        wager: Option<WagerSeats>,
+        ladder: Ladder,              // ranked only when money is upstream (buy-in)
+        meta: [SeatMeta; 2],         // [white, black] self-declared identity
+        delivery: [SeatDelivery; 2], // [white, black] seat delivery
+        register: Option<&(dyn Fn(GameId) + Send + Sync)>,
+    ) -> Result<CreateGameResp, StatusCode> {
         // Maintenance/drain: the single chokepoint every mode funnels through,
         // so one guard blocks all new games while existing ones play out.
         self.reject_if_draining()?;
@@ -1319,6 +1418,14 @@ impl AppState {
         // vanished after being claimed — the game can never start, so abort it
         // NOW (refund escrow, evict state) rather than stranding locked stakes
         // behind the contract's 24h claimTimeout.
+        // Everything the game needs in order to be findable now exists (room,
+        // persisted row, launch tokens) and nothing can play it yet. This is
+        // the only safe point to register outcome routing — see the doc
+        // comment above.
+        if let Some(register) = register {
+            register(game_id);
+        }
+
         let stake_str = wager.map(|w| w.stake.to_string());
         let seats = [
             (Color::White, &white_token, &delivery[0]),
@@ -1333,18 +1440,30 @@ impl AppState {
             else {
                 continue;
             };
+            // BOUNDED, never a bare `.await`. The agent channel holds 16 and
+            // is drained by a task that awaits the agent's own socket, so an
+            // agent that stops reading applies backpressure right back into
+            // this loop. Awaiting it let one unresponsive entrant hold up
+            // every other pairing in a tournament round indefinitely (and any
+            // other caller of `start_game`, park accept included). An agent
+            // that cannot take a seat assignment within the timeout is treated
+            // exactly like one that vanished: the game is aborted and refunded,
+            // and the caller scores it as a no-show.
             let sent = tx
-                .send(protocol::ServerToAgent::AssignSeat {
-                    game_id,
-                    token: token.clone(),
-                    color,
-                    time_control: tc,
-                    stake: stake_str.clone(),
-                    uci_options: uci_options.clone(),
-                })
+                .send_timeout(
+                    protocol::ServerToAgent::AssignSeat {
+                        game_id,
+                        token: token.clone(),
+                        color,
+                        time_control: tc,
+                        stake: stake_str.clone(),
+                        uci_options: uci_options.clone(),
+                    },
+                    AGENT_DISPATCH_TIMEOUT,
+                )
                 .await;
             if sent.is_err() {
-                tracing::error!(%game_id, %wallet, ?color, "agent vanished before seat dispatch — aborting game");
+                tracing::error!(%game_id, %wallet, ?color, "agent did not take its seat (gone or not reading) — aborting game");
                 self.abort_started_game(game_id, wager).await;
                 return Err(StatusCode::FAILED_DEPENDENCY);
             }
@@ -1476,19 +1595,33 @@ impl AppState {
         Ok(())
     }
 
-    /// The wallet allowed to administer the server, resolving it lazily if the
-    /// boot lookup failed — a transient boot-time RPC error must not lock the
-    /// owner out for the whole process. Caches the result once resolved.
+    /// The wallet allowed to administer the server, **re-read from the chain on
+    /// every call** unless it was explicitly configured.
+    ///
+    /// The owner used to be read once at boot and cached for the life of the
+    /// process. The escrow is `Ownable2Step`, so a completed
+    /// `transferOwnership`/`acceptOwnership` left the server authorizing the
+    /// PREVIOUS owner and rejecting the current one — privilege revocation
+    /// simply did not take. The old owner kept the maintenance switch, which is
+    /// DB-persisted, so they could stop every new game on the platform and have
+    /// it survive the restarts meant to undo it.
+    ///
+    /// Only `set_maintenance` reaches this, so a view call per privileged
+    /// mutation costs nothing worth optimising. An RPC failure returns `None`
+    /// and nobody is admin — fail-closed, matching the boot behaviour: losing
+    /// the pause switch for a moment is strictly better than handing it to
+    /// whoever held it last.
     async fn admin_wallet(&self) -> Option<String> {
-        if let Some(w) = self.0.admin_wallet.lock().clone() {
-            return Some(w);
+        // Explicitly configured: static, and there is no chain to consult.
+        if self.0.admin_configured {
+            return self.0.admin_wallet.lock().clone();
         }
-        // Boot lookup returned None (ADMIN_WALLET was unset too) — try once more
-        // live against the contract.
         let owner = self.0.settlement.owner().await?;
         let w = format!("{owner:?}").to_lowercase();
+        // Refresh the advisory copy `/config` publishes, so the UI follows a
+        // transfer too. This is a cache of what we just read, never the source
+        // of the decision above.
         *self.0.admin_wallet.lock() = Some(w.clone());
-        tracing::info!(admin = %w, "admin wallet resolved lazily from escrow owner()");
         Some(w)
     }
 
@@ -1591,6 +1724,10 @@ mod tests {
             db: None,
             maintenance: AtomicBool::new(maintenance),
             admin_wallet: Mutex::new(admin_wallet.map(|w| w.to_lowercase())),
+            // An explicitly-passed wallet stands in for a configured
+            // ADMIN_WALLET; `None` leaves authority chain-derived, which is the
+            // case the fail-closed and ownership-transfer tests exercise.
+            admin_configured: admin_wallet.is_some(),
             lobby: Lobby::default(),
             auth: auth::Auth::default(),
             agents: agents::Agents::default(),
@@ -1617,6 +1754,7 @@ mod tests {
             db: Some(db),
             maintenance: AtomicBool::new(false),
             admin_wallet: Mutex::new(None),
+            admin_configured: false,
             lobby: Lobby::default(),
             auth: auth::Auth::default(),
             agents: agents::Agents::default(),
@@ -2145,6 +2283,98 @@ mod tests {
         assert!(!state.is_admin(&bearer(&other_token)).await);
         // No session at all → not admin.
         assert!(!state.is_admin(&HeaderMap::new()).await);
+    }
+
+    /// A sink whose `owner()` can be changed mid-test, standing in for a
+    /// completed `Ownable2Step` transfer on the escrow.
+    struct TransferableOwner(Mutex<Option<Address>>);
+
+    #[async_trait::async_trait]
+    impl ledger::SettlementSink for TransferableOwner {
+        async fn open_escrow(
+            &self,
+            _game_id: Uuid,
+            _white: Address,
+            _black: Address,
+            _stake: U256,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn report_result(
+            &self,
+            _game_id: Uuid,
+            _winner: Option<Address>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn is_onchain(&self) -> bool {
+            true
+        }
+        async fn owner(&self) -> Option<Address> {
+            *self.0.lock()
+        }
+    }
+
+    /// M-04: chain-derived admin authority must FOLLOW the contract's owner.
+    ///
+    /// The owner was read once at boot and cached for the process lifetime, so
+    /// after a completed ownership transfer the server still authorized the old
+    /// owner and refused the new one. Revocation did not take — and since the
+    /// maintenance switch is DB-persisted, the former owner could keep every
+    /// new game blocked across the restarts intended to undo it.
+    #[tokio::test]
+    async fn admin_authority_follows_an_ownership_transfer() {
+        let a: Address = "0xAbC0000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        let b: Address = "0xdEF0000000000000000000000000000000000002"
+            .parse()
+            .unwrap();
+        let sink = Arc::new(TransferableOwner(Mutex::new(Some(a))));
+        let state = test_state_with_settlement(false, None, sink.clone());
+
+        let tok_a = state.0.auth.mint_session(&format!("{a:?}"));
+        let tok_b = state.0.auth.mint_session(&format!("{b:?}"));
+        assert!(state.is_admin(&bearer(&tok_a)).await, "A owns the escrow");
+        assert!(!state.is_admin(&bearer(&tok_b)).await, "B does not yet");
+
+        // acceptOwnership(): the contract's owner is now B.
+        *sink.0.lock() = Some(b);
+
+        assert!(
+            !state.is_admin(&bearer(&tok_a)).await,
+            "the FORMER owner must lose admin the moment the transfer completes"
+        );
+        assert!(
+            state.is_admin(&bearer(&tok_b)).await,
+            "the current owner must gain it"
+        );
+
+        // An RPC that stops answering revokes everyone rather than falling
+        // back on whoever was cached.
+        *sink.0.lock() = None;
+        assert!(!state.is_admin(&bearer(&tok_a)).await);
+        assert!(!state.is_admin(&bearer(&tok_b)).await);
+    }
+
+    /// The other half: an explicitly configured `ADMIN_WALLET` is static by
+    /// definition and must not start depending on an RPC call.
+    #[tokio::test]
+    async fn a_configured_admin_wallet_ignores_the_chain() {
+        let configured = "0xAbC0000000000000000000000000000000000001";
+        let chain: Address = "0xdEF0000000000000000000000000000000000002"
+            .parse()
+            .unwrap();
+        let sink = Arc::new(TransferableOwner(Mutex::new(Some(chain))));
+        let state = test_state_with_settlement(false, Some(configured), sink);
+
+        let tok_cfg = state.0.auth.mint_session(configured);
+        let tok_chain = state.0.auth.mint_session(&format!("{chain:?}"));
+        assert!(state.is_admin(&bearer(&tok_cfg)).await);
+        assert!(
+            !state.is_admin(&bearer(&tok_chain)).await,
+            "the contract owner is not admin when ADMIN_WALLET names someone else"
+        );
     }
 
     #[tokio::test]

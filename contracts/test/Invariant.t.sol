@@ -272,7 +272,7 @@ contract SolvencyInvariant {
 
     function setUp() public {
         usdc = new MockUSDC();
-        escrow = new ChessEscrow(address(usdc), vm.addr(oracleKey), fee, 100, 3600);
+        escrow = new ChessEscrow(address(usdc), vm.addr(oracleKey), fee, 100, 3600, 1800);
         handler = new Handler(escrow, usdc, oracleKey, actors);
     }
 

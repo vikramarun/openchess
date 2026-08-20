@@ -60,7 +60,7 @@ contract ChessEscrowTest {
         oracle = vm.addr(oracleKey);
         usdc = new MockUSDC();
         // 1% rake, 1 hour timeout
-        escrow = new ChessEscrow(address(usdc), oracle, fee, 100, 3600);
+        escrow = new ChessEscrow(address(usdc), oracle, fee, 100, 3600, 1800);
 
         _fund(white, 10 * STAKE);
         _fund(black, 10 * STAKE);
@@ -465,6 +465,52 @@ contract ChessEscrowTest {
         vm.prank(sponsor);
         vm.expectRevert();
         escrow.sponsorTournament(tid, STAKE);
+    }
+
+    function test_entering_past_the_entry_window_rejected() public {
+        // M-02: the settle clock starts at openTournament, and both settle
+        // paths revert once it lapses — but entry had no deadline of its own.
+        // A player could therefore be admitted (and charged) into an event that
+        // was already impossible to settle, whose only remaining outcome was
+        // claimRefund with the standings discarded.
+        bytes32 tid = keccak256("ew1");
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white); // inside the window
+
+        vm.warp(block.timestamp + 1801); // entryWindow is 1800 in this suite
+        vm.prank(oracle);
+        vm.expectRevert(); // EntryWindowClosed
+        escrow.enterTournament(tid, black);
+
+        _assert(escrow.tournamentEntered(tid, white), "the early entry stands");
+        _assert(!escrow.tournamentEntered(tid, black), "the late one does not");
+    }
+
+    function test_entry_window_closes_before_the_settle_window() public {
+        // The gap between the two IS the time the games get. A settlement that
+        // is still possible after entry closes is the whole point, so pin the
+        // ordering rather than the numbers.
+        _assert(escrow.entryWindow() < escrow.settleTimeout(), "entry closes first");
+
+        bytes32 tid = keccak256("ew2");
+        vm.prank(oracle);
+        escrow.openTournament(tid, STAKE);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, white);
+        vm.prank(oracle);
+        escrow.enterTournament(tid, black);
+
+        // Past entry, still settleable — the state an event plays out in.
+        vm.warp(block.timestamp + 1801);
+        uint256[] memory payouts = new uint256[](2);
+        payouts[0] = 2 * STAKE;
+        address[] memory who = new address[](2);
+        who[0] = white;
+        who[1] = black;
+        _settleT(tid, who, payouts, DEADLINE);
+        _assert(escrow.bankroll(white) == 11 * STAKE, "the winner was paid");
     }
 
     function test_sponsor_cannot_exceed_unlocked_bankroll() public {

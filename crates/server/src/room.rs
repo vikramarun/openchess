@@ -27,6 +27,11 @@ use tokio::time::{interval, Instant};
 /// than a second copy of this number that drifts.
 pub const START_WINDOW: Duration = Duration::from_secs(60);
 
+/// How many consecutive rejected commands a seat is answered before the room
+/// stops replying to it. Far above any legitimate client (which rejects at most
+/// on a race with its own clock) and far below a useful flood.
+const MAX_CONSECUTIVE_REJECTS: u32 = 32;
+
 /// Onchain seats for a wagered game (used to settle the result).
 #[derive(Clone, Copy)]
 pub struct StakeInfo {
@@ -109,6 +114,8 @@ pub fn spawn_room(
         black_occupied: false,
         wready: false,
         bready: false,
+        wrejects: 0,
+        brejects: 0,
         started: false,
         started_flag: started_flag.clone(),
         spectate: spectate_tx.clone(),
@@ -138,6 +145,15 @@ struct Room {
     black_occupied: bool,
     wready: bool,
     bready: bool,
+    /// Consecutive rejected commands per seat, reset by any legal move. Bounds
+    /// the traffic a client can make the room generate FOR ITSELF: every
+    /// illegal or out-of-turn move is answered with a `MoveRejected` addressed
+    /// back to the sender, so without a cap one seat can drive an unbounded
+    /// reply stream into its own queue. `send_to` no longer blocks on that
+    /// queue, so this is no longer a way to stop the room — it just stops a
+    /// pointless loop from crowding out the frames the client actually needs.
+    wrejects: u32,
+    brejects: u32,
     started: bool,
     started_flag: Arc<AtomicBool>,
     spectate: broadcast::Sender<ServerMessage>,
@@ -163,20 +179,53 @@ impl Room {
         START_WINDOW.saturating_sub(self.base.elapsed()).as_millis() as u64
     }
 
-    async fn send_to(&self, color: Color, msg: ServerMessage) {
+    /// Hand a frame to one seat. **Synchronous and non-blocking, deliberately.**
+    ///
+    /// This used to `tx.send(msg).await`, which made every player's socket a
+    /// brake on the authoritative room. The seat channel holds 64 messages and
+    /// the writer task awaits `sink.send`, so a client that simply stops
+    /// reading lets TCP backpressure fill the queue; the next send then parked
+    /// the room actor — and the actor is also the thing that owns the 250ms
+    /// clock tick, so the clock, the opponent's moves, resignation and
+    /// settlement all stopped with it. A player about to flag could hold their
+    /// own loss open indefinitely by not reading, and top the queue up on
+    /// demand: an out-of-turn or illegal move is answered with a `MoveRejected`
+    /// addressed straight back to the sender, so the flood is self-served.
+    ///
+    /// A full queue therefore means "this consumer is not reading", and the
+    /// frame is dropped. Dropping is the conservative choice of the three: the
+    /// game stays authoritative and finishes on time, and a client that fell
+    /// behind resyncs on reconnect (`resend_state`). Disconnecting them here
+    /// would be worse — clearing `*_occupied` before the game starts turns the
+    /// abort-with-refund that an unstarted room resolves to into a FORFEIT that
+    /// hands the opponent the whole stake, which is the confiscation the
+    /// decline path exists to avoid.
+    ///
+    /// Never make this `async` again, and never await delivery from the actor.
+    fn send_to(&self, color: Color, msg: ServerMessage) {
         let out = match color {
             Color::White => &self.white_out,
             Color::Black => &self.black_out,
         };
         if let Some(tx) = out {
-            let _ = tx.send(msg).await;
+            if let Err(e) = tx.try_send(msg) {
+                // Closed is ordinary (the socket went away and Detach is on its
+                // way); Full is the one worth seeing in the logs.
+                if matches!(e, mpsc::error::TrySendError::Full(_)) {
+                    tracing::warn!(
+                        game_id = %self.game_id,
+                        ?color,
+                        "seat is not draining its output; dropping a frame"
+                    );
+                }
+            }
         }
     }
 
     /// Send to both players and all spectators.
-    async fn send_all(&self, msg: ServerMessage) {
-        self.send_to(Color::White, msg.clone()).await;
-        self.send_to(Color::Black, msg.clone()).await;
+    fn send_all(&self, msg: ServerMessage) {
+        self.send_to(Color::White, msg.clone());
+        self.send_to(Color::Black, msg.clone());
         let _ = self.spectate.send(msg);
     }
 
@@ -373,8 +422,7 @@ impl Room {
                 opponent: Some(self.players[1].clone()),
                 time_control: Some(self.tc),
             },
-        )
-        .await;
+        );
         self.send_to(
             Color::Black,
             ServerMessage::GameStart {
@@ -385,8 +433,7 @@ impl Room {
                 opponent: Some(self.players[0].clone()),
                 time_control: Some(self.tc),
             },
-        )
-        .await;
+        );
         let _ = self.spectate.send(ServerMessage::GameStart {
             game_id: self.game_id,
             start_fen,
@@ -420,8 +467,7 @@ impl Room {
                 opponent: Some(self.players[opp_idx].clone()),
                 time_control: Some(game.time_control()),
             },
-        )
-        .await;
+        );
         if game.turn() == color {
             self.send_to(
                 color,
@@ -433,8 +479,7 @@ impl Room {
                     clock,
                     deadline_server_ms: game.move_deadline_ms(),
                 },
-            )
-            .await;
+            );
         }
     }
 
@@ -457,7 +502,7 @@ impl Room {
             clock,
             deadline_server_ms: game.move_deadline_ms(),
         };
-        self.send_to(turn, msg).await;
+        self.send_to(turn, msg);
     }
 
     async fn on_move(&mut self, color: Color, uci_move: &str) {
@@ -487,7 +532,7 @@ impl Room {
         let (turn, applied) = match step {
             Step::Ignore => return,
             Step::Reject(ply, reason) => {
-                self.maybe_reject(color, ply, reason).await;
+                self.maybe_reject(color, ply, reason);
                 return;
             }
             Step::Applied(turn, result) => (turn, result),
@@ -508,6 +553,11 @@ impl Room {
                     }
                     return;
                 }
+                // A legal move clears the seat's reject budget.
+                match turn {
+                    Color::White => self.wrejects = 0,
+                    Color::Black => self.brejects = 0,
+                }
                 // Ack to mover.
                 self.send_to(
                     turn,
@@ -516,8 +566,7 @@ impl Room {
                         ply: applied.ply,
                         clock: applied.clock,
                     },
-                )
-                .await;
+                );
                 // Mirror to opponent + spectators.
                 let mirror = ServerMessage::OpponentMoved {
                     game_id: self.game_id,
@@ -525,7 +574,7 @@ impl Room {
                     uci: uci_move.to_string(),
                     clock: applied.clock,
                 };
-                self.send_to(turn.opposite(), mirror.clone()).await;
+                self.send_to(turn.opposite(), mirror.clone());
                 let _ = self.spectate.send(mirror);
 
                 if let Some(db) = &self.db {
@@ -548,20 +597,21 @@ impl Room {
             }
             Err(e) => {
                 let ply = self.game.as_ref().map(|g| g.ply()).unwrap_or(0);
-                self.send_to(
-                    color,
-                    ServerMessage::MoveRejected {
-                        game_id: self.game_id,
-                        ply,
-                        reason: e.to_string(),
-                    },
-                )
-                .await;
+                self.maybe_reject(color, ply, &e.to_string());
             }
         }
     }
 
-    async fn maybe_reject(&self, color: Color, ply: u32, reason: &str) {
+    /// Answer a rejected command, up to `MAX_CONSECUTIVE_REJECTS` in a row.
+    fn maybe_reject(&mut self, color: Color, ply: u32, reason: &str) {
+        let seen = match color {
+            Color::White => &mut self.wrejects,
+            Color::Black => &mut self.brejects,
+        };
+        *seen += 1;
+        if *seen > MAX_CONSECUTIVE_REJECTS {
+            return;
+        }
         self.send_to(
             color,
             ServerMessage::MoveRejected {
@@ -569,8 +619,7 @@ impl Room {
                 ply,
                 reason: reason.to_string(),
             },
-        )
-        .await;
+        );
     }
 
     async fn finish(&mut self, result: GameResult) {
@@ -684,8 +733,7 @@ impl Room {
             final_pgn: pgn,
             result_hash,
             server_sig,
-        })
-        .await;
+        });
     }
 }
 
@@ -750,6 +798,103 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M-03: a player who stops reading their socket must not be able to stop
+    /// the room, and above all must not be able to stop the CLOCK.
+    ///
+    /// The seat is attached to a capacity-1 output channel that is already
+    /// full, which is what a filled 64-slot queue behind a stalled TCP
+    /// connection looks like from inside the actor. With `send_to` awaiting
+    /// delivery, the first frame the room tried to hand this seat parked the
+    /// actor — and since the 250ms clock tick shares that actor's `select!`,
+    /// the game simply never flagged: the player about to lose on time had
+    /// stopped their own loss by not reading.
+    #[tokio::test]
+    async fn a_player_who_stops_reading_cannot_freeze_the_clock() {
+        let (cleanup_tx, _cleanup_rx) = mpsc::channel(8);
+        let (results_tx, mut results_rx) = mpsc::channel(8);
+        let game_id = uuid::Uuid::new_v4();
+        let handle = spawn_room(
+            game_id,
+            TimeControl {
+                initial_ms: 50,
+                increment_ms: 0,
+            },
+            Arc::new(ledger::LogSettlement),
+            None,
+            [
+                protocol::OpponentInfo {
+                    name: "white".into(),
+                    username: None,
+                    declared_engine: None,
+                },
+                protocol::OpponentInfo {
+                    name: "black".into(),
+                    username: None,
+                    declared_engine: None,
+                },
+            ],
+            None,
+            cleanup_tx,
+            results_tx,
+        );
+
+        // White reads nothing: a one-slot queue, pre-filled.
+        let (wtx, _wrx_held) = mpsc::channel::<ServerMessage>(1);
+        wtx.send(ServerMessage::Error {
+            code: "x".into(),
+            message: "pre-filled".into(),
+        })
+        .await
+        .expect("fill the seat's only slot");
+        // Black reads normally.
+        let (btx, mut brx) = mpsc::channel::<ServerMessage>(64);
+
+        for (color, out) in [(Color::White, wtx), (Color::Black, btx)] {
+            let (resp, rx) = oneshot::channel();
+            handle
+                .cmd_tx
+                .send(RoomCmd::AttachPlayer { color, out, resp })
+                .await
+                .expect("attach");
+            assert!(rx.await.expect("attach ack"));
+        }
+        for color in [Color::White, Color::Black] {
+            handle
+                .cmd_tx
+                .send(RoomCmd::Ready { color })
+                .await
+                .expect("ready");
+        }
+
+        // White is on move with 50ms and is not reading. The room must flag it.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), results_rx.recv())
+            .await
+            .expect("the room must still resolve the game while a seat stalls")
+            .expect("an outcome");
+        assert_eq!(outcome.game_id, game_id);
+        assert_eq!(
+            outcome.winner,
+            Some(Color::Black),
+            "White flagged and Black takes the point"
+        );
+
+        // The room also stayed responsive to everyone else throughout.
+        assert!(
+            brx.try_recv().is_ok(),
+            "the reading seat still received its frames"
+        );
+        let (resp, rx) = oneshot::channel();
+        assert!(
+            handle
+                .cmd_tx
+                .send(RoomCmd::Snapshot { resp })
+                .await
+                .is_err()
+                || tokio::time::timeout(Duration::from_secs(2), rx).await.is_ok(),
+            "a snapshot must not hang behind a stalled seat"
+        );
+    }
 
     #[test]
     fn no_show_forfeits_to_the_present_ready_side() {

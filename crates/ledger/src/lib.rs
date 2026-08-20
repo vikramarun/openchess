@@ -271,6 +271,23 @@ pub trait SettlementSink: Send + Sync {
         None
     }
 
+    /// `(entry_deadline, settle_deadline)` for a tournament, as unix seconds,
+    /// read live from the chain. `None` off-chain or if the read fails.
+    ///
+    /// Both are derived from the SAME `openedAt`, which is set by
+    /// `openTournament` — so the clock is already running before a single
+    /// entrant has joined, and a caller that wants to know whether an event can
+    /// still be played to a settleable finish has to ask the chain rather than
+    /// measure from when it started the games.
+    ///
+    /// On a contract deployed before `entryWindow` existed, the entry deadline
+    /// reads back equal to the settle deadline: no separate entry window, which
+    /// is exactly what that older contract enforces. That keeps the server-side
+    /// schedule guard deployable ahead of the contract redeploy.
+    async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
+        None
+    }
+
     // -- verifiable results ------------------------------------------------
 
     /// Sign a result commitment (the game's `result_hash`) so clients can
@@ -347,6 +364,61 @@ impl OnchainSettlement {
     fn contract(&self) -> ChessEscrow::ChessEscrowInstance<DynProvider> {
         ChessEscrow::new(self.escrow, self.provider.clone())
     }
+
+    /// Wait for a submitted transaction and **fail on a revert**.
+    ///
+    /// Every write path goes through here, and none may call `get_receipt()`
+    /// directly. `get_receipt()` resolves as `Ok` for a transaction that mined
+    /// with `status = 0` — it reports "the receipt was fetched", not "the call
+    /// succeeded" — so awaiting it and dropping the value silently converts a
+    /// reverted transaction into `Ok(())`. Everything downstream then acts on
+    /// money that never moved: an entrant who never paid a buy-in is added to
+    /// the field and takes a cut of the real pool at settlement, a game whose
+    /// `openGame` reverted is run and reported as staked with neither stake
+    /// locked, and a reverted `settleGame` is recorded terminally settled so
+    /// the winner is never paid and nothing retries.
+    ///
+    /// `.send()` gas-estimates first, so most reverts surface there as `Err`.
+    /// The ones that reach here are the ones where state moved between
+    /// estimation and inclusion — which is exactly the case an attacker can
+    /// arrange by racing their own `withdraw` against an oracle transaction
+    /// that spends their bankroll.
+    async fn confirm(
+        &self,
+        pending: alloy::providers::PendingTransactionBuilder<alloy::network::Ethereum>,
+        what: &str,
+    ) -> anyhow::Result<()> {
+        let receipt = pending.get_receipt().await?;
+        if receipt.status() {
+            return Ok(());
+        }
+        let tx = receipt.transaction_hash;
+        let reason = self.revert_reason(&receipt).await;
+        anyhow::bail!("{what} REVERTED onchain (tx {tx:?}): {reason}");
+    }
+
+    /// Best-effort revert reason for a failed transaction: replay the call
+    /// against the state one block before it mined. Diagnostics only — the
+    /// caller has already decided this is an error, and an inconclusive
+    /// answer here must never turn a revert back into a success.
+    async fn revert_reason(&self, receipt: &alloy::rpc::types::TransactionReceipt) -> String {
+        let hash = receipt.transaction_hash;
+        let Ok(Some(tx)) = self.provider.get_transaction_by_hash(hash).await else {
+            return "revert reason unavailable (could not re-fetch the transaction)".into();
+        };
+        let Some(prev) = receipt.block_number.and_then(|b| b.checked_sub(1)) else {
+            return "revert reason unavailable (no block number on the receipt)".into();
+        };
+        let req: alloy::rpc::types::TransactionRequest = tx.into_request();
+        match self.provider.call(req).block(prev.into()).await {
+            // The replay is one block early and excludes the same-block
+            // transactions that preceded this one, so a clean replay is the
+            // expected shape of an ordering-dependent revert, not a
+            // contradiction.
+            Ok(_) => "reverted on state that changed between estimation and inclusion".into(),
+            Err(e) => e.to_string(),
+        }
+    }
 }
 
 #[async_trait]
@@ -363,12 +435,8 @@ impl SettlementSink for OnchainSettlement {
         }
         let gid = game_id_to_bytes32(game_id);
         let escrow = self.contract();
-        escrow
-            .openGame(gid, white, black, stake)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let pending = escrow.openGame(gid, white, black, stake).send().await?;
+        self.confirm(pending, "openGame").await?;
         tracing::info!(%game_id, %white, %black, %stake, "settlement(onchain): opened escrow");
         Ok(())
     }
@@ -394,12 +462,11 @@ impl SettlementSink for OnchainSettlement {
         let r = B256::from(sig.r());
         let s = B256::from(sig.s());
 
-        escrow
+        let pending = escrow
             .settleGame(gid, winner_addr, deadline, v, r, s)
             .send()
-            .await?
-            .get_receipt()
             .await?;
+        self.confirm(pending, "settleGame").await?;
         tracing::info!(%game_id, ?winner, "settlement(onchain): settled");
         Ok(())
     }
@@ -438,24 +505,16 @@ impl SettlementSink for OnchainSettlement {
 
     async fn open_tournament(&self, tid: Uuid, buy_in: U256) -> anyhow::Result<()> {
         let tidb = game_id_to_bytes32(tid);
-        self.contract()
-            .openTournament(tidb, buy_in)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let pending = self.contract().openTournament(tidb, buy_in).send().await?;
+        self.confirm(pending, "openTournament").await?;
         tracing::info!(%tid, %buy_in, "settlement(onchain): opened tournament");
         Ok(())
     }
 
     async fn enter_tournament(&self, tid: Uuid, player: Address) -> anyhow::Result<()> {
         let tidb = game_id_to_bytes32(tid);
-        self.contract()
-            .enterTournament(tidb, player)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let pending = self.contract().enterTournament(tidb, player).send().await?;
+        self.confirm(pending, "enterTournament").await?;
         tracing::info!(%tid, %player, "settlement(onchain): tournament entry");
         Ok(())
     }
@@ -477,12 +536,11 @@ impl SettlementSink for OnchainSettlement {
         let v: u8 = if sig.v() { 28 } else { 27 };
         let r = B256::from(sig.r());
         let s = B256::from(sig.s());
-        escrow
+        let pending = escrow
             .settleTournament(tidb, players, payouts, deadline, v, r, s)
             .send()
-            .await?
-            .get_receipt()
             .await?;
+        self.confirm(pending, "settleTournament").await?;
         tracing::info!(%tid, "settlement(onchain): tournament settled");
         Ok(())
     }
@@ -509,12 +567,11 @@ impl SettlementSink for OnchainSettlement {
         let v: u8 = if sig.v() { 28 } else { 27 };
         let r = B256::from(sig.r());
         let s = B256::from(sig.s());
-        escrow
+        let pending = escrow
             .settleTournamentRoot(tidb, root, total, deadline, v, r, s)
             .send()
-            .await?
-            .get_receipt()
             .await?;
+        self.confirm(pending, "settleTournamentRoot").await?;
         tracing::info!(%tid, %root, "settlement(onchain): tournament root committed");
         Ok(root)
     }
@@ -525,6 +582,38 @@ impl SettlementSink for OnchainSettlement {
             Ok(t) => t.settled,
             Err(_) => false,
         }
+    }
+
+    async fn tournament_deadlines(&self, tid: Uuid) -> Option<(u64, u64)> {
+        let tidb = game_id_to_bytes32(tid);
+        let escrow = self.contract();
+        let opened_at = match escrow.tournaments(tidb).call().await {
+            Ok(t) if t.exists => t.openedAt,
+            Ok(_) => return None,
+            Err(e) => {
+                tracing::warn!(%tid, "tournament openedAt read failed: {e:#}");
+                return None;
+            }
+        };
+        let settle_timeout = match escrow.settleTimeout().call().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("settleTimeout() read failed: {e:#}");
+                return None;
+            }
+        };
+        // A contract predating `entryWindow` has no such function and the call
+        // reverts; fall back to the settle deadline, which is the only bound it
+        // actually enforces. Don't fail the whole read over it.
+        let entry_window = escrow
+            .entryWindow()
+            .call()
+            .await
+            .unwrap_or(settle_timeout);
+        Some((
+            opened_at.saturating_add(entry_window),
+            opened_at.saturating_add(settle_timeout),
+        ))
     }
 
     async fn tournament_pool(&self, tid: Uuid) -> Option<U256> {
@@ -605,6 +694,7 @@ mod tests {
             deployer.address(),
             100u16,
             3600u64,
+            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -652,6 +742,133 @@ mod tests {
         Ok(())
     }
 
+    /// A transaction that MINES WITH `status = 0` must not be reported as
+    /// success. This is the whole of H-01: `get_receipt()` resolves `Ok` for a
+    /// reverted transaction, so the old code (which awaited it and dropped the
+    /// value) turned every revert into `Ok(())`.
+    ///
+    /// The revert is produced the way an attacker produces it — not by
+    /// hand-setting a gas limit, which would only prove `confirm` reads a
+    /// field. Automine is off. The oracle's `openGame` is submitted first and
+    /// gas-estimates cleanly against a state where White's bankroll covers the
+    /// stake. White then submits a `withdraw` of that whole bankroll at a much
+    /// higher fee, so anvil orders it FIRST in the block. `openGame` mines
+    /// second, reverts `InsufficientUnlocked`, and comes back with
+    /// `status = 0` on a receipt that `get_receipt()` still resolves as `Ok`.
+    /// That is H-01's exploit path end to end.
+    #[tokio::test]
+    async fn a_reverted_transaction_is_not_success() -> anyhow::Result<()> {
+        let anvil = Anvil::new().try_spawn()?;
+        let url = anvil.endpoint_url();
+        let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
+        let oracle: PrivateKeySigner = anvil.keys()[1].clone().into();
+        let white: PrivateKeySigner = anvil.keys()[2].clone().into();
+        let black: PrivateKeySigner = anvil.keys()[3].clone().into();
+
+        let dep = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(deployer.clone()))
+            .connect_http(url.clone());
+        let usdc = MockUSDC::deploy(&dep).await?;
+        let escrow = ChessEscrow::deploy(
+            &dep,
+            *usdc.address(),
+            oracle.address(),
+            deployer.address(),
+            100u16,
+            3600u64,
+            1800u64, // entryWindow: must be < settleTimeout
+        )
+        .await?;
+        let escrow_addr = *escrow.address();
+
+        let bankroll = U256::from(10_000_000u64);
+        let stake = U256::from(1_000_000u64);
+        for who in [&white, &black] {
+            let p = ProviderBuilder::new()
+                .wallet(EthereumWallet::from((*who).clone()))
+                .connect_http(url.clone());
+            MockUSDC::new(*usdc.address(), &p)
+                .mint(who.address(), bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            MockUSDC::new(*usdc.address(), &p)
+                .approve(escrow_addr, bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            ChessEscrow::new(escrow_addr, &p)
+                .deposit(bankroll)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+        }
+
+        // Stop mining so both submissions estimate against identical state.
+        let ctl = ProviderBuilder::new().connect_http(url.clone());
+        ctl.raw_request::<_, serde_json::Value>("evm_setAutomine".into(), (false,))
+            .await?;
+
+        let sink = Arc::new(OnchainSettlement::new(url.clone(), escrow_addr, oracle));
+        let game_id = Uuid::new_v4();
+        let (w, b) = (white.address(), black.address());
+
+        // Submitted (and estimated) while White's bankroll still covers it.
+        let opening = tokio::spawn({
+            let sink = sink.clone();
+            async move { sink.open_escrow(game_id, w, b, stake).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // White pulls the whole bankroll out at a fee that outbids the oracle,
+        // so this is ordered ahead of the pending `openGame`.
+        let wp = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(white.clone()))
+            .connect_http(url.clone());
+        // `.gas()` bypasses estimation, which anvil runs against PENDING state
+        // — where the oracle's queued `openGame` has already locked the funds.
+        // An attacker sets their own gas for exactly this reason; the call
+        // under test keeps its real estimation.
+        let _pending_withdraw = ChessEscrow::new(escrow_addr, &wp)
+            .withdraw(bankroll)
+            .gas(200_000)
+            .max_fee_per_gas(50_000_000_000u128)
+            .max_priority_fee_per_gas(50_000_000_000u128)
+            .send()
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // One block: the withdraw lands, then `openGame` reverts inside it.
+        ctl.raw_request::<_, serde_json::Value>("evm_mine".into(), ())
+            .await?;
+        ctl.raw_request::<_, serde_json::Value>("evm_setAutomine".into(), (true,))
+            .await?;
+
+        let err = opening
+            .await?
+            .expect_err("openGame REVERTED onchain and must not report success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REVERTED"),
+            "the error must name the revert, got: {msg}"
+        );
+        assert!(
+            msg.contains("openGame"),
+            "the error must name the call, got: {msg}"
+        );
+
+        // The decisive assertion: no game exists, so every downstream caller
+        // that would have trusted `Ok(())` — the room that reports itself
+        // staked, the settlement that pays a winner — was right to be stopped.
+        let read = ChessEscrow::new(escrow_addr, &dep);
+        let g = read.games(game_id_to_bytes32(game_id)).call().await?;
+        assert!(!g.exists, "no escrow was opened, and the sink must say so");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn opens_enters_settles_tournament() -> anyhow::Result<()> {
         let anvil = Anvil::new().try_spawn()?;
@@ -673,6 +890,7 @@ mod tests {
             deployer.address(),
             0u16,
             3600u64,
+            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -784,6 +1002,7 @@ mod tests {
             deployer.address(),
             0u16,
             3600u64,
+            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -909,7 +1128,7 @@ mod tests {
         // Long window for the claim flow (settle never races the timeout); short
         // window for the refund flow (so we can actually wait past it).
         let escrow_pay =
-            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, 3600u64)
+            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, 3600u64, 1800u64)
                 .await?;
         let escrow_ref = ChessEscrow::deploy(
             &provider,
@@ -918,6 +1137,10 @@ mod tests {
             fee_recipient,
             0u16,
             refund_timeout,
+            // Entry must close strictly before settlement; this deployment
+            // exists to have its refund window expire, so keep entry open for
+            // essentially all of it.
+            refund_timeout.saturating_sub(1),
         )
         .await?;
         eprintln!(

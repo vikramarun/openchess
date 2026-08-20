@@ -1,5 +1,26 @@
 # Deployments
 
+> **⚠️ `contracts/src/ChessEscrow.sol` is AHEAD of the live v2 deployment.**
+> A pre-launch review found that `enterTournament` had no deadline of its own
+> while both settle paths close at `openedAt + settleTimeout`, so a player could
+> be admitted (and charged) into a tournament that was already impossible to
+> settle. The fix adds an immutable **`entryWindow`** and a matching
+> `EntryWindowClosed` revert — a **constructor signature change**, so it needs a
+> fresh deployment and a bankroll migration, not an upgrade. Until that happens:
+> - The vendored ABI (`crates/ledger/abi/ChessEscrow.json`) is built from the
+>   NEW source, so it advertises `entryWindow()`. The live v2 has no such
+>   function.
+> - That is handled, not ignored: `OnchainSettlement::tournament_deadlines`
+>   treats a reverting `entryWindow()` as "no separate entry window" and falls
+>   back to the settle deadline, which is exactly what v2 enforces.
+> - So the **server-side** half of the fix (refusing to start a schedule that
+>   cannot finish inside the settle window, and refusing joins past the entry
+>   deadline) is live-safe against v2 today and should be deployed now. The
+>   contract half lands with the next deployment.
+>
+> When redeploying, set `ENTRY_WINDOW` (default 4h against a 24h
+> `SETTLE_TIMEOUT`; it must be strictly less) and update the table below.
+
 ## Base mainnet (chain 8453) — **v2, live**
 
 **`ChessEscrow` v2**: [`0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68`](https://basescan.org/address/0x7a536bef5cd9694acaed7bc5fe65e463db5d4d68)

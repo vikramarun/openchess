@@ -44,6 +44,19 @@ contract ChessEscrow {
     // would retroactively move those boundaries for in-flight games/tournaments.
     // If it ever must change, snapshot it per-game like `feeBps`.
     uint64 public settleTimeout;
+    // How long after `openTournament` new entries are still accepted. Set once
+    // at construction alongside `settleTimeout`, and for the same reason:
+    // `openedAt + entryWindow` is read live, so a setter would retroactively
+    // move the boundary for tournaments already open.
+    //
+    // Why it exists at all: the settle clock starts at `openTournament`, and
+    // both settlement paths revert permanently once it lapses, but entry used
+    // to have no deadline of its own. A field could therefore still be filling
+    // as the window closed, and an event that is legal to enter but impossible
+    // to settle is one that pays nobody — every entrant falls through to
+    // `claimRefund` and the standings are thrown away. Closing entry first
+    // leaves `settleTimeout - entryWindow` for the games to actually be played.
+    uint64 public entryWindow;
     bool public paused;
 
     mapping(address => uint256) public bankroll; // total deposited per user
@@ -155,6 +168,7 @@ contract ChessEscrow {
     error NoRoot();
     error InvalidProof();
     error SettleWindowClosed();
+    error EntryWindowClosed();
     error NotSponsor();
 
     // --- modifiers --------------------------------------------------------
@@ -183,16 +197,22 @@ contract ChessEscrow {
         address oracle_,
         address feeRecipient_,
         uint16 feeBps_,
-        uint64 settleTimeout_
+        uint64 settleTimeout_,
+        uint64 entryWindow_
     ) {
         require(token_ != address(0) && oracle_ != address(0) && feeRecipient_ != address(0), "zero addr");
         require(feeBps_ <= 1_000, "fee too high");
+        // An entry window at or past the settle window is no window at all —
+        // it would re-admit the very state this exists to prevent (a field
+        // still filling when settlement is already impossible).
+        require(entryWindow_ < settleTimeout_, "entry window must close first");
         token = IERC20(token_);
         oracle = oracle_;
         owner = msg.sender;
         feeRecipient = feeRecipient_;
         feeBps = feeBps_;
         settleTimeout = settleTimeout_;
+        entryWindow = entryWindow_;
 
         _CACHED_CHAIN_ID = block.chainid;
         _CACHED_DOMAIN_SEPARATOR = _buildDomainSeparator();
@@ -327,11 +347,19 @@ contract ChessEscrow {
     /// leave the entrant's bankroll now, so losers never need touching at
     /// settle (which is what lets settlement/claims be O(1) per winner).
     /// Oracle-only; one entry per address.
+    ///
+    /// Refused once `entryWindow` has elapsed. Without that an entrant could
+    /// join a tournament that had already run out of time to be settled: both
+    /// settle paths revert past `openedAt + settleTimeout`, so the event could
+    /// only ever resolve into `claimRefund` and its standings would be
+    /// discarded. Note this is the entry window, not the settle window — the
+    /// gap between them is the time the games themselves get.
     function enterTournament(bytes32 tid, address player) external whenNotPaused {
         if (msg.sender != oracle) revert NotOracle();
         Tournament storage t = tournaments[tid];
         if (!t.exists) revert UnknownTournament();
         if (t.settled) revert AlreadySettled();
+        if (block.timestamp > t.openedAt + entryWindow) revert EntryWindowClosed();
         if (player == feeRecipient) revert BadPlayers();
         if (tournamentEntered[tid][player]) revert AlreadyEntered();
         if (available(player) < t.buyIn) revert InsufficientUnlocked();
