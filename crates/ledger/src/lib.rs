@@ -284,6 +284,13 @@ pub trait SettlementSink: Send + Sync {
         None
     }
 
+    /// Whether `who` holds an entry in the tournament onchain — i.e. paid its
+    /// buy-in. `None` off-chain, or if the read fails: the caller must treat
+    /// that as "unknown", never as "no".
+    async fn tournament_entered(&self, _tid: Uuid, _who: Address) -> Option<bool> {
+        None
+    }
+
     /// `(entry_deadline, settle_deadline)` for a tournament, as unix seconds,
     /// read live from the chain. `None` off-chain, for a tournament with no
     /// pool, or when any read fails — never a guessed default.
@@ -508,7 +515,8 @@ impl OnchainSettlement {
         }
         let tx = receipt.transaction_hash;
         let reason = self.revert_reason(&receipt).await;
-        anyhow::bail!("{what} REVERTED onchain (tx {tx:?}): {reason}");
+        Err(anyhow::Error::new(Reverted)
+            .context(format!("{what} REVERTED onchain (tx {tx:?}): {reason}")))
     }
 
     /// Best-effort revert reason for a failed transaction: replay the call
@@ -682,8 +690,22 @@ impl SettlementSink for OnchainSettlement {
             tracing::info!(%tid, %player, "settlement(onchain): already entered");
             return Ok(());
         }
-        let pending = escrow.enterTournament(tidb, player).send().await?;
-        self.confirm(pending, "enterTournament").await?;
+        // Estimated on its own, so that a failure HERE is known never to have
+        // been broadcast — the caller can then forget the attempt instead of
+        // treating it as an entry that might still land.
+        let call = escrow.enterTournament(tidb, player);
+        let gas = call
+            .estimate_gas()
+            .await
+            .map_err(|e| anyhow::Error::new(EntryNotMade(format!("gas estimate failed: {e:#}"))))?;
+        let pending = call.gas(gas).send().await?;
+        if let Err(e) = self.confirm(pending, "enterTournament").await {
+            // Mined and reverted: definitively not entered either.
+            if e.downcast_ref::<Reverted>().is_some() {
+                return Err(anyhow::Error::new(EntryNotMade(format!("{e:#}"))));
+            }
+            return Err(e);
+        }
         // Postcondition: the entry flag is the thing the caller acts on — it
         // adds this wallet to a field whose standings divide a real pool, so
         // "they paid" has to be read off the chain rather than inferred from a
@@ -874,6 +896,21 @@ impl SettlementSink for OnchainSettlement {
         }
     }
 
+    async fn tournament_entered(&self, tid: Uuid, who: Address) -> Option<bool> {
+        match self
+            .contract()
+            .tournamentEntered(game_id_to_bytes32(tid), who)
+            .call()
+            .await
+        {
+            Ok(entered) => Some(entered),
+            Err(e) => {
+                tracing::warn!(%tid, %who, "tournamentEntered read failed: {e:#}");
+                None
+            }
+        }
+    }
+
     async fn tournament_pool(&self, tid: Uuid) -> Option<U256> {
         match self.read_tournament(game_id_to_bytes32(tid)).await {
             Ok(t) => Some(t.pool),
@@ -897,6 +934,35 @@ impl SettlementSink for OnchainSettlement {
         Some(self.escrow.to_string())
     }
 }
+
+/// A transaction that MINED and reverted (`status = 0`) — a definite outcome,
+/// unlike a failure to fetch the receipt. Carried under the human message as
+/// the error's source, so callers can tell the two apart with `downcast_ref`.
+#[derive(Debug)]
+pub struct Reverted;
+
+impl std::fmt::Display for Reverted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("transaction reverted")
+    }
+}
+
+impl std::error::Error for Reverted {}
+
+/// A tournament entry that DEFINITELY did not happen: its gas estimate failed,
+/// so nothing was broadcast, or it mined and reverted. Every other failure of
+/// `enter_tournament` is ambiguous — the transaction may have landed, or may
+/// yet — and has to be treated as a possible payment.
+#[derive(Debug)]
+pub struct EntryNotMade(pub String);
+
+impl std::fmt::Display for EntryNotMade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tournament entry not made: {}", self.0)
+    }
+}
+
+impl std::error::Error for EntryNotMade {}
 
 /// How many times a postcondition is read before it counts as failed, and the
 /// pause between reads.
@@ -1419,6 +1485,18 @@ mod tests {
             sink.tournament_pool(tid).await,
             Some(unit),
             "the buy-in is taken once"
+        );
+        // A wallet with nothing deposited fails at the gas estimate: nothing was
+        // broadcast, and the error says so — the caller may forget the attempt
+        // rather than treat it as a payment that could still land.
+        let broke = Address::from([0x42; 20]);
+        let err = sink
+            .enter_tournament(tid, broke)
+            .await
+            .expect_err("an unfunded entry must fail");
+        assert!(
+            err.downcast_ref::<EntryNotMade>().is_some(),
+            "a definitive failure must be typed as such, got: {err:#}"
         );
         sink.start_tournament(tid).await?;
         sink.start_tournament(tid).await?; // the retry

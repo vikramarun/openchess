@@ -152,6 +152,55 @@ wallet.
   `SETTLE_CONFIRMATIONS` (default 1, inclusion) is the dial for waiting out
   reorgs; raising it costs latency on the path a player is watching, which is
   why it is an operator choice.
+- **A handler that moves money runs its work in a spawned task — and checks
+  its requester is still there before it commits a seat.** Hyper drops a
+  handler the moment its client disconnects, so every `.await` in it is a point
+  where the work can just stop, and `park_accept`, `queue_join` and
+  `tourney_join` await an onchain transaction (`tourney_start` likewise spawns
+  `start_and_dispatch`). Cut off mid-`openGame`, the escrow locked with no room
+  (stuck until `claimTimeout`, and an acceptor could do it on purpose). Each is
+  now a thin wrapper that `tokio::spawn`s a `*_committed` function and awaits
+  it. **But finishing is not delivering**: the REQUESTER's seat token (park) or
+  ticket id (queue) only ever travels in that response, so a game completed
+  for a requester who left reaped them as a no-show and paid their stake to the
+  opponent — worse than the locked escrow it replaced, and it was the first
+  version of this fix. The wrapper flags `RequesterGone` when dropped, and the
+  task checks it once the game exists: gone ⇒ abort, refund, put the offer (or
+  the waiting opponent) back — for a BROWSER seat only. A bot seat's token
+  went to its agent, so nobody is stranded, and aborting it tore down a game
+  both agents could already be playing. And an abort must END the room
+  (`RoomCmd::Close`, sent first by `abort_started_game`): evicting only the
+  server's handle left a room an attached agent kept alive, with the registry
+  calling that agent free — so the next acceptor of the reopened offer won
+  the poster's stake when the agent never showed up. `tourney_join` needs no such check — an
+  entrant's seat is their wallet, recoverable from `my-games`. The residual
+  window is a disconnect after that check, the same as after any response.
+  `*_hangs_up_is_refunded_not_forfeited` and
+  `a_paid_join_survives_its_client_hanging_up` pin both halves.
+- **A paid entry is recorded BEFORE its buy-in moves, and cleared only once
+  it is seated.** The payout divides the ONCHAIN pool across the OFF-CHAIN
+  field, so any payer left out of the field funds everyone else's prizes — and
+  there are several ways to be left out: a read-back that never confirmed, a
+  disconnect, a restart, an entry that landed after the start.
+  `Tournament::unconfirmed_entries` (persisted, migration 0021) is the record,
+  with the seat each join asked for (`PendingEntry`); the chain
+  (`tournament_entered`) is the only authority on who actually paid. The join
+  re-checks the chain once on a failed entry and seats on a yes.
+  `tourney_start` seats every recorded payer the chain confirms — as the seat
+  they asked for, since a bot entrant seated as a browser seat forfeits every
+  round — and REFUSES to start if it can't ask (`reconcile_entries`): fixing
+  the field blind is the bug. A join's schedule-fit check counts pending
+  payers, or a later join could fill the schedule they need. Settlement
+  refunds anyone who paid and is still unseated as an extra payee in the same
+  signed payout (`unseated_payers`), so an entry that lost the race with the
+  start gets its buy-in back. A recorded wallet the chain says hasn't entered
+  is KEPT — its transaction may still land — unless the ledger reports
+  `EntryNotMade` (the gas estimate failed, so nothing was broadcast, or it
+  mined and reverted), which forgets the attempt; otherwise an empty wallet
+  could pile up records that every start has to read. Only a record the
+  current call CREATED is ever withdrawn — an earlier attempt's may still
+  land. And `claimable_tournaments` matches the record too, because in a
+  Merkle-settled field that refund has to be claimed.
 - **Never age-delete lobby state that has a game behind it.** `sweep_expired`
   used to keep rows purely on `created_at`, regardless of lifecycle. `park_accept`
   flips an offer to `matching`, releases the lock, awaits escrow-open and room
