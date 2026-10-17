@@ -97,12 +97,12 @@ const field = ["0xa", "0xb", "0xc"];
 check("409, one entrant", startRefusal(409, { buy_in: "1000000", players: ["0xa"] }), "Need at least 2 entrants.");
 check(
   "409, a full paid field is a time problem",
-  startRefusal(409, { buy_in: "1000000", players: field })?.includes("enough time"),
+  startRefusal(409, { buy_in: "1000000", players: field })?.includes("not be enough time"),
   true,
 );
 check(
   "409, a free event is an unfunded pool",
-  startRefusal(409, { buy_in: "0", players: field })?.includes("prize pool is empty"),
+  startRefusal(409, { buy_in: "0", players: field })?.includes("prize pool may still be empty"),
   true,
 );
 check("502 is the chain, and retryable", startRefusal(502, { buy_in: "1000000", players: field })?.includes("Try again"), true);
