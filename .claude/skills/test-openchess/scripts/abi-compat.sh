@@ -13,8 +13,12 @@
 # probe test using a stand-in contract passed.
 #
 # This deploys the LIVE contract's bytecode (taken from a git ref) on a
-# throwaway Anvil and drives every OnchainSettlement operation of THIS checkout
-# against it. Run it whenever contracts/ or crates/ledger/abi/ changes.
+# throwaway Anvil and drives THIS checkout's OnchainSettlement against it: game
+# open/settle, tournament open/enter/start/settle (direct and Merkle root) and
+# the reads behind them. An operation this list doesn't name is NOT covered —
+# add it here when the ledger grows one. Run it whenever contracts/ or
+# crates/ledger/abi/ changes. (A SIGKILL skips the cleanup trap and leaves the
+# two generated zz_* files under crates/ledger; delete them by hand.)
 #
 # Usage: abi-compat.sh [REPO_ROOT] [LIVE_REF]
 #   REPO_ROOT  checkout whose ledger crate is tested (default: git toplevel)
@@ -110,6 +114,13 @@ async fn server_against_the_live_escrow() -> anyhow::Result<()> {{
 {opt("start_tournament", '    rec(&mut r, "start_tournament", res(sink.start_tournament(tid).await), false);' + chr(10))}{opt("tournament_deadlines", '    rec(&mut r, "tournament_deadlines", some(sink.tournament_deadlines(tid).await), false);' + chr(10))}    rec(&mut r, "tournament_pool", some(sink.tournament_pool(tid).await), false);
     rec(&mut r, "settle_tournament", res(sink.settle_tournament(tid, vec![p1.address(), p2.address()], vec![unit * U256::from(2), U256::ZERO]).await), false);
     rec(&mut r, "is_tournament_settled", truthy(sink.is_tournament_settled(tid).await, "chain says unsettled"), false);
+{opt("tournament_entered", '    rec(&mut r, "tournament_entered", some(sink.tournament_entered(tid, p1.address()).await), false);' + chr(10))}
+    // The Merkle-root settlement path, on a second tournament.
+    let tid2 = Uuid::new_v4();
+    rec(&mut r, "open_tournament (root)", res(sink.open_tournament(tid2, unit).await), false);
+    rec(&mut r, "enter_tournament (root)", res(sink.enter_tournament(tid2, p1.address()).await), false);
+{opt("start_tournament", '    rec(&mut r, "start_tournament (root)", res(sink.start_tournament(tid2).await), false);' + chr(10))}    rec(&mut r, "settle_tournament_root", res(sink.settle_tournament_root(tid2, vec![(p1.address(), unit)]).await), false);
+    rec(&mut r, "is_tournament_settled (root)", truthy(sink.is_tournament_settled(tid2).await, "chain says unsettled"), false);
 
     let bad: Vec<_> = r.iter().filter(|(_, v, skip)| v.is_err() && !skip).map(|(op, _, _)| op.clone()).collect();
     assert!(bad.is_empty(), "the server cannot operate against the live escrow: {{bad:?}}");

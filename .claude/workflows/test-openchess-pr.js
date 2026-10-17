@@ -15,7 +15,11 @@ if (!a.pr && !a.ref) throw new Error('pass args {pr: <number>} or {ref: "<branch
 const TARGET = a.pr ? `PR #${a.pr}` : `branch ${a.ref}`
 const SLUG = a.pr ? `pr-${a.pr}` : String(a.ref).replace(/[^A-Za-z0-9._-]/g, '-')
 const CHECKOUT = a.pr ? `gh pr checkout ${a.pr} --detach` : `git checkout --detach ${a.ref}`
-const DIFF = a.pr ? `gh pr diff ${a.pr}` : `git diff main...${a.ref}`
+const DIFF = a.pr ? `gh pr diff ${a.pr}` : `git diff origin/main...${a.ref}`
+// How a READ-ONLY reviewer sees a file at the PR head without touching the
+// shared checkout (which is the user's, and may be on any branch).
+const HEAD_FETCH = a.pr ? `git fetch -q origin pull/${a.pr}/head:refs/remotes/wf/${SLUG}` : `git fetch -q origin ${a.ref}:refs/remotes/wf/${SLUG}`
+const HEAD_SHOW = `git show refs/remotes/wf/${SLUG}:<path>`
 const LIVE_REF = a.liveRef || 'origin/main'
 const TOOLS = '.claude/skills/test-openchess/scripts'
 
@@ -135,8 +139,10 @@ const reviewPrompt = (lens) => `Review ${TARGET} of the OpenChess repo through O
 ${lens.focus}
 
 Read the full diff (\`${DIFF}\`) and the enclosing functions and callers of everything it touches — bugs in
-unchanged lines of a touched function are in scope. Read the code; don't build or run anything (another agent is
-running the test suites). Report only defects with a concrete failure scenario, P0 (money lost/locked or prod down)
+unchanged lines of a touched function are in scope. Read them AT THE PR HEAD, not in the working tree (which may be
+on another branch): run \`${HEAD_FETCH}\` once, then \`${HEAD_SHOW}\` for any file (and \`git grep <pattern>
+refs/remotes/wf/${SLUG}\` to search). Never check out, switch branches or edit files in this checkout — it is the
+user's. Don't build or run anything (another agent is running the test suites). Report only defects with a concrete failure scenario, P0 (money lost/locked or prod down)
 to P3, at most 8, most severe first. Return an empty list rather than padding.`
 
 const verifyPrompt = (lens, findings) => `Adversarially verify these ${findings.length} findings about ${TARGET} of
@@ -148,7 +154,8 @@ crates/ledger's tests do) and run it. If the finding claims or implies a regress
 main (\`git worktree add --detach <scratch-dir> main\`; main may lack dev-deps the branch added). CONFIRMED needs a
 test or command that demonstrates it; PLAUSIBLE means it survived refutation but you could not demonstrate it;
 REFUTED says why. Adjust severity if the evidence warrants. Include each reproduction test as a unified diff, then
-restore every file — leave both worktrees clean and never commit or push.
+restore every file — leave your worktree clean, remove any scratch worktree you added (\`git worktree remove
+--force <dir>\`), and never commit or push.
 
 Findings:
 ${JSON.stringify(findings, null, 2)}`
@@ -176,6 +183,7 @@ const [runtime, reviewed] = await parallel([
   ),
 ])
 
+if (!runtime) log('The runtime agent returned nothing — CI gates, E2E and ABI compatibility are NOT covered')
 const lensResults = (reviewed || []).filter(Boolean)
 const merged = lensResults.flatMap((r) =>
   r.findings.map((f) => {
@@ -196,5 +204,5 @@ return {
   runtime,
   findings: merged.filter((f) => f.verdict !== 'REFUTED'),
   refuted: merged.filter((f) => f.verdict === 'REFUTED').map((f) => ({ id: f.id, title: f.title, why: f.evidence })),
-  coverageGaps: missingLenses,
+  coverageGaps: [...(runtime ? [] : ['runtime: gates, e2e, abi-compat']), ...missingLenses],
 }

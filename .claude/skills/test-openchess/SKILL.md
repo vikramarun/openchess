@@ -22,9 +22,13 @@ git worktree add .claude/worktrees/pr-<N> <branch>     # or: gh pr checkout <N> 
 ```
 
 Never point anything here at production: not the Fly DB, not Base mainnet,
-not the `chess` dev database. The scripts create and drop their own scratch
-databases and refuse a non-local `DATABASE_URL`. (A PR's migrations once ran
-against prod early and crash-looped the next deploy.)
+not the `chess` dev database. The scripts ALWAYS create and drop their own
+scratch databases and ignore `DATABASE_URL` — "localhost" is not "safe": the
+`chess` dev DB and a `fly proxy` tunnel to prod are both localhost, and the
+tests apply the branch's migrations to whatever they touch. (A PR's migrations
+once ran against prod early and crash-looped the next deploy.) They also scrub
+`RPC_URL`/`ESCROW_ADDR`/`ORACLE_KEY`/`ALERT_WEBHOOK_URL` from the environment,
+since `cargo test` builds a real onchain sink from them when set.
 
 ## 1. CI gates — `scripts/ci-gates.sh <worktree> [log-dir]`
 
@@ -37,6 +41,12 @@ frozen pnpm install, **every** `test:*` script in `apps/web/package.json`
   --log-failed`). CI stops at the first red step, so a `fmt` failure means
   `cargo test`, the book check and the entire web suite **never ran in CI** —
   a PR description's "all tests pass" is then a local claim only.
+- **CI uses the NEWEST stable Rust** (`dtolnay/rust-toolchain@stable`); a new
+  clippy lint can turn `main` red overnight with no code change (1.99 did).
+  If your stable is older, run the gates on the latest too:
+  `rustup toolchain install <ver> --profile minimal -c clippy -c rustfmt`, then
+  `RUSTUP_TOOLCHAIN=<ver> scripts/ci-gates.sh …`. The summary prints the rustc
+  it used.
 - Known local-only failure: `test:avatar` crashes inside tsx's loader on Node
   ≥ 26 ("URL is not a constructor"). Before blaming a branch for a web test,
   run the same test on `main`.
@@ -47,7 +57,9 @@ frozen pnpm install, **every** `test:*` script in `apps/web/package.json`
 
 Required whenever `contracts/` or `crates/ledger/abi/` changes. Deploys the
 **live** escrow's bytecode (from `live-ref`, default `origin/main`) and drives
-every `OnchainSettlement` operation of the branch against it. The contract is
+the branch's `OnchainSettlement` against it: games, tournaments settled both
+directly and by Merkle root, and the reads behind them. An operation it
+doesn't list isn't covered — add new ledger operations to the script. The contract is
 redeployed far less often than the server, so the server must work against the
 old bytecode until it is.
 
@@ -94,6 +106,14 @@ real `chess-server` (port 18080) and `chess-client` + Stockfish. About 6–8 min
 tournament before exit depends on how many other rooms the drain is ending — so
 it runs several trials at increasing load (`--drain-loads`). One clean trial
 proves nothing.
+
+Every test proves its scenario actually happened, because the failure mode of a
+money test is passing on nothing: `staked-settle` fails on a forfeit or an
+abort (both also "settle and conserve funds", and a broken acceptor produces
+exactly that), and checks the payout matches the board; `drain-tourney` checks
+the event was running and its game was drained. The run refuses to start if its
+ports are taken (a stale run would answer for it), cleans up on SIGTERM/SIGHUP,
+and must not be run with `python -O` (it is all asserts).
 
 Reading results: bankroll is total deposits; a *game* stake is tracked in
 `locked`, so check `available()` for game locks. A tournament *entry* moves

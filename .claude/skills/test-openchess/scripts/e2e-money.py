@@ -27,11 +27,14 @@ Usage:
                        [--anvil-port 18545] [--server-port 18080] [--keep-db]
 
 Ports default away from the dev ones (8545/8080) so a running dev stack is
-left alone. The database is created and dropped here; E2E_DATABASE_URL may
-point at another LOCAL database instead (it is truncated!). Exit 0 iff every
-selected test passed.
+left alone, and the run refuses to start if they are taken. The database is
+ALWAYS a throwaway one created and dropped here — the server applies the
+branch's migrations at boot, so pointing it at any real database (the `chess`
+dev DB included) is how a branch migration reaches somewhere it shouldn't.
+The server's environment is scrubbed of real chain and alert settings.
+Exit 0 iff every selected test passed.
 """
-import argparse, json, os, re, signal, subprocess, sys, tempfile, time
+import argparse, json, os, re, signal, socket, subprocess, sys, tempfile, time
 import urllib.error, urllib.request
 from datetime import datetime, timezone
 
@@ -45,6 +48,8 @@ ap.add_argument("--logs", default=None)
 ap.add_argument("--keep-db", action="store_true")
 ap.add_argument("--no-build", action="store_true")
 args = ap.parse_args()
+if not __debug__:
+    sys.exit("run without -O: every check here is an assert")
 
 ROOT = args.repo or subprocess.run(["git", "rev-parse", "--show-toplevel"], text=True, capture_output=True).stdout.strip()
 ROOT = os.path.abspath(ROOT)
@@ -87,17 +92,14 @@ def cast(a):
     return sh(f"cast {a} --rpc-url {RPC}")
 
 
-# --- database ---------------------------------------------------------------
-own_db = None
-DB = os.environ.get("E2E_DATABASE_URL")
-if DB:
-    if not re.match(r"^postgres(ql)?://([^@/]*@)?(localhost|127\.0\.0\.1)[:/]", DB):
-        sys.exit("REFUSING: E2E_DATABASE_URL must be a local database")
-else:
-    own_db = f"openchess_e2e_{os.getpid()}"
-    sh(f"createdb {own_db}")
-    DB = f"postgres://localhost/{own_db}"
-DBNAME = DB.rsplit("/", 1)[-1]
+# --- database: always our own, created inside the run's try/finally ----------
+own_db = f"openchess_e2e_{os.getpid()}"
+DB = f"postgres://localhost/{own_db}"
+DBNAME = own_db
+# Settings that reach something real are never inherited by the server.
+SCRUB = ("RPC_URL", "ESCROW_ADDR", "ORACLE_KEY", "ALERT_WEBHOOK_URL", "ADMIN_WALLET",
+         "HOUSE_WALLET", "DATABASE_URL")
+BASE_ENV = {k: v for k, v in os.environ.items() if k not in SCRUB}
 
 
 def q(sql):
@@ -124,11 +126,17 @@ def http(method, path, token=None, body=None):
 
 
 def start_server():
-    env = dict(os.environ, DATABASE_URL=DB, SIWE_DOMAIN="chess.local", SIWE_CHAIN_ID="8453",
+    env = dict(BASE_ENV, DATABASE_URL=DB, SIWE_DOMAIN="chess.local", SIWE_CHAIN_ID="8453",
                RPC_URL=RPC, ESCROW_ADDR=ESCROW, ORACLE_KEY=K1, BIND=f"127.0.0.1:{args.server_port}",
-               RL_CREATE_BURST="1000", RL_CREATE_PER_SEC="100", RUST_LOG="info")
-    procs["server"] = subprocess.Popen([SERVER], env=env, stdout=open(f"{LOGS}/server.log", "a"), stderr=subprocess.STDOUT)
+               RL_CREATE_BURST="1000", RL_CREATE_PER_SEC="100",
+               RL_OFFERS_BURST="1000", RL_OFFERS_PER_SEC="100", RUST_LOG="info")
+    p = subprocess.Popen([SERVER], env=env, stdout=open(f"{LOGS}/server.log", "a"), stderr=subprocess.STDOUT)
+    procs["server"] = p
     for _ in range(100):
+        # A 200 from a process that is not ours (a stale run on the same
+        # port) would send every test to the wrong server and database.
+        if p.poll() is not None:
+            raise RuntimeError(f"server exited with {p.returncode} (see server.log)")
         try:
             if http("GET", "/config")[0] == 200:
                 return
@@ -136,6 +144,11 @@ def start_server():
             pass
         time.sleep(0.3)
     raise RuntimeError("server did not come up (see server.log)")
+
+
+def port_free(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_:
+        return s_.connect_ex(("127.0.0.1", port)) != 0
 
 
 def kill_server():
@@ -240,12 +253,26 @@ def t_staked_settle():
     play(gid, mine["token"], "settle_poster")
     play(gid, acc["token"], "settle_acceptor")
     ob = wait_for(lambda: q(f"SELECT status FROM settlement_outbox WHERE game_id='{gid}'") == "settled", 120)
-    res = q(f"SELECT result||'/'||coalesce(result_reason,'') FROM games WHERE id='{gid}'")
+    result, reason = (q(f"SELECT result||'|'||coalesce(result_reason,'') FROM games WHERE id='{gid}'") or "|").split("|")
+    plies = int(q(f"SELECT count(*) FROM moves WHERE game_id='{gid}'") or 0)
+    white = q(f"SELECT white_addr FROM games WHERE id='{gid}'").lower()
     after = [bankroll(a) for a, _ in PLAYERS[:2]]
-    log(f"  result={res} outbox_settled={bool(ob)} bankrolls {before} -> {after}")
+    log(f"  result={result}/{reason} plies={plies} bankrolls {before} -> {after}")
     assert ob, "settlement outbox never reached 'settled'"
+    # A forfeit or an abort also settles and conserves funds, and is exactly
+    # what a broken seat (wrong token, an acceptor that can't attach, no
+    # engine) produces — so "settled + conserved" alone would stay green on a
+    # bug that hands every acceptor's stake to the poster.
+    assert reason not in ("aborted", "forfeit") and plies >= 2, f"no game was played ({reason}, {plies} plies)"
     assert sum(after) == sum(before), "funds not conserved (fee is 0 on this deployment)"
     assert [available(a) for a, _ in PLAYERS[:2]] == after, "a stake is still locked after settlement"
+    # And the money went to whoever the board says won.
+    delta = {a.lower(): after[i] - before[i] for i, (a, _) in enumerate(PLAYERS[:2])}
+    if result == "draw":
+        assert all(d == 0 for d in delta.values()), f"a draw moved money: {delta}"
+    else:
+        winner = white if result == "white" else next(a for a in delta if a != white)
+        assert delta[winner] == STAKE and sum(delta.values()) == 0, f"{result} won but paid {delta}"
 
 
 def run_tournament(s, name, entrants, initial_secs):
@@ -288,10 +315,10 @@ def t_tourney_settle():
     assert st == 200, f"start {st}: {r}"
     if "startedAt" in T_FIELDS:
         assert int(tournament_onchain(tid)["startedAt"]) != 0, "start did not record startedAt onchain"
-    status = play_tournament(tid, s)
+    status = play_tournament(tid, s, until_status=("settled", "abandoned"))
     assert status == "settled", f"tournament ended '{status}'"
+    ob = wait_for(lambda: q(f"SELECT status FROM tournament_outbox WHERE tid='{tid}'") == "settled" and "settled", 60)
     after = wait_for(lambda: (lambda b: b if sum(b) == sum(before) else None)([bankroll(a) for a, _ in PLAYERS]), 60)
-    ob = q(f"SELECT status FROM tournament_outbox WHERE tid='{tid}'")
     log(f"  outbox={ob} bankrolls {before} -> {after}")
     assert after and ob == "settled", "pool never distributed"
     assert tournament_onchain(tid)["settled"] == "true", "chain does not agree it settled"
@@ -356,11 +383,17 @@ def drain_tourney_trial(extra):
     st, r = http("POST", f"/tournaments/{tid}/start", token=s[0])
     assert st == 200, f"start {st}: {r}"
     time.sleep(1)
+    # The scenario must actually be in place, or "nothing leaked" proves nothing.
+    assert q(f"SELECT status FROM tournaments WHERE id='{tid}'") == "running", "tournament not running before the deploy"
     took = graceful_stop()
     stop_clients()
+    assert took is not None, "the server did not exit on SIGINT"
     pg = q(f"SELECT status FROM tournaments WHERE id='{tid}'")
     ob = q(f"SELECT status FROM tournament_outbox WHERE tid='{tid}'")
-    log(f"  trial: {extra:2d} other live games -> exit {took and round(took, 3)}s; status={pg} outbox={ob or '(none)'}")
+    drained = q(f"SELECT count(*) FROM tournament_games tg JOIN games g ON g.id = tg.game_id "
+                f"WHERE tg.tournament_id='{tid}' AND g.result_reason='aborted'")
+    log(f"  trial: {extra:2d} other live games -> exit {round(took, 3)}s; status={pg} outbox={ob or '(none)'} drained_games={drained}")
+    assert int(drained or 0) >= 1, "the drain did not end the tournament's game"
     return pg in ("complete", "settled") or bool(ob)
 
 
@@ -407,7 +440,7 @@ def teardown():
     a = procs.pop("anvil", None)
     if a:
         a.kill()
-    if own_db and not args.keep_db:
+    if not args.keep_db:
         subprocess.run(f"dropdb --if-exists {own_db}", shell=True, capture_output=True)
 
 
@@ -417,9 +450,20 @@ unknown = [t for t in selected if t not in TESTS]
 if unknown:
     sys.exit(f"unknown test(s) {unknown}; choose from {list(TESTS)}")
 
+def _on_signal(signum, _frame):
+    raise SystemExit(f"interrupted by signal {signum}")  # runs the finally below
+
+
+for _sig in (signal.SIGTERM, signal.SIGHUP):
+    signal.signal(_sig, _on_signal)
+
 results = {}
 try:
-    m = re.search(r'kill_timeout\s*=\s*"(\d+)s"', open(f"{ROOT}/fly.toml").read())
+    for port in (args.anvil_port, args.server_port):
+        if not port_free(port):
+            raise SystemExit(f"port {port} is in use — a stale run? Refusing rather than test someone else's stack.")
+    sh(f"createdb {own_db}")
+    m = re.search(r'kill_timeout\s*=\s*"?(\d+)s?"?', open(f"{ROOT}/fly.toml").read())
     KILL_TIMEOUT = int(m.group(1)) if m else 5  # Fly's default
     if not args.no_build:
         log("== building server + client ==")

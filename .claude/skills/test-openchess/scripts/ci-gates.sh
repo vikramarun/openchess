@@ -8,10 +8,17 @@
 #   REPO_ROOT  checkout to test (default: the git toplevel of $PWD)
 #   LOG_DIR    where per-gate logs + SUMMARY go (default: a fresh temp dir)
 #
-# Database: the persistence tests write to Postgres. With DATABASE_URL unset a
-# throwaway database is created on the local server and dropped afterwards.
-# A DATABASE_URL that is not on localhost is REFUSED — branch migrations have
-# crash-looped production before (see CLAUDE.md / HANDOFF.md).
+# Database: the persistence tests write to Postgres and APPLY THE BRANCH'S
+# MIGRATIONS to whatever they are pointed at. So this always creates its own
+# throwaway database on the local server and drops it afterwards, and an
+# inherited DATABASE_URL is ignored — "it's on localhost" is not "it's safe":
+# the developer's `chess` dev DB is on localhost, a branch migration applied
+# to it stops main's server from booting, and a `fly proxy` to production is
+# on localhost too. (A prod DB got a branch's migration early once already.)
+#
+# The environment is scrubbed of anything that reaches a real chain or a real
+# alert channel: `cargo test` builds sinks from RPC_URL/ESCROW_ADDR/ORACLE_KEY
+# when they are set, and posts failure-path alerts to ALERT_WEBHOOK_URL.
 #
 # Exit status: 0 only if every gate passed.
 set -u
@@ -22,21 +29,18 @@ mkdir -p "$LOGS"
 SUMMARY="$LOGS/SUMMARY"
 : >"$SUMMARY"
 
-# --- database ---------------------------------------------------------------
-SCRATCH_DB=""
-if [ -z "${DATABASE_URL:-}" ]; then
-  SCRATCH_DB="openchess_gates_$$_$(date +%s)"
-  if createdb "$SCRATCH_DB" 2>/dev/null; then
-    export DATABASE_URL="postgres://localhost/$SCRATCH_DB"
-  else
-    echo "note: no local Postgres (createdb failed) — the persistence test will no-op" | tee -a "$SUMMARY"
-    SCRATCH_DB=""
-  fi
+# --- environment + database -------------------------------------------------
+unset RPC_URL ESCROW_ADDR ORACLE_KEY ALERT_WEBHOOK_URL ADMIN_WALLET HOUSE_WALLET
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo "note: ignoring DATABASE_URL — the gates always use their own scratch database" | tee -a "$SUMMARY"
+fi
+unset DATABASE_URL
+SCRATCH_DB="openchess_gates_$$_$(date +%s)"
+if createdb "$SCRATCH_DB" 2>/dev/null; then
+  export DATABASE_URL="postgres://localhost/$SCRATCH_DB"
 else
-  case "$DATABASE_URL" in
-    *@localhost*|*@127.0.0.1*|postgres://localhost*|postgres://127.0.0.1*|postgresql://localhost*|postgresql://127.0.0.1*) ;;
-    *) echo "REFUSING: DATABASE_URL is not a local database. Unset it to use a scratch DB." >&2; exit 2 ;;
-  esac
+  echo "FAIL: no local Postgres (createdb failed) — the persistence tests would silently no-op" | tee -a "$SUMMARY"
+  exit 2
 fi
 cleanup() { [ -n "$SCRATCH_DB" ] && dropdb --if-exists "$SCRATCH_DB" 2>/dev/null; }
 trap cleanup EXIT
@@ -53,7 +57,7 @@ gate() { # gate <name> <dir-relative-to-root> <cmd...>
   return 0
 }
 
-echo "repo=$ROOT  head=$(git -C "$ROOT" rev-parse --short HEAD)  node=$(node -v 2>/dev/null)  logs=$LOGS" | tee -a "$SUMMARY"
+echo "repo=$ROOT  head=$(git -C "$ROOT" rev-parse --short HEAD)  $(rustc --version 2>/dev/null | cut -d" " -f1-2)  node=$(node -v 2>/dev/null)  logs=$LOGS" | tee -a "$SUMMARY"
 
 # Same order as ci.yml: contracts first (the ledger ABI is vendored, but forge
 # test is the contract's own suite), then the Rust lints, tests, book, web.
@@ -66,7 +70,12 @@ gate pnpm-install  apps/web  bash -c 'set -o pipefail; corepack enable >/dev/nul
 
 # Every test:* script in package.json, not just the ones ci.yml lists — and say
 # which ones CI would skip, because a suite nothing runs is a suite that rots.
-for s in $(node -e 'for (const k of Object.keys(require(process.argv[1]).scripts)) if (k.startsWith("test:")) console.log(k)' "$ROOT/apps/web/package.json"); do
+WEB_TESTS=$(node -e 'for (const k of Object.keys(require(process.argv[1]).scripts)) if (k.startsWith("test:")) console.log(k)' "$ROOT/apps/web/package.json")
+if [ -z "$WEB_TESTS" ]; then
+  echo "FAIL: found no web test:* scripts (node missing?) — the web suite did not run" | tee -a "$SUMMARY"
+  failed=1
+fi
+for s in $WEB_TESTS; do
   gate "web-$s" apps/web pnpm -s "$s"
   grep -qE "pnpm $s\$" "$ROOT/.github/workflows/ci.yml" || echo "  note: $s is NOT run by ci.yml" | tee -a "$SUMMARY"
 done
