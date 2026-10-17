@@ -166,7 +166,13 @@ wallet.
   opponent — worse than the locked escrow it replaced, and it was the first
   version of this fix. The wrapper flags `RequesterGone` when dropped, and the
   task checks it once the game exists: gone ⇒ abort, refund, put the offer (or
-  the waiting opponent) back. `tourney_join` needs no such check — an
+  the waiting opponent) back — for a BROWSER seat only. A bot seat's token
+  went to its agent, so nobody is stranded, and aborting it tore down a game
+  both agents could already be playing. And an abort must END the room
+  (`RoomCmd::Close`, sent first by `abort_started_game`): evicting only the
+  server's handle left a room an attached agent kept alive, with the registry
+  calling that agent free — so the next acceptor of the reopened offer won
+  the poster's stake when the agent never showed up. `tourney_join` needs no such check — an
   entrant's seat is their wallet, recoverable from `my-games`. The residual
   window is a disconnect after that check, the same as after any response.
   `*_hangs_up_is_refunded_not_forfeited` and
