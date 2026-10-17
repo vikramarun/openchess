@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useAccount, usePublicClient, useReadContract, useWriteContract } from "wagmi";
+import { useEffect, useMemo, useState } from "react";
+import { encodeFunctionData } from "viem";
+import { useAccount, useCall, usePublicClient, useReadContract, useWriteContract } from "wagmi";
 
 import { ESCROW_ABI, fetchClaimProof, fmtUsdc, tidToBytes32, type ClaimProof } from "@/lib/escrow";
+import { decodeTournament, refundOpensAt } from "@/lib/tournamentRecord";
 import { useEnsureChain } from "@/lib/useEnsureChain";
 
 const ZERO32 = `0x${"0".repeat(64)}`;
 
 /** Collect a tournament's onchain proceeds for the connected wallet: a Merkle
  *  payout claim for a root-settled field, or an entry refund for one that never
- *  settled past the timeout. Both credit the wallet's escrow balance (withdraw
+ *  settled before its refund window opened. Both credit the wallet's escrow balance (withdraw
  *  via the Balance panel). Renders nothing unless the wallet actually entered
  *  this tournament and has something to do — safe to drop on any finished card. */
 export function TournamentClaim({
@@ -46,13 +48,21 @@ export function TournamentClaim({
   const enabled = !!address && isConnected;
   const poll = { query: { enabled, refetchInterval: 8000 } } as const;
 
-  const { data: tourn, refetch: refetchTourn } = useReadContract({
-    address: escrow,
-    abi: ESCROW_ABI,
-    functionName: "tournaments",
-    args: [tidHex],
+  // A RAW call, decoded by `decodeTournament`: the record's layout differs
+  // between the live v2 escrow and the two-clock one (see lib/tournamentRecord),
+  // so no single ABI decodes both.
+  const { data: tournCall, refetch: refetchTourn } = useCall({
+    to: escrow,
+    data: encodeFunctionData({ abi: ESCROW_ABI, functionName: "tournaments", args: [tidHex] }),
     ...poll,
   });
+  const t = useMemo(() => {
+    try {
+      return tournCall?.data ? decodeTournament(tournCall.data) : undefined;
+    } catch {
+      return undefined; // an unknown layout offers nothing rather than guessing
+    }
+  }, [tournCall?.data]);
   const { data: claimed, refetch: refetchClaimed } = useReadContract({
     address: escrow,
     abi: ESCROW_ABI,
@@ -73,6 +83,14 @@ export function TournamentClaim({
     functionName: "settleTimeout",
     query: { enabled },
   });
+  // Only the two-clock escrow has it (v2 would revert), and only it needs it:
+  // an event that never started refunds when the right to start lapses.
+  const { data: entryWindowRaw } = useReadContract({
+    address: escrow,
+    abi: ESCROW_ABI,
+    functionName: "entryWindow",
+    query: { enabled: enabled && t != null && t.startedAt !== null },
+  });
   // A sponsor is not an entrant, so none of the reads above see them. Read the
   // chain rather than trusting the local record that surfaced this tournament:
   // it is a hint about what to ask, never the authority on what is owed.
@@ -84,19 +102,19 @@ export function TournamentClaim({
     ...poll,
   });
 
-  // tournaments() → [buyIn, pool, claimedAmount, entrants, openedAt, settled, payoutRoot, exists]
-  const t = tourn as
-    | readonly [bigint, bigint, bigint, number, bigint, boolean, `0x${string}`, boolean]
-    | undefined;
-  const exists = t?.[7] ?? false;
-  const settled = t?.[5] ?? false;
-  const openedAt = t ? Number(t[4]) : 0;
-  const buyIn = t?.[0] ?? 0n;
-  const payoutRoot = t?.[6];
+  const exists = t?.exists ?? false;
+  const settled = t?.settled ?? false;
+  const buyIn = t?.buyIn ?? 0n;
+  const payoutRoot = t?.payoutRoot;
   const rootSet = !!payoutRoot && payoutRoot !== ZERO32;
   const hasClaimed = claimed === true;
   const hasEntered = entered === true;
   const settleTimeout = timeout != null ? Number(timeout) : null;
+  // When refunds open, on whichever clock this escrow runs (see refundOpensAt).
+  const opensAt =
+    t && settleTimeout != null
+      ? refundOpensAt(t, settleTimeout, entryWindowRaw != null ? Number(entryWindowRaw) : null)
+      : null;
 
   // Root-settled + unclaimed → ask the server whether this wallet is a winner
   // (404 = not a winner / not root-settled, so `proof` stays null and no button).
@@ -121,7 +139,7 @@ export function TournamentClaim({
   // `refundSponsorship`; an entrant here is owed nothing.
   const refundable = buyIn > 0n;
   const refundReady =
-    refundable && !settled && settleTimeout != null && now > openedAt + settleTimeout && !hasClaimed;
+    refundable && !settled && opensAt != null && now > opensAt && !hasClaimed;
 
   // A root-settled winner is authorized by their Merkle PROOF, not by an onchain
   // entry: a free-entry (sponsor-funded) event never calls `enterTournament` for
@@ -160,7 +178,7 @@ export function TournamentClaim({
               refundable &&
                 (status === "abandoned" || status === "paused") &&
                 !settled &&
-                settleTimeout != null
+                opensAt != null
               ? "pending"
               : null;
 
@@ -173,8 +191,8 @@ export function TournamentClaim({
     enabled &&
     mySponsorship > 0n &&
     !settled &&
-    settleTimeout != null &&
-    now > openedAt + settleTimeout;
+    opensAt != null &&
+    now > opensAt;
 
   // Already-claimed is informational only, so it doesn't count toward showing
   // the parent's "Payouts & refunds" header — otherwise the panel would stay
@@ -299,7 +317,7 @@ export function TournamentClaim({
     );
   } else if (kind === "pending") {
     // abandoned but the refund window hasn't opened yet — say when.
-    const left = openedAt + settleTimeout! - now;
+    const left = opensAt! - now;
     const dur =
       left <= 0
         ? "soon"

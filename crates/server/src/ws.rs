@@ -14,6 +14,54 @@ use uuid::Uuid;
 use crate::room::RoomCmd;
 use crate::AppState;
 
+/// Sustained inbound commands per second a single player socket may push into
+/// its room, and how large a burst it may bank.
+///
+/// This is not the room's protection — `Room::send_to` is non-blocking, so a
+/// flood can no longer stall the actor or its clock. It bounds the CPU one
+/// connection can make the single-node server spend parsing frames, and that
+/// is ALL it may do. Frames over the budget are dropped unanswered, which for a
+/// `Move` means the seat's clock keeps running and it flags — so the limit
+/// has to sit far above the fastest LEGITIMATE cadence, not near a human one.
+/// That cadence is engine-vs-engine at a low clock: a seat moves once per
+/// round trip of its own, and two bots answering in ~2ms beside the server
+/// sustain dozens of moves a second. 20/s (the first version of this) flagged
+/// exactly those games. A seat can send at most about one legal move per
+/// round trip, so 500/s still leaves no honest client near the limit while
+/// capping a flood at a few hundred cheap parses a second.
+const INBOUND_MSGS_PER_SEC: f64 = 500.0;
+const INBOUND_BURST: f64 = 1_000.0;
+
+/// Token-bucket limiter for one socket. Per-connection and in-memory, so it
+/// needs no shared state and disappears with the socket.
+struct InboundBudget {
+    tokens: f64,
+    last: tokio::time::Instant,
+}
+
+impl InboundBudget {
+    fn new() -> Self {
+        InboundBudget {
+            tokens: INBOUND_BURST,
+            last: tokio::time::Instant::now(),
+        }
+    }
+
+    /// Consume one frame's budget; false means "over the limit, drop it".
+    fn allow(&mut self) -> bool {
+        let now = tokio::time::Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + elapsed * INBOUND_MSGS_PER_SEC).min(INBOUND_BURST);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct WsQuery {
     token: Option<String>,
@@ -94,6 +142,7 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socke
     }
 
     let (mut sink, mut stream) = socket.split();
+    let mut budget = InboundBudget::new();
 
     // Writer: room -> client, wrapped in a sequenced envelope.
     let writer = tokio::spawn(async move {
@@ -123,6 +172,11 @@ async fn handle_player(state: AppState, game_id: GameId, color: Color, mut socke
                 let Some(Ok(m)) = m else { break };
                 match m {
                     Message::Text(t) => {
+                        // Charge the budget before parsing: the parse is part
+                        // of what a flood is trying to spend.
+                        if !budget.allow() {
+                            continue;
+                        }
                         let Ok(env) = serde_json::from_str::<ClientEnvelope>(t.as_str()) else {
                             continue;
                         };
@@ -274,4 +328,70 @@ async fn handle_spectator(state: AppState, game_id: GameId, socket: WebSocket) {
         }
     }
     writer.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budget refills over time rather than being a hard per-connection
+    /// cap, so a long game stays playable while a flood is bounded.
+    #[tokio::test(start_paused = true)]
+    async fn inbound_budget_bounds_a_flood_but_refills() {
+        let mut b = InboundBudget::new();
+        // The banked burst is spendable immediately...
+        for i in 0..(INBOUND_BURST as usize) {
+            assert!(b.allow(), "burst frame {i} should pass");
+        }
+        // ...and then the socket is over budget.
+        assert!(!b.allow(), "a flood past the burst is dropped");
+
+        // A second later roughly a second's worth is back — not the whole
+        // burst, or the limit would be trivially defeated by pausing.
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let mut granted = 0;
+        while b.allow() {
+            granted += 1;
+            if granted > INBOUND_BURST as usize {
+                break;
+            }
+        }
+        assert!(
+            (INBOUND_MSGS_PER_SEC as usize - 1..=INBOUND_MSGS_PER_SEC as usize + 1)
+                .contains(&granted),
+            "expected ~{INBOUND_MSGS_PER_SEC} frames back after a second, got {granted}"
+        );
+    }
+
+    /// Engine-vs-engine at a low clock is the fastest legitimate cadence: two
+    /// bots answering in ~2ms with ~1ms round trips put a move on each socket
+    /// every ~6ms, for as long as the clock lasts. None of those may be dropped
+    /// — a dropped move flags the seat and, in a staked game, costs the stake.
+    #[tokio::test(start_paused = true)]
+    async fn a_fast_engine_is_never_throttled() {
+        let mut b = InboundBudget::new();
+        // 60 seconds of one move every 6ms, plus a ready frame per second.
+        for i in 0..10_000 {
+            assert!(b.allow(), "move {i} was dropped");
+            if i % 166 == 0 {
+                assert!(b.allow(), "a control frame was dropped");
+            }
+            tokio::time::advance(std::time::Duration::from_millis(6)).await;
+        }
+    }
+
+    /// Ordinary play must never be throttled. A blitz game is a few frames per
+    /// move; the budget has to sit far above that.
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_play_is_never_throttled() {
+        let mut b = InboundBudget::new();
+        // 200 moves, 3 frames each (move + whatever the client echoes), one
+        // move every 300ms — faster than any real bullet game.
+        for _ in 0..200 {
+            for _ in 0..3 {
+                assert!(b.allow(), "real play must not be dropped");
+            }
+            tokio::time::advance(std::time::Duration::from_millis(300)).await;
+        }
+    }
 }
