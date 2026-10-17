@@ -47,7 +47,9 @@ impl OpeningBook {
             anyhow::bail!("book size {} is not a multiple of 16 bytes", bytes.len());
         }
         let mut entries = Vec::with_capacity(bytes.len() / 16);
-        for chunk in bytes.chunks_exact(16) {
+        // The length was checked above, so there is no remainder to drop.
+        let (records, _) = bytes.as_chunks::<16>();
+        for chunk in records {
             entries.push(Entry {
                 key: u64::from_be_bytes(chunk[0..8].try_into().unwrap()),
                 mv: u16::from_be_bytes(chunk[8..10].try_into().unwrap()),

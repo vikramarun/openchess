@@ -175,6 +175,11 @@ pub fn merkle_proof(leaves: &[B256], mut index: usize) -> Vec<B256> {
 }
 
 /// The settlement interface the game server depends on.
+// `#[async_trait]` marks the trait's provided methods `#[must_use]`, and they
+// return a boxed future that already is — which clippy's `double_must_use`
+// (new in Rust 1.99) rejects. The generated code is not ours to change; the
+// allow is scoped to this one trait.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SettlementSink: Send + Sync {
     /// Lock both players' stakes for a game (called when a wagered game opens).
