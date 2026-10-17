@@ -496,11 +496,11 @@ function TournamentClient() {
                   : // 409 used to mean a display name collision, which cannot
                     // happen now that an entrant is a wallet. What is left is
                     // the door being shut: started, settled, at the entrant
-                    // cap — or, for a paid event, its entry window has closed
-                    // or one more entrant would leave too little time to play
-                    // every round before the payout window ends.
+                    // cap — or, for a paid event, one more entrant would leave
+                    // too little time to play every round before the escrow's
+                    // settle window closes (or it already has).
                     r.status === 409
-                    ? "This tournament isn’t taking entries — it has started, is full, or its entry window has closed."
+                    ? "This tournament isn’t taking entries — it has started, is full, or there isn’t enough time left to play it."
                     : // The admission gate. The server answers 403 for every
                       // not-admitted case and never a 2xx — `fetch` counts 202
                       // as ok, so a "you're still pending" success code would be

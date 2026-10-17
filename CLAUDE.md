@@ -12,7 +12,7 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 ## Build / test / run
 ```bash
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
-(cd contracts && forge test)       # Foundry: 41 tests incl. a solvency invariant
+(cd contracts && forge test)       # Foundry: 34 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:books)   # every built-in book walks clean (incl. castling)
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
@@ -29,7 +29,6 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:payouts) # a tournament's prize split adds up to the pool
 (cd apps/web && pnpm test:tourney) # buy-in vs free vs casual (a "0" buy-in is truthy)
 (cd apps/web && pnpm test:sponsor) # sponsoring a pool, and getting it back if the event dies
-(cd apps/web && pnpm test:tourneyrecord) # the escrow's tournament record, in both contract layouts
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
@@ -139,16 +138,16 @@ wallet.
   `OnchainSettlement::confirm`; **never call `get_receipt()` directly**, and both
   outbox workers re-read the chain before writing a terminal `"settled"`. Each
   write also verifies its POSTCONDITION (the game exists with those seats and
-  stake, the entry flag is set, `startedAt` moved) — `confirm` proves the
+  stake, the entry flag is set, the pool exists) — `confirm` proves the
   transaction did not revert, the read proves the chain holds the state the
   caller is about to run a real game on. Two riders on the postcondition, both
   learned the hard way. It is READ UNTIL IT HOLDS (`until_holds`, a few reads):
   a load-balanced RPC can answer from a node a block behind the receipt, and one
   stale read turned a transaction that LANDED into an error the caller rolled
   back on. And a write the caller may retry must be IDEMPOTENT
-  (`enter_tournament`/`start_tournament` read first): otherwise the retry
-  reverts `AlreadyEntered`/`AlreadyStarted` forever — a paid player left out of
-  the field whose payout splits their buy-in, an event that can never start.
+  (`enter_tournament` reads first): otherwise the retry reverts
+  `AlreadyEntered` forever — a paid player left out of the field whose payout
+  splits their buy-in.
   `SETTLE_CONFIRMATIONS` (default 1, inclusion) is the dial for waiting out
   reorgs; raising it costs latency on the path a player is watching, which is
   why it is an operator choice.
@@ -621,45 +620,35 @@ wallet.
   error; an explicitly configured `ADMIN_WALLET` stays static, which is the
   point of `admin_configured`. `/config` still publishes a cached copy — that is
   advisory, for drawing a button, and never authorizes.
-- **A tournament has TWO onchain clocks, and they are disjoint on purpose.**
-  It used to have one, started at `openTournament` — i.e. at CREATION — so time
-  spent filling a field came out of the time available to play it, and entry had
-  no deadline at all. A field could still be filling after settlement had become
-  impossible, and past the window both settle paths revert permanently while
-  `claimRefund` opens, so the event pays nobody and discards its standings. Now:
-  `openedAt + entryWindow` closes entry **and the right to start**, and opens
-  refunds for an event that never started; `startedAt + settleTimeout` bounds
-  settlement for one that did. `startTournament` is refused past the first, so a
-  pool is never simultaneously settleable and refundable — that disjointness is
-  the safety property, and `_canSettle`/`_canRefund` are where it lives. Three
-  riders. **The contract is ahead of the live deployment, on purpose** —
-  v2 stays live until buy-in tournaments are promoted (constructor change ⇒
-  redeploy, deferred; on v2 the worst case is a slower refund, never a loss —
-  see [DEPLOYMENTS.md](DEPLOYMENTS.md)), so the server and web must run against
-  BOTH. Adding `startedAt` changed the WIDTH of what `tournaments()`
-  returns (8 words on v2, 9 now), so never decode it with the vendored ABI: the
-  server goes through `OnchainSettlement::read_tournament` and the web through
-  `lib/tournamentRecord.ts`, both of which take either layout. A vendored-ABI
-  decode failed every read against the live v2 — creation, payout, the settled
-  check — while the probe test, which used MockUSDC as the stand-in for v2,
-  passed; `the_server_runs_against_the_live_v2_escrow` now drives the real v2
-  bytecode (`abi/ChessEscrowV2.json`, frozen — never re-vendor it). The width
-  is also the capability marker for `startTournament`, and it is remembered
-  only from a read that SUCCEEDED: caching an RPC error as "v2" skipped the
-  start for the life of the process on a contract that requires it. **A failed onchain start must roll
-  the tournament back to `open`**, since a schedule played for a pool with no
-  `startedAt` cannot be settled at all. And the clock fix does not replace the
-  SCHEDULE check: rounds are sequential, so 128 entrants is 127 rounds, and the
-  per-game limits (3h + 180s) and the per-field limit are each fine alone but
-  cannot be multiplied together — `tourney_start` still sizes
-  `worst_case_schedule_secs` against the live onchain deadline and refuses what
-  cannot finish — sized by the rounds LEFT on a resume, and failing closed when
-  the deadline can't be read. Joins apply the same arithmetic to the field
-  they would make, so no buy-in is taken into an event that could no longer
-  start. An event that never starts still refunds onchain (at `openedAt +
-  entryWindow` on the new contract), but its row stays `open` forever, so
-  `claimable_tournaments` lists `open` too — otherwise those entrants had a
-  refund the chain would pay and no button anywhere to ask for it.
+- **A tournament's settle clock starts at CREATION, so the server has to
+  guard the schedule.** The live v2 escrow has one clock per tournament,
+  started at `openTournament`: settlement closes at `openedAt + settleTimeout`,
+  and past it both settle paths revert permanently while `claimRefund` opens,
+  so the event pays nobody and discards its standings. Time spent filling a
+  field comes out of the time available to play it, and `enterTournament` has
+  no deadline of its own. Rounds are sequential, so 128 entrants is 127 rounds,
+  and the per-game limits (3h + 180s) and the per-field limit are each fine
+  alone but cannot be multiplied together. So `tourney_start` sizes
+  `worst_case_schedule_secs` against the LIVE onchain deadline
+  (`tournament_deadline`) and refuses what cannot finish — sized by the rounds
+  LEFT on a resume, and failing closed when the deadline can't be read. Joins
+  apply the same arithmetic to the field they would make, and refuse outright
+  past the deadline, so no buy-in is taken into an event that could no longer
+  start. That guard is OURS, not the contract's — the worst case if it ever
+  failed is a slower refund (after `settleTimeout`), never a loss. An event
+  that never starts still refunds onchain at `openedAt + settleTimeout`, but its
+  row stays `open` forever, so `claimable_tournaments` lists `open` too —
+  otherwise those entrants had a refund the chain would pay and no button
+  anywhere to ask for it.
+  A two-clock contract (an `entryWindow` closing entry and the right to start,
+  and a `startTournament` that starts the settle clock when play begins) was
+  written and then **reverted** before it was ever deployed, along with the
+  server/web support for it: nothing about v2 blocks, and running two contract
+  layouts at once cost a dual-layout decoder on both sides. It lives in git
+  history (`9f4f6e0`) if buy-in tournaments ever need it — see
+  [DEPLOYMENTS.md](DEPLOYMENTS.md). Bringing it back is a constructor change
+  (⇒ redeploy) AND a change to what `tournaments()` returns (one more word), so
+  the server and web would have to read both layouts until the cutover.
 - **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is
   `has_insufficient_material(flagged.opposite())` — not `is_insufficient_material()`,
   which shakmaty defines as *neither* side being able to mate. Asking the latter

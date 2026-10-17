@@ -675,11 +675,10 @@ impl Db {
     /// gates on the contract's own timeout, so listing one early promises
     /// nothing.
     ///
-    /// `open` is in it for the same reason, and it matters more on the
-    /// two-clock escrow: an event that never starts — its organizer never came
-    /// back, its schedule was refused for lack of time, its start failed —
-    /// becomes refundable at `openedAt + entryWindow` (hours), yet its row
-    /// never leaves `open` (the in-memory TTL sweep writes nothing). Without
+    /// `open` is in it for the same reason: an event that never starts — its
+    /// organizer never came back, its schedule was refused for lack of time —
+    /// becomes refundable at `openedAt + settleTimeout`, yet its row never
+    /// leaves `open` (the in-memory TTL sweep writes nothing). Without
     /// it, those entrants' buy-ins were refundable onchain and offered nowhere.
     /// The UI shows nothing for an `open` event until the chain's refund
     /// window has actually opened, so a live one still filling is unaffected.

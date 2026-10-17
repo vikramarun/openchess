@@ -33,7 +33,6 @@ CLIENT = f"{ROOT}/target/debug/chess-client"
 SERVER = f"{ROOT}/target/debug/chess-server"
 DB = os.environ.get("DATABASE_URL", f"postgres://{os.environ.get('USER')}@localhost/chess")
 DBNAME = DB.rsplit("/", 1)[-1]
-ENTRY_WINDOW = 300    # entryWindow (prod is 4h): must be < SETTLE_TIMEOUT.
 SETTLE_TIMEOUT = 600  # settleTimeout (prod is 24h). Test A settles inside it;
                       # Test B jumps anvil time past it to reach claimRefund.
 
@@ -125,7 +124,7 @@ try:
     os.chdir(f"{ROOT}/contracts")
     print("== deploy MockUSDC + ChessEscrow (0% rake) ==")
     USDC = json.loads(shout(f"forge create test/ChessEscrow.t.sol:MockUSDC --rpc-url {RPC} --private-key {K0} --broadcast --json"))["deployedTo"]
-    ESCROW = json.loads(shout(f"forge create src/ChessEscrow.sol:ChessEscrow --rpc-url {RPC} --private-key {K0} --broadcast --json --constructor-args {USDC} {A1} {A0} 0 {SETTLE_TIMEOUT} {ENTRY_WINDOW}"))["deployedTo"]
+    ESCROW = json.loads(shout(f"forge create src/ChessEscrow.sol:ChessEscrow --rpc-url {RPC} --private-key {K0} --broadcast --json --constructor-args {USDC} {A1} {A0} 0 {SETTLE_TIMEOUT}"))["deployedTo"]
     print(f"USDC={USDC} ESCROW={ESCROW}")
 
     for addr, key in PLAYERS:

@@ -235,14 +235,6 @@ pub trait SettlementSink: Send + Sync {
         Ok(())
     }
 
-    /// Begin play, which is what starts the onchain SETTLE clock. Must be
-    /// called before the entry window closes; after it, entry is refused and
-    /// the tournament can only ever resolve into refunds.
-    async fn start_tournament(&self, tid: Uuid) -> anyhow::Result<()> {
-        tracing::info!(%tid, "settlement(log): start tournament");
-        Ok(())
-    }
-
     /// Distribute a tournament pool directly to a small winners list.
     async fn settle_tournament(
         &self,
@@ -291,18 +283,17 @@ pub trait SettlementSink: Send + Sync {
         None
     }
 
-    /// `(entry_deadline, settle_deadline)` for a tournament, as unix seconds,
-    /// read live from the chain. `None` off-chain, for a tournament with no
-    /// pool, or when any read fails — never a guessed default.
+    /// When a tournament's settle window closes, as unix seconds, read live
+    /// from the chain: `openedAt + settleTimeout`. `None` off-chain, for a
+    /// tournament with no pool, or when any read fails — never a guessed
+    /// default.
     ///
-    /// On the two-clock escrow, entry (and the right to start) close at
-    /// `openedAt + entryWindow`, and settlement at `startedAt + settleTimeout`;
-    /// before the start, the settle deadline reported is the one the event
-    /// would get by starting NOW. On v2 there is one clock, running from
-    /// creation: settlement closes at `openedAt + settleTimeout`, and that is
-    /// reported as the entry deadline too, since an entry past it can only
-    /// ever be refunded.
-    async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
+    /// The clock runs from CREATION (`openTournament`), not from the start of
+    /// play, and past it both settle paths revert permanently while
+    /// `claimRefund` opens. So it bounds everything: an entry past it can only
+    /// ever be refunded, and a schedule that cannot finish before it cannot be
+    /// paid.
+    async fn tournament_deadline(&self, _tid: Uuid) -> Option<u64> {
         None
     }
 
@@ -358,19 +349,10 @@ pub struct OnchainSettlement {
     provider: DynProvider,
     escrow: Address,
     oracle: PrivateKeySigner,
-    /// Whether the deployed escrow has the two-clock lifecycle
-    /// (`startTournament` + `entryWindow`). Learned from the width of a
-    /// `tournaments()` read — 9 words with it, 8 without (v2) — and set ONLY
-    /// from a read that succeeded. An RPC error must never be remembered as
-    /// "no transition": that would skip `startTournament` for the life of the
-    /// process on a contract that requires it, leaving every event
-    /// unsettleable and refundable mid-play.
-    two_clock: std::sync::OnceLock<bool>,
-    /// `settleTimeout()` / `entryWindow()`, read once each. Both are set at
-    /// construction with no setter, so one successful read holds for the life
-    /// of the deployment; a failed read is simply retried next time.
+    /// `settleTimeout()`, read once. It is set at construction with no setter,
+    /// so one successful read holds for the life of the deployment; a failed
+    /// read is simply retried next time.
     settle_timeout: std::sync::OnceLock<u64>,
-    entry_window: std::sync::OnceLock<u64>,
     /// Blocks to wait before a write is treated as real, from
     /// `SETTLE_CONFIRMATIONS`.
     ///
@@ -409,56 +391,22 @@ impl OnchainSettlement {
             provider,
             escrow,
             oracle,
-            two_clock: std::sync::OnceLock::new(),
             settle_timeout: std::sync::OnceLock::new(),
-            entry_window: std::sync::OnceLock::new(),
             confirmations,
         }
     }
 
-    /// The escrow's `Tournament` record, decoded in whichever layout the
-    /// deployed contract has. Every tournament read goes through here.
-    ///
-    /// A public mapping getter returns the struct's fields flat, so adding
-    /// `startedAt` changed what the SAME selector returns: 8 words on v2, 9 on
-    /// the two-clock contract. Decoding with the vendored ABI alone failed
-    /// every read against the live v2 ("buffer overrun"), and since callers
-    /// turn a failed read into `None`/`false`, it broke tournament creation,
-    /// the payout's pool read and the outbox's settled check all at once —
-    /// silently. The width is also the capability marker, so it is recorded.
+    /// The escrow's `Tournament` record. Every tournament read goes through
+    /// here.
     async fn read_tournament(&self, tidb: B256) -> anyhow::Result<TournamentRecord> {
-        use alloy::sol_types::SolCall;
-        let input = ChessEscrow::tournamentsCall(tidb).abi_encode();
-        let req = alloy::rpc::types::TransactionRequest::default()
-            .to(self.escrow)
-            .input(alloy::primitives::Bytes::from(input).into());
-        let out = self.provider.call(req).await?;
-        let rec = decode_tournament(&out)?;
-        let _ = self.two_clock.set(rec.started_at.is_some());
-        Ok(rec)
-    }
-
-    /// Whether this deployment has the two-clock tournament lifecycle.
-    ///
-    /// The server deploys independently of the contract, so it must run
-    /// against both. Read off the shape of `tournaments()` (any id answers, an
-    /// unknown one with zeros), and remembered only once a read has actually
-    /// succeeded — an `Err` here is an RPC failure, and the caller must fail
-    /// rather than guess. A capability check, never a catch-all: on a contract
-    /// that has the transition, `startTournament` failing is still fatal.
-    async fn has_start_transition(&self) -> anyhow::Result<bool> {
-        if let Some(known) = self.two_clock.get() {
-            return Ok(*known);
-        }
-        let rec = self.read_tournament(B256::ZERO).await.map_err(|e| {
-            anyhow::anyhow!("could not determine the escrow's tournament lifecycle: {e:#}")
-        })?;
-        let present = rec.started_at.is_some();
-        tracing::info!(
-            two_clock_lifecycle = present,
-            "settlement: escrow tournament lifecycle probed"
-        );
-        Ok(present)
+        let t = self.contract().tournaments(tidb).call().await?;
+        Ok(TournamentRecord {
+            buy_in: t.buyIn,
+            pool: t.pool,
+            opened_at: t.openedAt,
+            settled: t.settled,
+            exists: t.exists,
+        })
     }
 
     async fn settle_timeout(&self) -> anyhow::Result<u64> {
@@ -467,15 +415,6 @@ impl OnchainSettlement {
         }
         let v = self.contract().settleTimeout().call().await?;
         let _ = self.settle_timeout.set(v);
-        Ok(v)
-    }
-
-    async fn entry_window(&self) -> anyhow::Result<u64> {
-        if let Some(v) = self.entry_window.get() {
-            return Ok(*v);
-        }
-        let v = self.contract().entryWindow().call().await?;
-        let _ = self.entry_window.set(v);
         Ok(v)
     }
 
@@ -725,55 +664,6 @@ impl SettlementSink for OnchainSettlement {
         Ok(())
     }
 
-    async fn start_tournament(&self, tid: Uuid) -> anyhow::Result<()> {
-        // An escrow predating the two-clock lifecycle has no transition to
-        // make: its settle clock has been running since `openTournament`, which
-        // is exactly what the caller wants to have happened. Skipping is right
-        // there, and lets the server deploy ahead of the contract.
-        if !self.has_start_transition().await? {
-            tracing::info!(%tid, "settlement(onchain): escrow predates startTournament; skipping");
-            return Ok(());
-        }
-        let tidb = game_id_to_bytes32(tid);
-        // Idempotent, for the same reason as `enter_tournament`: only the
-        // oracle starts tournaments, so a set `startedAt` is our earlier start.
-        // Without this, a start whose read-back failed was rolled back to
-        // `open` and every retry reverted `AlreadyStarted` — an event that could
-        // never be played, its buy-ins locked until the settle window lapsed.
-        if self
-            .read_tournament(tidb)
-            .await?
-            .started_at
-            .is_some_and(|at| at != 0)
-        {
-            tracing::info!(%tid, "settlement(onchain): tournament already started");
-            return Ok(());
-        }
-        let escrow = self.contract();
-        let pending = escrow.startTournament(tidb).send().await?;
-        self.confirm(pending, "startTournament").await?;
-        // Postcondition: without `startedAt` the pool cannot be settled at all,
-        // so the caller must not dispatch a schedule on the strength of a
-        // transaction it merely believes landed.
-        until_holds("startTournament", || async {
-            Ok(
-                if self
-                    .read_tournament(tidb)
-                    .await?
-                    .started_at
-                    .is_some_and(|at| at != 0)
-                {
-                    Ok(())
-                } else {
-                    Err("startTournament reported success but startedAt is still 0".into())
-                },
-            )
-        })
-        .await?;
-        tracing::info!(%tid, "settlement(onchain): tournament started");
-        Ok(())
-    }
-
     async fn settle_tournament(
         &self,
         tid: Uuid,
@@ -841,7 +731,7 @@ impl SettlementSink for OnchainSettlement {
         }
     }
 
-    async fn tournament_deadlines(&self, tid: Uuid) -> Option<(u64, u64)> {
+    async fn tournament_deadline(&self, tid: Uuid) -> Option<u64> {
         let t = match self.read_tournament(game_id_to_bytes32(tid)).await {
             Ok(t) if t.exists => t,
             Ok(_) => return None,
@@ -850,48 +740,14 @@ impl SettlementSink for OnchainSettlement {
                 return None;
             }
         };
-        let settle_timeout = match self.settle_timeout().await {
-            Ok(v) => v,
+        // Every failure is `None`, never a default: a guessed deadline is a
+        // confident wrong answer, and both callers treat `None` as "could not
+        // ask".
+        match self.settle_timeout().await {
+            Ok(settle_timeout) => Some(t.opened_at.saturating_add(settle_timeout)),
             Err(e) => {
                 tracing::warn!("settleTimeout() read failed: {e:#}");
-                return None;
-            }
-        };
-        // Every failure above is `None`, never a default: a guessed deadline
-        // is a confident wrong answer, and both callers already treat `None`
-        // as "could not ask".
-        match t.started_at {
-            // Single clock (v2): settlement closes at `openedAt +
-            // settleTimeout`, a clock that has been running since CREATION.
-            // Entry has no deadline of its own there, but an entry past that
-            // instant can only ever be refunded, so it is the entry deadline
-            // too.
-            None => {
-                let closes = t.opened_at.saturating_add(settle_timeout);
-                Some((closes, closes))
-            }
-            // Two clocks: entry (and the right to start) close at `openedAt +
-            // entryWindow`; settlement at `startedAt + settleTimeout`. Before
-            // the start, report the settle deadline the event WOULD get by
-            // starting now — the schedule guard's question is "if I start this
-            // at this moment, can it finish?".
-            Some(started_at) => {
-                let entry_window = match self.entry_window().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("entryWindow() read failed: {e:#}");
-                        return None;
-                    }
-                };
-                let settle_from = if started_at != 0 {
-                    started_at
-                } else {
-                    unix_now().max(t.opened_at)
-                };
-                Some((
-                    t.opened_at.saturating_add(entry_window),
-                    settle_from.saturating_add(settle_timeout),
-                ))
+                None
             }
         }
     }
@@ -976,9 +832,8 @@ const POSTCONDITION_PAUSE: std::time::Duration = std::time::Duration::from_milli
 /// A receipt has just confirmed, but a load-balanced RPC can answer the next
 /// read from a node one block behind it. One stale read must not turn a
 /// transaction that LANDED into an error: the caller rolls back on `Err` — a
-/// game aborted while its stakes are locked onchain, an event reset to `open`
-/// after it started — and the retry then reverts against the state that did
-/// land. A persistent disagreement still fails.
+/// game aborted while its stakes are locked onchain, a paid entry left out of
+/// the field — and the retry then reverts against the state that did land. A persistent disagreement still fails.
 async fn until_holds<F, Fut>(what: &str, mut check: F) -> anyhow::Result<()>
 where
     F: FnMut() -> Fut,
@@ -998,56 +853,14 @@ where
     anyhow::bail!("{last}")
 }
 
-/// The escrow's `Tournament` record, independent of contract version.
+/// The fields of the escrow's `Tournament` record that the server reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TournamentRecord {
     pub buy_in: U256,
     pub pool: U256,
     pub opened_at: u64,
-    /// `None` on a contract without the start transition (v2), whose settle
-    /// clock runs from `opened_at`. `Some(0)` means not started yet.
-    pub started_at: Option<u64>,
     pub settled: bool,
     pub exists: bool,
-}
-
-/// Decode a raw `tournaments(bytes32)` return in either layout:
-/// v2 `(buyIn, pool, claimedAmount, entrants, openedAt, settled, payoutRoot,
-/// exists)`, or the two-clock contract's, which inserts `startedAt` after
-/// `openedAt`. Anything else is an error, never a guess.
-fn decode_tournament(data: &[u8]) -> anyhow::Result<TournamentRecord> {
-    if !data.len().is_multiple_of(32) {
-        anyhow::bail!(
-            "tournaments() returned {} bytes, not whole words",
-            data.len()
-        );
-    }
-    let word = |i: usize| U256::from_be_slice(&data[i * 32..(i + 1) * 32]);
-    let time = |i: usize| -> anyhow::Result<u64> {
-        u64::try_from(word(i))
-            .map_err(|_| anyhow::anyhow!("tournaments() word {i} is not a timestamp"))
-    };
-    match data.len() / 32 {
-        8 => Ok(TournamentRecord {
-            buy_in: word(0),
-            pool: word(1),
-            opened_at: time(4)?,
-            started_at: None,
-            settled: !word(5).is_zero(),
-            exists: !word(7).is_zero(),
-        }),
-        9 => Ok(TournamentRecord {
-            buy_in: word(0),
-            pool: word(1),
-            opened_at: time(4)?,
-            started_at: Some(time(5)?),
-            settled: !word(6).is_zero(),
-            exists: !word(8).is_zero(),
-        }),
-        n => anyhow::bail!(
-            "tournaments() returned {n} words; this server knows the 8-word (v2) and 9-word layouts"
-        ),
-    }
 }
 
 fn unix_now() -> u64 {
@@ -1103,7 +916,6 @@ mod tests {
             deployer.address(),
             100u16,
             3600u64,
-            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -1185,7 +997,6 @@ mod tests {
             deployer.address(),
             100u16,
             3600u64,
-            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -1278,30 +1089,14 @@ mod tests {
         Ok(())
     }
 
-    // The LIVE v2 escrow (Base 0x7a536bEF…4D68), FROZEN. This artifact is
-    // main's vendored ABI from before the two-clock change, and its runtime
-    // bytecode is byte-identical to the deployed contract (immutables masked;
-    // checked against the chain). Never re-vendor it from source: it is the
-    // old contract the server has to keep working against until the redeploy.
-    sol!(
-        #[sol(rpc)]
-        ChessEscrowV2,
-        "abi/ChessEscrowV2.json"
-    );
-
-    /// The server deploys independently of the contract, so it has to run
-    /// against the escrow that is ACTUALLY deployed, not just the one in
-    /// `contracts/src`. This drives every tournament path against the real v2
-    /// bytecode.
-    ///
-    /// The previous version of this test used MockUSDC as a stand-in for "an
-    /// escrow without `entryWindow()`" and passed, while every `tournaments()`
-    /// read against the real v2 failed to decode — the struct is one field
-    /// shorter there — so tournament creation errored after the pool opened,
-    /// the payout could not read its pool, and a settled pool read back as
-    /// unsettled forever. A stand-in proves nothing about decoding.
+    /// Every tournament read the server makes, against the real contract:
+    /// creation's postcondition, entry, the pool, the deadline, and the settled
+    /// check the outbox relies on. A read that fails here fails silently in
+    /// production — callers turn it into `None`/`false` — so tournament
+    /// creation errors after the pool opens, the payout can't read its pool,
+    /// and a settled pool reads back unsettled and is requeued forever.
     #[tokio::test]
-    async fn the_server_runs_against_the_live_v2_escrow() -> anyhow::Result<()> {
+    async fn every_tournament_read_round_trips() -> anyhow::Result<()> {
         let anvil = Anvil::new().try_spawn()?;
         let url = anvil.endpoint_url();
         let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
@@ -1312,8 +1107,7 @@ mod tests {
             .wallet(EthereumWallet::from(deployer.clone()))
             .connect_http(url.clone());
         let usdc = MockUSDC::deploy(&dep).await?;
-        // v2's constructor: no entryWindow.
-        let v2 = ChessEscrowV2::deploy(
+        let escrow = ChessEscrow::deploy(
             &dep,
             *usdc.address(),
             oracle.address(),
@@ -1335,52 +1129,41 @@ mod tests {
                 .get_receipt()
                 .await?;
             MockUSDC::new(*usdc.address(), &p)
-                .approve(*v2.address(), amt)
+                .approve(*escrow.address(), amt)
                 .send()
                 .await?
                 .get_receipt()
                 .await?;
-            ChessEscrowV2::new(*v2.address(), &p)
+            ChessEscrow::new(*escrow.address(), &p)
                 .deposit(amt)
                 .send()
                 .await?
                 .get_receipt()
                 .await?;
         }
-        let sink = OnchainSettlement::new(url, *v2.address(), oracle);
+        let sink = OnchainSettlement::new(url, *escrow.address(), oracle);
 
-        assert!(
-            !sink.has_start_transition().await?,
-            "v2 has no start transition"
-        );
-
-        // Games are unaffected by the struct change, but prove it.
-        let gid = Uuid::new_v4();
-        sink.open_escrow(gid, p1.address(), p2.address(), unit)
-            .await?;
-        sink.report_result(gid, None).await?;
-        assert!(sink.is_settled(gid).await);
-
-        // The tournament path, end to end.
         let tid = Uuid::new_v4();
+        assert_eq!(
+            sink.tournament_deadline(tid).await,
+            None,
+            "a tournament with no pool has no deadline"
+        );
         sink.open_tournament(tid, unit).await?; // its postcondition reads tournaments()
         sink.enter_tournament(tid, p1.address()).await?;
         sink.enter_tournament(tid, p2.address()).await?;
         assert_eq!(sink.tournament_pool(tid).await, Some(unit * U256::from(2)));
 
-        // v2's only clock runs from CREATION, so both deadlines are
+        // The settle clock runs from CREATION, so the deadline is
         // openedAt + settleTimeout — not "now + settleTimeout".
-        let opened_at = ChessEscrowV2::new(*v2.address(), &dep)
+        let opened_at = ChessEscrow::new(*escrow.address(), &dep)
             .tournaments(game_id_to_bytes32(tid))
             .call()
             .await?
             .openedAt;
-        assert_eq!(
-            sink.tournament_deadlines(tid).await,
-            Some((opened_at + 3600, opened_at + 3600))
-        );
+        assert_eq!(sink.tournament_deadline(tid).await, Some(opened_at + 3600));
 
-        sink.start_tournament(tid).await?; // skipped on v2, and must not error
+        assert!(!sink.is_tournament_settled(tid).await);
         sink.settle_tournament(
             tid,
             vec![p1.address(), p2.address()],
@@ -1389,51 +1172,30 @@ mod tests {
         .await?;
         assert!(
             sink.is_tournament_settled(tid).await,
-            "a pool v2 settled must read back as settled, or the outbox requeues it forever"
+            "a settled pool must read back as settled, or the outbox requeues it forever"
         );
         Ok(())
     }
 
-    /// The other half of version support: the current escrow probes as
-    /// two-clock, and there `startTournament` is required, not optional.
+    /// A deadline that can't be read is `None`, never a default: both callers
+    /// treat `None` as "could not ask" and refuse, where a guessed deadline
+    /// would let a schedule start that can't be settled.
     #[tokio::test]
-    async fn the_two_clock_escrow_requires_its_start_transition() -> anyhow::Result<()> {
-        let anvil = Anvil::new().try_spawn()?;
-        let url = anvil.endpoint_url();
-        let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
-        let oracle: PrivateKeySigner = anvil.keys()[1].clone().into();
-        let dep = ProviderBuilder::new()
-            .wallet(EthereumWallet::from(deployer.clone()))
-            .connect_http(url.clone());
-        let usdc = MockUSDC::deploy(&dep).await?;
-        let escrow = ChessEscrow::deploy(
-            &dep,
-            *usdc.address(),
-            oracle.address(),
-            deployer.address(),
-            100u16,
-            3600u64,
-            1800u64,
-        )
-        .await?;
-        let live = OnchainSettlement::new(url, *escrow.address(), oracle);
-        assert!(live.has_start_transition().await?);
-        assert!(
-            live.start_tournament(Uuid::new_v4()).await.is_err(),
-            "a failing startTournament on a capable contract must stay fatal"
-        );
-        Ok(())
+    async fn an_unreadable_deadline_is_none() {
+        // Nothing listens here: every call is a transport error.
+        let dead: alloy::transports::http::reqwest::Url = "http://127.0.0.1:9".parse().unwrap();
+        let sink = OnchainSettlement::new(dead, Address::ZERO, PrivateKeySigner::random());
+        assert_eq!(sink.tournament_deadline(Uuid::new_v4()).await, None);
     }
 
-    /// Entry and start are idempotent. Their read-back can fail AFTER the
-    /// transaction landed (a load-balanced RPC a block behind the receipt);
-    /// the caller then reports failure and the user retries. A retry that
-    /// re-sent the transaction reverted `AlreadyEntered` / `AlreadyStarted`
-    /// forever — so a player who had PAID was never added to the field while
-    /// the payout divided their buy-in among everyone else, and a started
-    /// event was rolled back to `open` and could never be played.
+    /// Entry is idempotent. Its read-back can fail AFTER the transaction
+    /// landed (a load-balanced RPC a block behind the receipt); the caller then
+    /// reports failure and the user retries. A retry that re-sent the
+    /// transaction reverted `AlreadyEntered` forever — so a player who had PAID
+    /// was never added to the field while the payout divided their buy-in
+    /// among everyone else.
     #[tokio::test]
-    async fn a_retried_entry_or_start_succeeds_once_and_counts_once() -> anyhow::Result<()> {
+    async fn a_retried_entry_succeeds_once_and_counts_once() -> anyhow::Result<()> {
         let anvil = Anvil::new().try_spawn()?;
         let url = anvil.endpoint_url();
         let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
@@ -1450,7 +1212,6 @@ mod tests {
             deployer.address(),
             0u16,
             3600u64,
-            1800u64,
         )
         .await?;
         let unit = U256::from(1_000_000u64);
@@ -1498,58 +1259,7 @@ mod tests {
             err.downcast_ref::<EntryNotMade>().is_some(),
             "a definitive failure must be typed as such, got: {err:#}"
         );
-        sink.start_tournament(tid).await?;
-        sink.start_tournament(tid).await?; // the retry
         Ok(())
-    }
-
-    /// An RPC failure must not be remembered as "this escrow has no start
-    /// transition". The probe used to cache `entryWindow().call().is_ok()`, so
-    /// one transport error at the first tournament start made every later
-    /// start a silent no-op for the life of the process — and on the two-clock
-    /// contract an unstarted event can't be settled and turns refundable at
-    /// `openedAt + entryWindow`, while it is still being played.
-    #[tokio::test]
-    async fn an_rpc_failure_is_not_remembered_as_a_missing_transition() {
-        // Nothing listens here: every call is a transport error.
-        let dead: alloy::transports::http::reqwest::Url = "http://127.0.0.1:9".parse().unwrap();
-        let sink = OnchainSettlement::new(dead, Address::ZERO, PrivateKeySigner::random());
-        assert!(sink.has_start_transition().await.is_err());
-        assert!(
-            sink.two_clock.get().is_none(),
-            "a failed probe must not be cached"
-        );
-        assert!(
-            sink.start_tournament(Uuid::new_v4()).await.is_err(),
-            "and the start must fail (so tourney_start rolls back), not skip"
-        );
-        assert_eq!(sink.tournament_deadlines(Uuid::new_v4()).await, None);
-    }
-
-    #[test]
-    fn both_tournament_layouts_decode() {
-        let words = |ws: &[u64]| -> Vec<u8> {
-            ws.iter()
-                .flat_map(|w| U256::from(*w).to_be_bytes::<32>())
-                .collect()
-        };
-        // v2: buyIn pool claimed entrants openedAt settled payoutRoot exists
-        let v2 = decode_tournament(&words(&[5, 10, 0, 2, 1_000, 1, 0, 1])).unwrap();
-        assert_eq!(
-            (v2.buy_in, v2.pool, v2.opened_at),
-            (U256::from(5), U256::from(10), 1_000)
-        );
-        assert_eq!((v2.started_at, v2.settled, v2.exists), (None, true, true));
-        // two-clock: … openedAt startedAt settled payoutRoot exists
-        let v3 = decode_tournament(&words(&[5, 10, 0, 2, 1_000, 1_500, 0, 0, 1])).unwrap();
-        assert_eq!(
-            (v3.started_at, v3.settled, v3.exists),
-            (Some(1_500), false, true)
-        );
-        // An unknown layout is an error, never a best guess.
-        assert!(decode_tournament(&words(&[1; 7])).is_err());
-        assert!(decode_tournament(&words(&[1; 10])).is_err());
-        assert!(decode_tournament(&[0u8; 33]).is_err());
     }
 
     #[tokio::test]
@@ -1573,7 +1283,6 @@ mod tests {
             deployer.address(),
             0u16,
             3600u64,
-            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -1617,9 +1326,6 @@ mod tests {
             U256::from(1_000_000u64),
             U256::from(0u64),
         ];
-        // Play begins: this is what starts the onchain settle clock, and
-        // settlement is refused without it.
-        sink.start_tournament(tid).await?;
         sink.settle_tournament(tid, addrs.clone(), payouts).await?;
 
         let read = ChessEscrow::new(escrow_addr, &dep);
@@ -1688,7 +1394,6 @@ mod tests {
             deployer.address(),
             0u16,
             3600u64,
-            1800u64, // entryWindow: must be < settleTimeout
         )
         .await?;
         let escrow_addr = *escrow.address();
@@ -1731,7 +1436,6 @@ mod tests {
             (players[0].address(), U256::from(2_000_000u64)),
             (players[1].address(), U256::from(1_000_000u64)),
         ];
-        sink.start_tournament(tid).await?;
         sink.settle_tournament_root(tid, leaves.clone()).await?;
 
         // Each winner claims with a Rust-built proof verified by the Solidity tree.
@@ -1814,16 +1518,9 @@ mod tests {
         let usdc = MockUSDC::deploy(&provider).await?;
         // Long window for the claim flow (settle never races the timeout); short
         // window for the refund flow (so we can actually wait past it).
-        let escrow_pay = ChessEscrow::deploy(
-            &provider,
-            *usdc.address(),
-            me,
-            fee_recipient,
-            0u16,
-            3600u64,
-            1800u64,
-        )
-        .await?;
+        let escrow_pay =
+            ChessEscrow::deploy(&provider, *usdc.address(), me, fee_recipient, 0u16, 3600u64)
+                .await?;
         let escrow_ref = ChessEscrow::deploy(
             &provider,
             *usdc.address(),
@@ -1831,10 +1528,6 @@ mod tests {
             fee_recipient,
             0u16,
             refund_timeout,
-            // Entry must close strictly before settlement; this deployment
-            // exists to have its refund window expire, so keep entry open for
-            // essentially all of it.
-            refund_timeout.saturating_sub(1),
         )
         .await?;
         eprintln!(
@@ -1897,9 +1590,6 @@ mod tests {
             .await?
             .get_receipt()
             .await?; // pool = 17 USDC
-                     // Begin play — settlement is keyed on `startedAt` and is refused
-                     // without it.
-        pay.startTournament(gid).send().await?.get_receipt().await?;
 
         // 17 leaves: index 0 is our test winner, the rest synthetic. Total == pool.
         let winner = Address::from([0x11; 20]);
