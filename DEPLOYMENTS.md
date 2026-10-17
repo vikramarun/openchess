@@ -9,7 +9,7 @@
 > discards its standings.
 >
 > Two changes, both needing a **fresh deployment** (the constructor signature
-> changed, so this is a redeploy plus a bankroll migration, not an upgrade):
+> changed, so this is a redeploy, not an upgrade — see below on migration):
 > - an immutable **`entryWindow`** with an `EntryWindowClosed` revert, and
 > - **`startTournament`**, an oracle-only transition that starts the settle
 >   clock when play begins. Entry and the right to start both close at
@@ -19,25 +19,36 @@
 >   refundable. An event now gets the WHOLE settle window for its games instead
 >   of whatever was left after the field filled.
 >
-> Until the redeploy:
+> Until the redeploy, the server runs against BOTH contracts — and that is a
+> tested claim, not an assumption (`the_server_runs_against_the_live_v2_escrow`
+> in `crates/ledger`, which drives every tournament path against the real v2
+> bytecode vendored as `crates/ledger/abi/ChessEscrowV2.json`):
 > - The vendored ABI (`crates/ledger/abi/ChessEscrow.json`) is built from the
->   NEW source, so it advertises `entryWindow()`. The live v2 has no such
->   function.
-> - That is handled, not ignored: `OnchainSettlement::tournament_deadlines`
->   treats a reverting `entryWindow()` as "no separate entry window" and a
->   missing `startedAt` as a clock already running from `openedAt` — which is
->   exactly what v2 enforces.
-> - `start_tournament` probes for the transition once (`entryWindow()` is the
->   marker, since the two shipped together) and **skips it on v2**, whose settle
->   clock has been running since `openTournament` anyway. So the server runs
->   correctly against either contract and **the deploy order does not matter**.
->   The probe is a capability check only: on a contract that HAS the transition,
->   a failing `startTournament` is fatal and `tourney_start` rolls the event
->   back to `open` rather than playing a schedule for a pool it cannot settle.
-> - So the **server-side** half of the fix (refusing to start a schedule that
->   cannot finish inside the settle window, and refusing joins past the entry
->   deadline) is live-safe against v2 today and should be deployed now. The
->   contract half lands with the next deployment.
+>   NEW source. The `Tournament` struct gained `startedAt`, so `tournaments()`
+>   returns 8 words on v2 and 9 on the new contract. Every tournament read goes
+>   through `OnchainSettlement::read_tournament`, which decodes either layout;
+>   decoding with the vendored ABI alone failed every read against v2 and broke
+>   tournament creation, payouts and the settled check. The web app does the
+>   same (`apps/web/lib/tournamentRecord.ts`).
+> - That width is also the capability marker: on v2 `start_tournament` is a
+>   no-op (its settle clock has run since `openTournament`), and
+>   `tournament_deadlines` reports v2's single clock, `openedAt + settleTimeout`.
+>   A FAILED read is never taken to mean "v2" — it fails the start instead,
+>   since skipping `startTournament` on the new contract would leave an event
+>   unsettleable and refundable mid-play.
+> - So **the deploy order does not matter**: the server and web can ship before
+>   the contract, and the schedule guard and entry-deadline check work against
+>   v2 today.
+>
+> **No bankroll migration is needed**, as of 2026-10-17: v2, v1 and the dead
+> deployment all hold 0 USDC, and v2 has never had a deposit or a game (its only
+> transactions are the ownership handover). Recheck before cutting over — run
+> `.claude/skills/test-openchess/scripts/verify-deployed.py <address>` (added in
+> #65), or read each escrow's USDC balance. Also confirm the server's `ESCROW_ADDR` is v2's
+> address: the oracle's only escrow transactions ever (two `openTournament`
+> calls, 2026-08-09) went to **v1**, a day before v2 existed, and it has sent
+> none since — so the chain alone cannot show which escrow production points
+> at. `GET /config` reports it as `escrow`.
 >
 > When redeploying, set `ENTRY_WINDOW` (default 4h against a 24h
 > `SETTLE_TIMEOUT`; it must be strictly less) and update the table below.

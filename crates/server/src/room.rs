@@ -32,6 +32,17 @@ pub const START_WINDOW: Duration = Duration::from_secs(60);
 /// on a race with its own clock) and far below a useful flood.
 const MAX_CONSECUTIVE_REJECTS: u32 = 32;
 
+/// Why a game is ending, which decides what its result may touch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ending {
+    /// Something happened on the board, or the start window lapsed: rated if
+    /// contested, and reported to the modes as an outcome.
+    Play,
+    /// The server is going away (`RoomCmd::Shutdown`): settled as a refund,
+    /// and NEITHER rated nor reported — see `Room::shutdown`.
+    Shutdown,
+}
+
 /// Onchain seats for a wagered game (used to settle the result).
 #[derive(Clone, Copy)]
 pub struct StakeInfo {
@@ -653,6 +664,14 @@ impl Room {
     /// would move both players' Elo at ply ≥ 2, which for a game 40 moves deep
     /// means someone who was winning takes a draw on their record because we
     /// deployed. The refund is right; the rating change is not ours to make.
+    ///
+    /// **Not reported as an outcome either.** The draw is a refund mechanism,
+    /// not a result anybody played to. Sent down `results_tx` it was scored
+    /// into tournament standings like any game — and when it was the last
+    /// game of the last round, the event completed and settled its pool on it,
+    /// a payout the next boot sent onchain for good. Unreported, a tournament
+    /// is left `running`, which `recover_tournaments` abandons on boot so its
+    /// entrants refund — the outcome a deploy should have.
     async fn shutdown(&mut self) {
         if self.game.as_ref().map(|g| g.is_over()).unwrap_or(false) {
             self.closing = true;
@@ -664,19 +683,17 @@ impl Room {
                 winner: None,
                 reason: GameEndReason::Aborted,
             },
-            false,
+            Ending::Shutdown,
         )
         .await;
         self.closing = true;
     }
 
     async fn finish(&mut self, result: GameResult) {
-        self.finish_inner(result, true).await
+        self.finish_inner(result, Ending::Play).await
     }
 
-    /// `rate: false` suppresses the Elo write regardless of ply — see
-    /// `shutdown`, the only caller that passes it.
-    async fn finish_inner(&mut self, result: GameResult, rate: bool) {
+    async fn finish_inner(&mut self, result: GameResult, ending: Ending) {
         // A never-started game (a no-show forfeit / abort reaped in `run`) has
         // no board: settle with an empty move log and ply 0 (never rated).
         let (pgn, ply) = match self.game.as_ref() {
@@ -689,7 +706,7 @@ impl Room {
         // LOSES the game/stake, but their Elo is untouched. Applies to every
         // mode. Note this decides WHETHER a rating moves; `games.rated` (set at
         // creation) decides WHICH ladder it moves.
-        let contested = rate && ply >= 2;
+        let contested = ending == Ending::Play && ply >= 2;
         // Cryptographic commitment to the full game (move log via PGN).
         let result_hash = sha256_hex(&pgn);
         // Oracle-sign it now (before persisting) so the signature is stored with
@@ -761,23 +778,25 @@ impl Room {
         }
 
         // Report the outcome to the server so modes (gauntlet/tournament) can
-        // update standings.
-        let _ = self
-            .results_tx
-            .send(crate::GameOutcome {
-                game_id: self.game_id,
-                winner: result.winner,
-                plies: ply,
-                // Readiness is latched (set once on Ready, never cleared), so it
-                // records that a seat's engine came alive — a seat that readied
-                // then briefly dropped its socket still counts as having shown
-                // up. Only a seat that NEVER readies (dead/hung at init) is a
-                // no-show. Do not AND in `occupied`: a transient disconnect must
-                // not be mistaken for a no-show.
-                white_showed_up: self.wready,
-                black_showed_up: self.bready,
-            })
-            .await;
+        // update standings — unless the server ended it (see `shutdown`).
+        if ending == Ending::Play {
+            let _ = self
+                .results_tx
+                .send(crate::GameOutcome {
+                    game_id: self.game_id,
+                    winner: result.winner,
+                    plies: ply,
+                    // Readiness is latched (set once on Ready, never cleared), so it
+                    // records that a seat's engine came alive — a seat that readied
+                    // then briefly dropped its socket still counts as having shown
+                    // up. Only a seat that NEVER readies (dead/hung at init) is a
+                    // no-show. Do not AND in `occupied`: a transient disconnect must
+                    // not be mistaken for a no-show.
+                    white_showed_up: self.wready,
+                    black_showed_up: self.bready,
+                })
+                .await;
+        }
 
         // Same oracle signature computed above (signed once) so clients can
         // verify the result commitment live.
@@ -945,7 +964,9 @@ mod tests {
                 .send(RoomCmd::Snapshot { resp })
                 .await
                 .is_err()
-                || tokio::time::timeout(Duration::from_secs(2), rx).await.is_ok(),
+                || tokio::time::timeout(Duration::from_secs(2), rx)
+                    .await
+                    .is_ok(),
             "a snapshot must not hang behind a stalled seat"
         );
     }
@@ -1050,7 +1071,11 @@ mod tests {
 
         // The server goes away.
         let (resp, ack) = oneshot::channel();
-        handle.cmd_tx.send(RoomCmd::Shutdown { resp }).await.unwrap();
+        handle
+            .cmd_tx
+            .send(RoomCmd::Shutdown { resp })
+            .await
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(5), ack)
             .await
             .expect("the drain must not hang")
@@ -1064,11 +1089,15 @@ mod tests {
             "a drained game must settle as a refund"
         );
 
-        // The outcome is a draw that nobody played, and the room let go of its
-        // seats so the sockets can close rather than hang through teardown.
-        let outcome = results_rx.recv().await.expect("an outcome");
-        assert_eq!(outcome.game_id, game_id);
-        assert_eq!(outcome.winner, None);
+        // The refund is NOT a result anybody played to, so it is not reported:
+        // reported, it was scored into tournament standings and could complete
+        // (and pay out) an event on a game nobody finished.
+        assert!(
+            results_rx.try_recv().is_err(),
+            "a shutdown abort must not reach the modes as a game outcome"
+        );
+        // The room let go of its seats so the sockets can close rather than
+        // hang through teardown.
         for mut rx in outs {
             let saw_game_over = std::iter::from_fn(|| rx.try_recv().ok())
                 .any(|m| matches!(m, ServerMessage::GameOver { .. }));

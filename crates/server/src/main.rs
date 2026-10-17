@@ -20,7 +20,7 @@ mod username;
 mod ws;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -71,12 +71,14 @@ pub struct Inner {
     /// (existing games play out). Authoritative check lives in `start_game`;
     /// persisted to `server_settings` so it survives restarts.
     pub maintenance: AtomicBool,
-    /// The escrow owner wallet (lowercased) allowed to toggle maintenance.
-    /// Seeded on boot from `ADMIN_WALLET` or the contract `owner()`; if that
-    /// boot lookup failed (`None`) it is resolved lazily on first admin use, so
-    /// a transient boot-time RPC error can't lock the owner out for the whole
-    /// process. `None` after a lazy attempt ⇒ admin disabled (fail-closed).
-    /// The admin wallet. When `admin_configured` this is authoritative; when
+    /// Set by `drain_live_rooms` the moment the process is told to stop.
+    /// Refuses new games exactly like maintenance, but is never persisted.
+    pub shutting_down: AtomicBool,
+    /// `start_game` calls that have passed the point of no return (escrow
+    /// may be opening) but whose room may not exist yet. The drain waits for
+    /// this to reach zero before it snapshots the rooms; see `InFlightStart`.
+    pub starts_in_flight: AtomicUsize,
+    /// The admin wallet (lowercased). When `admin_configured` this is authoritative; when
     /// it is chain-derived this is only a CACHE for display (`/config`) and is
     /// never used to authorize — see `AppState::admin_wallet`.
     pub admin_wallet: Mutex<Option<String>>,
@@ -330,6 +332,8 @@ async fn main() -> anyhow::Result<()> {
         settlement,
         db,
         maintenance: AtomicBool::new(maintenance),
+        shutting_down: AtomicBool::new(false),
+        starts_in_flight: AtomicUsize::new(0),
         admin_wallet: Mutex::new(admin_wallet),
         admin_configured,
         lobby: Lobby::default(),
@@ -828,6 +832,22 @@ async fn cleanup_task(state: AppState, rx: Arc<tokio::sync::Mutex<mpsc::Receiver
     }
 }
 
+/// RAII count of a `start_game` call in progress — see `Inner::starts_in_flight`.
+struct InFlightStart<'a>(&'a AtomicUsize);
+
+impl<'a> InFlightStart<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        InFlightStart(count)
+    }
+}
+
+impl Drop for InFlightStart<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// How long the shutdown drain may spend ending live games. Must stay well
 /// under Fly's `kill_timeout` (see fly.toml) or the process is killed mid-drain
 /// and the games it had not reached are back to the 24h-claimTimeout path.
@@ -848,6 +868,20 @@ const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 /// shutdown on real transactions would need seconds per game and would blow the
 /// kill timeout — the outbox exists precisely so we don't have to.
 async fn drain_live_rooms(state: &AppState) {
+    let deadline = tokio::time::Instant::now() + DRAIN_BUDGET;
+    // No new games from here on (see `start_game_registered`), and let the
+    // ones already past that check finish creating their rooms — otherwise
+    // the snapshot below misses them and their stakes stay locked.
+    state.0.shutting_down.store(true, Ordering::SeqCst);
+    while state.0.starts_in_flight.load(Ordering::SeqCst) > 0 {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::error!(
+                "shutdown: a game start was still in flight when the drain budget ran out"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let rooms: Vec<(GameId, mpsc::Sender<room::RoomCmd>)> = state
         .0
         .rooms
@@ -863,8 +897,8 @@ async fn drain_live_rooms(state: &AppState) {
     // Concurrently: these are Postgres writes and a local signature, so the
     // whole set should finish in well under the budget. One slow room must not
     // spend the budget the others need.
-    let drained = tokio::time::timeout(
-        DRAIN_BUDGET,
+    let drained = tokio::time::timeout_at(
+        deadline,
         futures_util::future::join_all(rooms.into_iter().map(|(_id, tx)| async move {
             let (resp, rx) = tokio::sync::oneshot::channel();
             if tx.send(room::RoomCmd::Shutdown { resp }).await.is_err() {
@@ -878,7 +912,10 @@ async fn drain_live_rooms(state: &AppState) {
     match drained {
         Ok(results) => {
             let ok = results.iter().filter(|r| **r).count();
-            tracing::info!(drained = ok, "shutdown: live games ended and settlements enqueued");
+            tracing::info!(
+                drained = ok,
+                "shutdown: live games ended and settlements enqueued"
+            );
         }
         Err(_) => {
             // Whatever was not reached falls back to the pre-existing path:
@@ -887,7 +924,8 @@ async fn drain_live_rooms(state: &AppState) {
                 "shutdown: drain exceeded {DRAIN_BUDGET:?}; some stakes will wait for claimTimeout"
             );
             alert::fire(
-                "⚠️ OpenChess: the shutdown drain timed out. Some live games did not settle                  and their stakes are locked until the contract's claimTimeout."
+                "⚠️ OpenChess: the shutdown drain timed out. Some live games did not settle \
+                 and their stakes are locked until the contract's claimTimeout."
                     .to_string(),
             );
         }
@@ -1314,6 +1352,17 @@ impl AppState {
         delivery: [SeatDelivery; 2], // [white, black] seat delivery
         register: Option<&SeatRegistration<'_>>,
     ) -> Result<CreateGameResp, StatusCode> {
+        // Counted BEFORE the shutdown check, and `drain_live_rooms` sets its
+        // flag before it reads this count — both SeqCst, so either this call
+        // sees the flag and refuses, or the drain sees it in flight and waits
+        // for its room. Without the handshake, an accept already awaiting
+        // `openGame` when the signal arrived created its room after the
+        // drain's snapshot, and the process exited with that stake locked
+        // until the contract's claimTimeout.
+        let _in_flight = InFlightStart::enter(&self.0.starts_in_flight);
+        if self.0.shutting_down.load(Ordering::SeqCst) {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         // Maintenance/drain: the single chokepoint every mode funnels through,
         // so one guard blocks all new games while existing ones play out.
         self.reject_if_draining()?;
@@ -1643,7 +1692,7 @@ impl AppState {
 
     /// Whether the server is in maintenance/drain mode (no new games).
     pub fn maintenance_on(&self) -> bool {
-        self.0.maintenance.load(Ordering::Relaxed)
+        self.0.maintenance.load(Ordering::Relaxed) || self.0.shutting_down.load(Ordering::Relaxed)
     }
 
     /// Reject a request while the server is draining. Call at the top of every
@@ -1812,6 +1861,8 @@ mod tests {
             settlement,
             db: None,
             maintenance: AtomicBool::new(maintenance),
+            shutting_down: AtomicBool::new(false),
+            starts_in_flight: AtomicUsize::new(0),
             admin_wallet: Mutex::new(admin_wallet.map(|w| w.to_lowercase())),
             // An explicitly-passed wallet stands in for a configured
             // ADMIN_WALLET; `None` leaves authority chain-derived, which is the
@@ -1842,6 +1893,8 @@ mod tests {
             settlement,
             db: Some(db),
             maintenance: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
+            starts_in_flight: AtomicUsize::new(0),
             admin_wallet: Mutex::new(None),
             admin_configured: false,
             lobby: Lobby::default(),
@@ -2476,5 +2529,119 @@ mod tests {
             .auth
             .mint_session("0xAbC0000000000000000000000000000000000001");
         assert!(!state.is_admin(&bearer(&token)).await);
+    }
+
+    /// A settlement sink whose `openGame` blocks until the test opens the gate,
+    /// standing in for an accept that is mid-`openGame` when the deploy lands.
+    #[derive(Default)]
+    struct GatedEscrow {
+        entered: tokio::sync::Notify,
+        open: tokio::sync::Notify,
+        refunds: Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ledger::SettlementSink for GatedEscrow {
+        async fn open_escrow(
+            &self,
+            _g: Uuid,
+            _w: Address,
+            _b: Address,
+            _s: U256,
+        ) -> anyhow::Result<()> {
+            self.entered.notify_one();
+            self.open.notified().await;
+            Ok(())
+        }
+        async fn report_result(
+            &self,
+            game_id: Uuid,
+            winner: Option<Address>,
+        ) -> anyhow::Result<()> {
+            assert_eq!(winner, None, "a drained game settles as a refund");
+            self.refunds.lock().push(game_id);
+            Ok(())
+        }
+        fn is_onchain(&self) -> bool {
+            true
+        }
+    }
+
+    /// The drain must not miss a game whose start was already under way.
+    ///
+    /// It used to snapshot the rooms the instant the signal arrived, while the
+    /// server kept accepting work. An accept already awaiting `openGame` then
+    /// created its room AFTER the snapshot: escrow locked onchain, room never
+    /// drained, process gone — the stake stranded until the contract's 24h
+    /// `claimTimeout`, which is exactly what the drain exists to prevent.
+    #[tokio::test]
+    async fn shutdown_waits_for_a_start_in_flight_and_refunds_it() {
+        let gate = Arc::new(GatedEscrow::default());
+        let state = test_state_with_settlement(false, None, gate.clone());
+        let tc = protocol::TimeControl {
+            initial_ms: 60_000,
+            increment_ms: 0,
+        };
+        let seats_browser = || [SeatDelivery::Browser, SeatDelivery::Browser];
+        let wager = WagerSeats {
+            white: Address::from([0x11; 20]),
+            black: Address::from([0x22; 20]),
+            stake: U256::from(1_000_000u64),
+        };
+
+        let starting = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state
+                    .start_game(
+                        tc,
+                        "park",
+                        Some(wager),
+                        Ladder::Ranked,
+                        Default::default(),
+                        seats_browser(),
+                    )
+                    .await
+            }
+        });
+        gate.entered.notified().await; // openGame is in flight
+
+        let draining = tokio::spawn({
+            let state = state.clone();
+            async move { drain_live_rooms(&state).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !draining.is_finished(),
+            "the drain must wait for the start in flight"
+        );
+
+        // Anything arriving now is refused outright.
+        let late = state
+            .start_game(
+                tc,
+                "park",
+                None,
+                Ladder::Casual,
+                Default::default(),
+                seats_browser(),
+            )
+            .await;
+        assert_eq!(late.err(), Some(StatusCode::SERVICE_UNAVAILABLE));
+
+        gate.open.notify_one(); // openGame confirms and the room is created
+        let resp = starting
+            .await
+            .unwrap()
+            .expect("the start in flight completes");
+        tokio::time::timeout(std::time::Duration::from_secs(5), draining)
+            .await
+            .expect("the drain finishes once the start has landed")
+            .unwrap();
+        assert_eq!(
+            *gate.refunds.lock(),
+            vec![resp.game_id],
+            "that game is drained and refunded, not stranded"
+        );
     }
 }

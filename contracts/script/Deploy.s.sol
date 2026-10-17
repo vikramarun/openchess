@@ -45,6 +45,11 @@ contract Deploy {
         // Entries close well before settlement must happen, leaving the rest of
         // the window for the games themselves. Default 4h of a 24h window.
         uint64 entryWindow = uint64(vm.envOr("ENTRY_WINDOW", uint256(4 * 3600)));
+        // The constructor only insists entry closes before settlement, so 0 —
+        // a typo, or a unit mix-up — would deploy an escrow where every buy-in
+        // tournament is unenterable and unstartable from the block it opens,
+        // fixable only by another redeploy. Refuse it here instead.
+        require(entryWindow >= 10 minutes, "ENTRY_WINDOW is under 10 minutes (it is in SECONDS)");
 
         vm.startBroadcast();
         escrow = new ChessEscrow(token, oracle, feeRecipient, feeBps, settleTimeout, entryWindow);

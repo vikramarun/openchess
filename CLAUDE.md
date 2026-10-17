@@ -359,16 +359,27 @@ wallet.
   `claimTimeout`, with `unsettled_wagered_games` only surfacing the game to a
   player six hours later to claim by hand. `drain_live_rooms` (`main.rs`) now
   sends every room a `RoomCmd::Shutdown`, which ends the game as an aborted
-  draw — a refund — and enqueues it durably. Four things to keep. It runs
+  draw — a refund — and enqueues it durably. Six things to keep. It runs
   **inside the graceful-shutdown future, before it resolves**, because axum
   waits for open connections and a live game holds an upgraded WebSocket that
   never closes on its own; placed after `serve().await` it would not run until
   Fly's kill timeout had already fired. The drain is what makes those sockets
   close at all (the room drops its seat channels, the writer sends `Close`), so
   the room actor has to actually exit — that is `Room::closing`. The abort is
-  **unrated whatever the ply count** (`finish_inner(.., rate: false)`): the
-  usual `contested` rule would put a draw on the record of someone who was
-  winning a 40-move game because we deployed. And the ack means DURABLE, not
+  **unrated whatever the ply count** (`Ending::Shutdown`): the usual
+  `contested` rule would put a draw on the record of someone who was winning a
+  40-move game because we deployed. It is **not reported as an outcome either**
+  — no `results_tx` — because a refund is not a result: reported, it was scored
+  into tournament standings, and a deploy during a final round completed the
+  event and PAID ITS POOL on a game nobody finished (reproduced live; it is a
+  race, so it needs other live games draining alongside). Unreported, the event
+  stays `running` and `recover_tournaments` abandons it, so entrants refund.
+  **Nothing new may start once it begins**: `shutting_down` refuses new games,
+  and `start_game` counts itself in `starts_in_flight` BEFORE checking that flag
+  while the drain sets the flag BEFORE reading the count (both SeqCst) — so an
+  accept already awaiting `openGame` when the signal arrives is waited for and
+  drained, instead of creating its room after the snapshot and stranding its
+  stake. And the ack means DURABLE, not
   onchain — the outbox row survives and the next boot settles it, since
   blocking shutdown on real transactions would blow the kill timeout.
   `DRAIN_BUDGET` (10s) must stay under `kill_timeout` in `fly.toml` (20s;
@@ -516,7 +527,15 @@ wallet.
   `Tournament::dispatching` stops `record_outcome` from advancing the round
   while `round_remaining` still describes the previous one. The result is still
   recorded; only the advance is deferred, and `dispatch_round`'s reconciliation
-  plus `dispatch_from_current`'s zero-check pick it up.
+  plus `dispatch_from_current`'s zero-check pick it up. Two more. **Undo the
+  registration on every failure after the hook**: when an agent never takes its
+  seat, `start_game` aborts the game and evicts its room WITHOUT an outcome, so
+  a still-registered `TourneyGame` was counted live forever and the round (and
+  its pool) hung — `dispatch_round`'s `unregister`. And **`record_outcome`
+  resolves a game inside the tournaments lock** (tournaments →
+  `game_to_tournament` is the only nesting order), and the reconciliation counts
+  and writes `round_remaining` in that same pair of locks, so an outcome can
+  never land between the count and the write.
 - **Chain-derived admin authority must be re-read, not cached.** The escrow is
   `Ownable2Step`, and the owner was read once at boot and cached for the process
   lifetime — so after a completed transfer the server still authorized the OLD
@@ -539,10 +558,18 @@ wallet.
   pool is never simultaneously settleable and refundable — that disjointness is
   the safety property, and `_canSettle`/`_canRefund` are where it lives. Three
   riders. **The contract is ahead of the live deployment** (constructor change ⇒
-  redeploy + migration, see [DEPLOYMENTS.md](DEPLOYMENTS.md)); the server runs
-  against both because `has_start_transition` probes `entryWindow()` once and
-  skips the transition on an older escrow — a CAPABILITY check only, never a
-  catch-all that would swallow a real revert. **A failed onchain start must roll
+  redeploy, see [DEPLOYMENTS.md](DEPLOYMENTS.md)), and the server and web must
+  run against BOTH. Adding `startedAt` changed the WIDTH of what `tournaments()`
+  returns (8 words on v2, 9 now), so never decode it with the vendored ABI: the
+  server goes through `OnchainSettlement::read_tournament` and the web through
+  `lib/tournamentRecord.ts`, both of which take either layout. A vendored-ABI
+  decode failed every read against the live v2 — creation, payout, the settled
+  check — while the probe test, which used MockUSDC as the stand-in for v2,
+  passed; `the_server_runs_against_the_live_v2_escrow` now drives the real v2
+  bytecode (`abi/ChessEscrowV2.json`, frozen — never re-vendor it). The width
+  is also the capability marker for `startTournament`, and it is remembered
+  only from a read that SUCCEEDED: caching an RPC error as "v2" skipped the
+  start for the life of the process on a contract that requires it. **A failed onchain start must roll
   the tournament back to `open`**, since a schedule played for a pool with no
   `startedAt` cannot be settled at all. And the clock fix does not replace the
   SCHEDULE check: rounds are sequential, so 128 entrants is 127 rounds, and the

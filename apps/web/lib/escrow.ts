@@ -31,7 +31,9 @@ export const ESCROW_ABI = [
   // A sponsor's safety net, mirroring claimRefund for entrants: if the pool is
   // never settled, take the sponsorship back after the timeout.
   { type: "function", name: "refundSponsorship", stateMutability: "nonpayable", inputs: [{ name: "tid", type: "bytes32" }, { name: "sponsor", type: "address" }], outputs: [] },
-  // tournaments(tid) → (buyIn, pool, claimedAmount, entrants, openedAt, settled, payoutRoot, exists)
+  // Used to ENCODE the call only. Its return layout differs between the live v2
+  // escrow (8 fields) and the two-clock one (9, with startedAt) — decode the raw
+  // return with lib/tournamentRecord.ts `decodeTournament`, never with these outputs.
   { type: "function", name: "tournaments", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [{ name: "buyIn", type: "uint256" }, { name: "pool", type: "uint256" }, { name: "claimedAmount", type: "uint256" }, { name: "entrants", type: "uint32" }, { name: "openedAt", type: "uint64" }, { name: "settled", type: "bool" }, { name: "payoutRoot", type: "bytes32" }, { name: "exists", type: "bool" }] },
   { type: "function", name: "tournamentClaimed", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
   { type: "function", name: "tournamentEntered", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }, { name: "", type: "address" }], outputs: [{ type: "bool" }] },
@@ -41,6 +43,9 @@ export const ESCROW_ABI = [
   { type: "function", name: "games", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [{ name: "white", type: "address" }, { name: "black", type: "address" }, { name: "stake", type: "uint256" }, { name: "feeBps", type: "uint16" }, { name: "openedAt", type: "uint64" }, { name: "settled", type: "bool" }, { name: "exists", type: "bool" }] },
   { type: "function", name: "claimTimeout", stateMutability: "nonpayable", inputs: [{ name: "gameId", type: "bytes32" }], outputs: [] },
   { type: "function", name: "settleTimeout", stateMutability: "view", inputs: [], outputs: [{ type: "uint64" }] },
+  // Two-clock escrow only (v2 reverts): how long after openTournament entry, and
+  // the right to start, stay open — and so when an unstarted event's refunds open.
+  { type: "function", name: "entryWindow", stateMutability: "view", inputs: [], outputs: [{ type: "uint64" }] },
 ] as const;
 
 /** Minimal ERC-20 ABI for USDC (approve + reads). */
