@@ -667,13 +667,22 @@ impl Db {
     /// invisible in the UI that exists to offer exactly that. The claim button
     /// gates on the contract's own timeout, so listing one early promises
     /// nothing.
+    ///
+    /// `open` is in it for the same reason, and it matters more on the
+    /// two-clock escrow: an event that never starts — its organizer never came
+    /// back, its schedule was refused for lack of time, its start failed —
+    /// becomes refundable at `openedAt + entryWindow` (hours), yet its row
+    /// never leaves `open` (the in-memory TTL sweep writes nothing). Without
+    /// it, those entrants' buy-ins were refundable onchain and offered nowhere.
+    /// The UI shows nothing for an `open` event until the chain's refund
+    /// window has actually opened, so a live one still filling is unaffected.
     pub async fn claimable_tournaments(
         &self,
         address: &str,
     ) -> Result<Vec<ClaimableTournamentRow>> {
         let rows = sqlx::query_as::<_, ClaimableTournamentRow>(
             r#"SELECT id, name, status FROM tournaments
-               WHERE status IN ('complete','settled','abandoned','paused')
+               WHERE status IN ('open','complete','settled','abandoned','paused')
                  AND buy_in IS NOT NULL
                  AND players @> to_jsonb($1::text)"#,
         )
@@ -1159,6 +1168,11 @@ impl Db {
     /// One round trip: `GROUP BY rated` returns at most two rows and the fold
     /// below fills in the ladder the player hasn't touched. Doing it here rather
     /// than in the handler keeps the fold under the DB-backed tests.
+    /// An ABORTED game is not a result anybody played to, so it is not on the
+    /// record: the shutdown drain ends every live game that way on each deploy
+    /// (a refund), as does a room nobody readied in. Counted, every deploy
+    /// added a draw to the public record of everyone mid-game. Forfeits are
+    /// results (someone showed up), and stay.
     pub async fn player_stats(&self, address: &str) -> Result<PlayerStats> {
         let addr = address.to_lowercase();
         let rows = sqlx::query_as::<_, PlayerStatsBucketRow>(
@@ -1177,7 +1191,8 @@ impl Db {
                      OR (lower(black_wallet)=$1 AND result='white') THEN -stake
                    ELSE 0 END), 0) AS net
                FROM games
-               WHERE status='finished' AND (lower(white_wallet)=$1 OR lower(black_wallet)=$1)
+               WHERE status='finished' AND result_reason IS DISTINCT FROM 'aborted'
+                 AND (lower(white_wallet)=$1 OR lower(black_wallet)=$1)
                GROUP BY rated"#,
         )
         .bind(&addr)
@@ -1389,9 +1404,18 @@ mod tests {
         let payout = serde_json::json!({ "bps": [10000] });
 
         // One tournament per status the claim list is meant to surface, plus
-        // `running`, which it must not.
+        // `running`, which it must not. `open` is listed because a pooled event
+        // that never starts becomes refundable onchain while its row stays
+        // `open` forever.
         let mut ids = Vec::new();
-        for status in ["paused", "abandoned", "complete", "settled", "running"] {
+        for status in [
+            "open",
+            "paused",
+            "abandoned",
+            "complete",
+            "settled",
+            "running",
+        ] {
             let id = Uuid::new_v4();
             db.upsert_tournament(
                 id,
@@ -1807,6 +1831,17 @@ mod tests {
     /// Play one finished game on a ladder and hand back both wallets' ratings.
     #[cfg(test)]
     async fn played(db: &Db, white: &str, black: &str, rated: bool, result: &str) -> Result<Uuid> {
+        ended(db, white, black, rated, result, "checkmate").await
+    }
+
+    async fn ended(
+        db: &Db,
+        white: &str,
+        black: &str,
+        rated: bool,
+        result: &str,
+        reason: &str,
+    ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         db.create_game(
             id,
@@ -1823,17 +1858,8 @@ mod tests {
         )
         .await?;
         db.set_game_active(id).await?;
-        db.finish_and_enqueue(
-            id,
-            result,
-            "checkmate",
-            "hash",
-            None,
-            "1. e4 e5",
-            None,
-            false,
-        )
-        .await?;
+        db.finish_and_enqueue(id, result, reason, "hash", None, "1. e4 e5", None, false)
+            .await?;
         db.update_ratings(id).await?;
         Ok(id)
     }
@@ -1974,6 +2000,27 @@ mod tests {
         assert_eq!(s.all.games, 5, "the All view is the two summed");
         assert_eq!(s.all.wins, s.ranked.wins + s.casual.wins);
         assert_eq!(s.casual.net, Decimal::ZERO, "free games stake nothing");
+        Ok(())
+    }
+
+    /// A deploy is not a draw. The shutdown drain ends each live game as an
+    /// ABORTED draw so its stake refunds; counted, every deploy put a draw on
+    /// the public record of everyone who was mid-game.
+    #[tokio::test]
+    async fn an_aborted_game_is_not_on_the_record() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+        let tag = Uuid::new_v4().simple().to_string();
+        let (me, opp) = (format!("0xA_{tag}"), format!("0xb_{tag}"));
+        played(&db, &me, &opp, true, "white").await?;
+        ended(&db, &me, &opp, true, "draw", "aborted").await?; // a deploy
+        ended(&db, &me, &opp, true, "white", "forfeit").await?; // a result
+        let s = db.player_stats(&me).await?;
+        assert_eq!((s.all.games, s.all.wins, s.all.draws), (2, 2, 0));
         Ok(())
     }
 

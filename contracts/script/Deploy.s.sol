@@ -50,6 +50,10 @@ contract Deploy {
         // tournament is unenterable and unstartable from the block it opens,
         // fixable only by another redeploy. Refuse it here instead.
         require(entryWindow >= 10 minutes, "ENTRY_WINDOW is under 10 minutes (it is in SECONDS)");
+        // Same failure for the settle window, and worse: it also bounds every
+        // staked GAME (`claimTimeout` refunds once it lapses), so minutes typed
+        // as seconds would let anyone refund a game while it is being played.
+        require(settleTimeout >= 1 hours, "SETTLE_TIMEOUT is under 1 hour (it is in SECONDS)");
 
         vm.startBroadcast();
         escrow = new ChessEscrow(token, oracle, feeRecipient, feeBps, settleTimeout, entryWindow);

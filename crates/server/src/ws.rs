@@ -17,14 +17,20 @@ use crate::AppState;
 /// Sustained inbound commands per second a single player socket may push into
 /// its room, and how large a burst it may bank.
 ///
-/// Real play is a handful of frames per move. This is not the room's protection
-/// — `Room::send_to` is non-blocking, so a flood can no longer stall the actor
-/// or its clock — it bounds the CPU one connection can make the single-node
-/// server spend parsing and validating moves it has no right to make. Frames
-/// over the budget are dropped, not answered: replying is what an attacker
-/// wants amplified.
-const INBOUND_MSGS_PER_SEC: f64 = 20.0;
-const INBOUND_BURST: f64 = 40.0;
+/// This is not the room's protection — `Room::send_to` is non-blocking, so a
+/// flood can no longer stall the actor or its clock. It bounds the CPU one
+/// connection can make the single-node server spend parsing frames, and that
+/// is ALL it may do. Frames over the budget are dropped unanswered, which for a
+/// `Move` means the seat's clock keeps running and it flags — so the limit
+/// has to sit far above the fastest LEGITIMATE cadence, not near a human one.
+/// That cadence is engine-vs-engine at a low clock: a seat moves once per
+/// round trip of its own, and two bots answering in ~2ms beside the server
+/// sustain dozens of moves a second. 20/s (the first version of this) flagged
+/// exactly those games. A seat can send at most about one legal move per
+/// round trip, so 500/s still leaves no honest client near the limit while
+/// capping a flood at a few hundred cheap parses a second.
+const INBOUND_MSGS_PER_SEC: f64 = 500.0;
+const INBOUND_BURST: f64 = 1_000.0;
 
 /// Token-bucket limiter for one socket. Per-connection and in-memory, so it
 /// needs no shared state and disappears with the socket.
@@ -355,6 +361,23 @@ mod tests {
                 .contains(&granted),
             "expected ~{INBOUND_MSGS_PER_SEC} frames back after a second, got {granted}"
         );
+    }
+
+    /// Engine-vs-engine at a low clock is the fastest legitimate cadence: two
+    /// bots answering in ~2ms with ~1ms round trips put a move on each socket
+    /// every ~6ms, for as long as the clock lasts. None of those may be dropped
+    /// — a dropped move flags the seat and, in a staked game, costs the stake.
+    #[tokio::test(start_paused = true)]
+    async fn a_fast_engine_is_never_throttled() {
+        let mut b = InboundBudget::new();
+        // 60 seconds of one move every 6ms, plus a ready frame per second.
+        for i in 0..10_000 {
+            assert!(b.allow(), "move {i} was dropped");
+            if i % 166 == 0 {
+                assert!(b.allow(), "a control frame was dropped");
+            }
+            tokio::time::advance(std::time::Duration::from_millis(6)).await;
+        }
     }
 
     /// Ordinary play must never be throttled. A blitz game is a few frames per

@@ -553,17 +553,25 @@ impl SettlementSink for OnchainSettlement {
         // cost of one view call is not worth arguing about — and a mismatch
         // here (a reorg between inclusion and now, a wrong-contract config)
         // would otherwise surface only at settlement, after the game is played.
-        match escrow.games(gid).call().await {
-            Ok(g) if g.exists && g.white == white && g.black == black && g.stake == stake => {}
-            Ok(g) if g.exists => anyhow::bail!(
-                "openGame landed with unexpected terms (white {:?} black {:?} stake {})",
-                g.white,
-                g.black,
-                g.stake
-            ),
-            Ok(_) => anyhow::bail!("openGame reported success but no game exists onchain"),
-            Err(e) => anyhow::bail!("could not verify openGame landed: {e:#}"),
-        }
+        until_holds("openGame", || {
+            let escrow = escrow.clone();
+            async move {
+                let g = escrow.games(gid).call().await?;
+                Ok(
+                    if g.exists && g.white == white && g.black == black && g.stake == stake {
+                        Ok(())
+                    } else if g.exists {
+                        Err(format!(
+                            "openGame landed with unexpected terms (white {:?} black {:?} stake {})",
+                            g.white, g.black, g.stake
+                        ))
+                    } else {
+                        Err("openGame reported success but no game exists onchain".into())
+                    },
+                )
+            }
+        })
+        .await?;
         tracing::info!(%game_id, %white, %black, %stake, "settlement(onchain): opened escrow");
         Ok(())
     }
@@ -638,17 +646,20 @@ impl SettlementSink for OnchainSettlement {
         // Postcondition: entries are refused against a pool that doesn't exist,
         // so a lobby advertising one that never opened collects joins that can
         // only fail.
-        match self.read_tournament(tidb).await {
-            Ok(t) if t.exists && t.buy_in == buy_in => {}
-            Ok(t) if t.exists => {
-                anyhow::bail!(
+        until_holds("openTournament", || async {
+            let t = self.read_tournament(tidb).await?;
+            Ok(if t.exists && t.buy_in == buy_in {
+                Ok(())
+            } else if t.exists {
+                Err(format!(
                     "openTournament landed with buy-in {} not {buy_in}",
                     t.buy_in
-                )
-            }
-            Ok(_) => anyhow::bail!("openTournament reported success but no tournament exists"),
-            Err(e) => anyhow::bail!("could not verify openTournament landed: {e:#}"),
-        }
+                ))
+            } else {
+                Err("openTournament reported success but no tournament exists".into())
+            })
+        })
+        .await?;
         tracing::info!(%tid, %buy_in, "settlement(onchain): opened tournament");
         Ok(())
     }
@@ -656,19 +667,33 @@ impl SettlementSink for OnchainSettlement {
     async fn enter_tournament(&self, tid: Uuid, player: Address) -> anyhow::Result<()> {
         let tidb = game_id_to_bytes32(tid);
         let escrow = self.contract();
+        // Idempotent. Only the oracle enters players, so a set flag is OUR
+        // earlier attempt having landed — typically one whose read-back failed
+        // against a node a block behind. Without this the retry reverts
+        // `AlreadyEntered` forever, and a player who PAID is never added to the
+        // field while their buy-in sits in the pool the payout divides among
+        // everyone else.
+        if escrow.tournamentEntered(tidb, player).call().await? {
+            tracing::info!(%tid, %player, "settlement(onchain): already entered");
+            return Ok(());
+        }
         let pending = escrow.enterTournament(tidb, player).send().await?;
         self.confirm(pending, "enterTournament").await?;
         // Postcondition: the entry flag is the thing the caller acts on — it
         // adds this wallet to a field whose standings divide a real pool, so
         // "they paid" has to be read off the chain rather than inferred from a
         // transaction that didn't revert.
-        match escrow.tournamentEntered(tidb, player).call().await {
-            Ok(true) => {}
-            Ok(false) => {
-                anyhow::bail!("enterTournament reported success but the entry flag is not set")
+        until_holds("enterTournament", || {
+            let escrow = escrow.clone();
+            async move {
+                Ok(if escrow.tournamentEntered(tidb, player).call().await? {
+                    Ok(())
+                } else {
+                    Err("enterTournament reported success but the entry flag is not set".into())
+                })
             }
-            Err(e) => anyhow::bail!("could not verify enterTournament landed: {e:#}"),
-        }
+        })
+        .await?;
         tracing::info!(%tid, %player, "settlement(onchain): tournament entry");
         Ok(())
     }
@@ -683,17 +708,41 @@ impl SettlementSink for OnchainSettlement {
             return Ok(());
         }
         let tidb = game_id_to_bytes32(tid);
+        // Idempotent, for the same reason as `enter_tournament`: only the
+        // oracle starts tournaments, so a set `startedAt` is our earlier start.
+        // Without this, a start whose read-back failed was rolled back to
+        // `open` and every retry reverted `AlreadyStarted` — an event that could
+        // never be played, its buy-ins locked until the settle window lapsed.
+        if self
+            .read_tournament(tidb)
+            .await?
+            .started_at
+            .is_some_and(|at| at != 0)
+        {
+            tracing::info!(%tid, "settlement(onchain): tournament already started");
+            return Ok(());
+        }
         let escrow = self.contract();
         let pending = escrow.startTournament(tidb).send().await?;
         self.confirm(pending, "startTournament").await?;
         // Postcondition: without `startedAt` the pool cannot be settled at all,
         // so the caller must not dispatch a schedule on the strength of a
         // transaction it merely believes landed.
-        match self.read_tournament(tidb).await {
-            Ok(t) if t.started_at.is_some_and(|at| at != 0) => {}
-            Ok(_) => anyhow::bail!("startTournament reported success but startedAt is still 0"),
-            Err(e) => anyhow::bail!("could not verify startTournament landed: {e:#}"),
-        }
+        until_holds("startTournament", || async {
+            Ok(
+                if self
+                    .read_tournament(tidb)
+                    .await?
+                    .started_at
+                    .is_some_and(|at| at != 0)
+                {
+                    Ok(())
+                } else {
+                    Err("startTournament reported success but startedAt is still 0".into())
+                },
+            )
+        })
+        .await?;
         tracing::info!(%tid, "settlement(onchain): tournament started");
         Ok(())
     }
@@ -842,6 +891,40 @@ impl SettlementSink for OnchainSettlement {
     fn escrow_address(&self) -> Option<String> {
         Some(self.escrow.to_string())
     }
+}
+
+/// How many times a postcondition is read before it counts as failed, and the
+/// pause between reads.
+const POSTCONDITION_READS: u32 = 5;
+const POSTCONDITION_PAUSE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Read a write's postcondition until it holds. `check` answers `Ok(Ok(()))`
+/// when it holds, `Ok(Err(why))` when the chain disagrees, `Err` when the read
+/// itself failed.
+///
+/// A receipt has just confirmed, but a load-balanced RPC can answer the next
+/// read from a node one block behind it. One stale read must not turn a
+/// transaction that LANDED into an error: the caller rolls back on `Err` — a
+/// game aborted while its stakes are locked onchain, an event reset to `open`
+/// after it started — and the retry then reverts against the state that did
+/// land. A persistent disagreement still fails.
+async fn until_holds<F, Fut>(what: &str, mut check: F) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Result<(), String>>>,
+{
+    let mut last = String::new();
+    for attempt in 0..POSTCONDITION_READS {
+        if attempt > 0 {
+            tokio::time::sleep(POSTCONDITION_PAUSE).await;
+        }
+        match check().await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(why)) => last = why,
+            Err(e) => last = format!("could not verify {what} landed: {e:#}"),
+        }
+    }
+    anyhow::bail!("{last}")
 }
 
 /// The escrow's `Tournament` record, independent of contract version.
@@ -1268,6 +1351,72 @@ mod tests {
             live.start_tournament(Uuid::new_v4()).await.is_err(),
             "a failing startTournament on a capable contract must stay fatal"
         );
+        Ok(())
+    }
+
+    /// Entry and start are idempotent. Their read-back can fail AFTER the
+    /// transaction landed (a load-balanced RPC a block behind the receipt);
+    /// the caller then reports failure and the user retries. A retry that
+    /// re-sent the transaction reverted `AlreadyEntered` / `AlreadyStarted`
+    /// forever — so a player who had PAID was never added to the field while
+    /// the payout divided their buy-in among everyone else, and a started
+    /// event was rolled back to `open` and could never be played.
+    #[tokio::test]
+    async fn a_retried_entry_or_start_succeeds_once_and_counts_once() -> anyhow::Result<()> {
+        let anvil = Anvil::new().try_spawn()?;
+        let url = anvil.endpoint_url();
+        let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
+        let oracle: PrivateKeySigner = anvil.keys()[1].clone().into();
+        let p1: PrivateKeySigner = anvil.keys()[2].clone().into();
+        let dep = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(deployer.clone()))
+            .connect_http(url.clone());
+        let usdc = MockUSDC::deploy(&dep).await?;
+        let escrow = ChessEscrow::deploy(
+            &dep,
+            *usdc.address(),
+            oracle.address(),
+            deployer.address(),
+            0u16,
+            3600u64,
+            1800u64,
+        )
+        .await?;
+        let unit = U256::from(1_000_000u64);
+        let pp = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(p1.clone()))
+            .connect_http(url.clone());
+        MockUSDC::new(*usdc.address(), &pp)
+            .mint(p1.address(), unit * U256::from(5))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        MockUSDC::new(*usdc.address(), &pp)
+            .approve(*escrow.address(), unit * U256::from(5))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        ChessEscrow::new(*escrow.address(), &pp)
+            .deposit(unit * U256::from(5))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+
+        let sink = OnchainSettlement::new(url, *escrow.address(), oracle);
+        let tid = Uuid::new_v4();
+        sink.open_tournament(tid, unit).await?;
+        sink.enter_tournament(tid, p1.address()).await?;
+        sink.enter_tournament(tid, p1.address()).await?; // the retry
+        assert_eq!(
+            sink.tournament_pool(tid).await,
+            Some(unit),
+            "the buy-in is taken once"
+        );
+        sink.start_tournament(tid).await?;
+        sink.start_tournament(tid).await?; // the retry
         Ok(())
     }
 

@@ -62,8 +62,10 @@
 
 Adds tournament sponsorship (`sponsorTournament`, `refundSponsorship`,
 `sponsorship`), a buy-in that may be zero so entry can be free, and a
-`claimRefund` guard for that case. This is what `ESCROW_ADDR` points at and what
-`crates/ledger/abi/ChessEscrow.json` is vendored from.
+`claimRefund` guard for that case. This is what `ESCROW_ADDR` should point at
+(see the note above on confirming it). Its ABI and bytecode are frozen in
+`crates/ledger/abi/ChessEscrowV2.json` for the compatibility test;
+`ChessEscrow.json` is vendored from the newer source.
 
 | Parameter | Value |
 |---|---|

@@ -140,9 +140,17 @@ wallet.
   write also verifies its POSTCONDITION (the game exists with those seats and
   stake, the entry flag is set, `startedAt` moved) — `confirm` proves the
   transaction did not revert, the read proves the chain holds the state the
-  caller is about to run a real game on. `SETTLE_CONFIRMATIONS` (default 1,
-  inclusion) is the dial for waiting out reorgs; raising it costs latency on the
-  path a player is watching, which is why it is an operator choice.
+  caller is about to run a real game on. Two riders on the postcondition, both
+  learned the hard way. It is READ UNTIL IT HOLDS (`until_holds`, a few reads):
+  a load-balanced RPC can answer from a node a block behind the receipt, and one
+  stale read turned a transaction that LANDED into an error the caller rolled
+  back on. And a write the caller may retry must be IDEMPOTENT
+  (`enter_tournament`/`start_tournament` read first): otherwise the retry
+  reverts `AlreadyEntered`/`AlreadyStarted` forever — a paid player left out of
+  the field whose payout splits their buy-in, an event that can never start.
+  `SETTLE_CONFIRMATIONS` (default 1, inclusion) is the dial for waiting out
+  reorgs; raising it costs latency on the path a player is watching, which is
+  why it is an operator choice.
 - **Never age-delete lobby state that has a game behind it.** `sweep_expired`
   used to keep rows purely on `created_at`, regardless of lifecycle. `park_accept`
   flips an offer to `matching`, releases the lock, awaits escrow-open and room
@@ -379,7 +387,12 @@ wallet.
   while the drain sets the flag BEFORE reading the count (both SeqCst) — so an
   accept already awaiting `openGame` when the signal arrives is waited for and
   drained, instead of creating its room after the snapshot and stranding its
-  stake. And the ack means DURABLE, not
+  stake. The count is released the moment the room is in `rooms` (not after
+  seat delivery), the wait gets only half of `DRAIN_BUDGET`, and a start still
+  in flight past it ALERTS — its stake may lock after we are gone. A drained
+  game is stored as an `aborted` draw, and `player_stats` leaves aborted games
+  off the public record, or every deploy would add a draw to everyone mid-game.
+  And the ack means DURABLE, not
   onchain — the outbox row survives and the next boot settles it, since
   blocking shutdown on real transactions would blow the kill timeout.
   `DRAIN_BUDGET` (10s) must stay under `kill_timeout` in `fly.toml` (20s;
@@ -507,11 +520,15 @@ wallet.
   `AssignSeat` went out with a bare `.await` on a 16-slot channel, so one bot
   agent that stopped reading stalled `start_game`, and inside `dispatch_round`
   that is the whole tournament round. Bounded by `AGENT_DISPATCH_TIMEOUT`, after
-  which the seat is scored as a no-show. Inbound frames are bounded too
-  (`ws.rs` `InboundBudget`, a per-socket token bucket): not to protect the room,
-  which no longer blocks, but to cap the CPU one connection can make a
-  single-node server spend parsing moves it has no right to make. Over-budget
-  frames are DROPPED, never answered — a reply is what a flood wants amplified.
+  which the game is aborted and refunded (a tournament scores the pairing a
+  draw). Inbound frames are bounded too (`ws.rs` `InboundBudget`, a per-socket
+  token bucket): not to protect the room, which no longer blocks, but to cap
+  the CPU one connection can make a single-node server spend parsing frames.
+  Over-budget frames are DROPPED, never answered — and a dropped `Move` flags
+  the seat, so the limit must sit far above the fastest LEGITIMATE cadence,
+  which is engine-vs-engine at a low clock (dozens of moves a second, one per
+  round trip). The first version allowed 20/s and flagged exactly those games;
+  `a_fast_engine_is_never_throttled` pins the floor.
 - **Register a game's outcome routing AND the mode's own record of it before
   its seats are deliverable.** `dispatch_round` did both after its entire start
   loop, on the reasoning that no real game finishes in the gap. With the
@@ -535,7 +552,15 @@ wallet.
   resolves a game inside the tournaments lock** (tournaments →
   `game_to_tournament` is the only nesting order), and the reconciliation counts
   and writes `round_remaining` in that same pair of locks, so an outcome can
-  never land between the count and the write.
+  never land between the count and the write. **A routed game with no room may
+  still have a result in flight**: rooms leave `rooms` as their game ends, but
+  `results_task` consumes outcomes later and can run far behind (it dispatches
+  rounds and settles inline). `prune_games` used to drop any route without a
+  room, and the queued result was then discarded — so it never prunes a route to
+  a tournament still in play, and gives any other route a full sweep of grace.
+  And `tourney_start` runs the onchain start and the first dispatch in a
+  SPAWNED task: a client hanging up cancels the handler, which used to leave the
+  event `running` with nothing dispatched and no way back.
 - **Chain-derived admin authority must be re-read, not cached.** The escrow is
   `Ownable2Step`, and the owner was read once at boot and cached for the process
   lifetime — so after a completed transfer the server still authorized the OLD
@@ -576,7 +601,13 @@ wallet.
   per-game limits (3h + 180s) and the per-field limit are each fine alone but
   cannot be multiplied together — `tourney_start` still sizes
   `worst_case_schedule_secs` against the live onchain deadline and refuses what
-  cannot finish.
+  cannot finish — sized by the rounds LEFT on a resume, and failing closed when
+  the deadline can't be read. Joins apply the same arithmetic to the field
+  they would make, so no buy-in is taken into an event that could no longer
+  start. An event that never starts still refunds onchain (at `openedAt +
+  entryWindow` on the new contract), but its row stays `open` forever, so
+  `claimable_tournaments` lists `open` too — otherwise those entrants had a
+  refund the chain would pay and no button anywhere to ask for it.
 - **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is
   `has_insufficient_material(flagged.opposite())` — not `is_insufficient_material()`,
   which shakmaty defines as *neither* side being able to mate. Asking the latter

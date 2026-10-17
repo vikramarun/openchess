@@ -121,6 +121,9 @@ pub struct Lobby {
     game_to_gauntlet: Mutex<HashMap<GameId, Vec<(Uuid, Color)>>>,
     /// game id -> the tournament it belongs to.
     game_to_tournament: Mutex<HashMap<GameId, Uuid>>,
+    /// Routed games that had no room at the previous `prune_games` sweep — the
+    /// grace that keeps a result still queued for `results_task` routable.
+    unroomed_last_sweep: Mutex<HashSet<GameId>>,
 }
 
 impl Lobby {
@@ -195,11 +198,39 @@ impl Lobby {
     /// Drop game->mode routing entries for games that no longer exist (e.g. a
     /// room that was evicted without emitting a finished outcome). Bounds the
     /// two routing maps so an abandoned game can't leak an entry forever.
+    ///
+    /// **A game with no room may still have a result on its way.** A room
+    /// leaves `rooms` the moment its game ends, but its outcome is consumed
+    /// later by `results_task` — one at a time, with round dispatch and
+    /// settlement run inline, so it can sit seconds behind (a round of stalled
+    /// agents: over a minute). Pruning on "no room" alone deleted the route out
+    /// from under a queued result, and `record_outcome` then dropped it: a
+    /// tournament round that never resolved, or one scored without the game.
+    /// So a route to a tournament still in play is never pruned — the
+    /// tournament's own lifecycle bounds it — and any other route survives one
+    /// full sweep after its room is gone.
     pub fn prune_games(&self, live: &std::collections::HashSet<GameId>) {
-        self.game_to_gauntlet.lock().retain(|g, _| live.contains(g));
+        let in_play: HashSet<Uuid> = self
+            .tournaments
+            .lock()
+            .iter()
+            .filter(|(_, t)| matches!(t.status.as_str(), "open" | "running" | "paused"))
+            .map(|(id, _)| *id)
+            .collect();
+        let mut unroomed_before = self.unroomed_last_sweep.lock();
+        let mut unroomed_now = HashSet::new();
+        let mut keep = |g: &GameId| {
+            if live.contains(g) {
+                return true;
+            }
+            unroomed_now.insert(*g);
+            !unroomed_before.contains(g) // gone for a whole sweep: now it may go
+        };
+        self.game_to_gauntlet.lock().retain(|g, _| keep(g));
         self.game_to_tournament
             .lock()
-            .retain(|g, _| live.contains(g));
+            .retain(|g, tid| in_play.contains(tid) || keep(g));
+        *unroomed_before = unroomed_now;
     }
 
     /// Update mode standings when a game finishes. Returns a follow-up action
@@ -271,8 +302,8 @@ impl Lobby {
         let routed_to = self.game_to_tournament.lock().get(&game_id).copied();
         if let Some(tid) = routed_to {
             let mut tourneys = self.tournaments.lock();
-            // Gone in the meantime (unregistered after a failed start, or
-            // pruned with its room): nothing left to score it against.
+            // Gone in the meantime — unregistered after a failed start, or its
+            // tournament is over: nothing left to score it against.
             let still_routed = self.game_to_tournament.lock().remove(&game_id).is_some();
             if let Some(t) = tourneys.get_mut(&tid).filter(|_| still_routed) {
                 if let Some(g) = t.games.iter_mut().find(|g| g.game_id == game_id) {
@@ -1192,9 +1223,28 @@ async fn queue_join(
         },
     );
 
-    let opponent = {
-        let mut queue = state.0.lobby.queue.lock();
-        queue.entry(key.clone()).or_default().pop_front()
+    // The first queued opponent that still HAS a ticket. The age sweep deletes
+    // an idle ticket but leaves its id in this queue, so a stale id can sit at
+    // the front. Pairing against it produced a phantom game won by forfeit —
+    // and the vanished-ticket check further down now refuses it with a 409,
+    // which the web gauntlet and `chess-client gauntlet` both read as "stop".
+    // Either way the arrival paid for a player who had long gone; skip them.
+    // (One lock at a time: no queue/tickets nesting anywhere.)
+    let opponent = loop {
+        let Some(id) = state
+            .0
+            .lobby
+            .queue
+            .lock()
+            .entry(key.clone())
+            .or_default()
+            .pop_front()
+        else {
+            break None;
+        };
+        if state.0.lobby.tickets.lock().contains_key(&id) {
+            break Some(id);
+        }
     };
 
     // No waiting opponent — sit in the queue.
@@ -2349,18 +2399,48 @@ async fn tourney_join_inner(
     // the entry would have "succeeded" into an event with no time left to be
     // settled. Only meaningful for a real pool — a casual event has no chain
     // state and `tournament_deadlines` returns None.
-    let pooled = state
-        .0
-        .lobby
-        .tournaments
-        .lock()
-        .get(&id)
-        .is_some_and(|t| t.buy_in.is_some());
-    if pooled && state.0.settlement.is_onchain() {
-        if let Some((entry_deadline, _)) = state.0.settlement.tournament_deadlines(id).await {
-            if unix_now() > entry_deadline {
-                tracing::info!(tournament = %id, "refusing a join past the entry window");
-                return Err(StatusCode::CONFLICT);
+    let caller = state.authed_wallet(&headers);
+    let field = state.0.lobby.tournaments.lock().get(&id).map(|t| {
+        let already_in = caller
+            .as_deref()
+            .is_some_and(|w| t.players.iter().any(|p| p.eq_ignore_ascii_case(w)));
+        (
+            t.buy_in.is_some(),
+            t.players.len(),
+            already_in,
+            t.initial_secs,
+            t.increment_secs,
+        )
+    });
+    if let Some((true, entrants, already_in, initial_secs, increment_secs)) = field {
+        if state.0.settlement.is_onchain() {
+            if let Some((entry_deadline, settle_deadline)) =
+                state.0.settlement.tournament_deadlines(id).await
+            {
+                if unix_now() > entry_deadline {
+                    tracing::info!(tournament = %id, "refusing a join past the entry window");
+                    return Err(StatusCode::CONFLICT);
+                }
+                // Don't take a buy-in into a field that could no longer START:
+                // `tourney_start` refuses any schedule that can't finish inside
+                // the settle window, so an entry that tips the field past it
+                // locks real money into an event nobody can play. (A re-join of
+                // an existing entrant changes nothing and is let through.)
+                if !already_in {
+                    let rounds = round_robin_rounds(entrants + 1).len();
+                    let need = worst_case_schedule_secs(rounds, initial_secs, increment_secs);
+                    let budget = settle_deadline
+                        .saturating_sub(unix_now())
+                        .saturating_mul(SCHEDULE_MARGIN_PCT)
+                        / 100;
+                    if need > budget {
+                        tracing::info!(
+                            tournament = %id, entrants, need_secs = need, budget_secs = budget,
+                            "refusing a join the schedule could no longer fit"
+                        );
+                        return Err(StatusCode::CONFLICT);
+                    }
+                }
             }
         }
     }
@@ -3482,6 +3562,26 @@ async fn tourney_start(
         rollback_to = prev_status;
     }
 
+    // Everything from here runs in its OWN task. The status above is already
+    // `running`; if this request were cancelled part-way (the client drops
+    // the connection, and hyper drops the handler with it) nothing would roll
+    // it back: cut off during the onchain start, the event sat `running` with
+    // no games, refused every retry, and — once the start had landed — could
+    // never be restarted either; cut off mid-dispatch, `dispatching` stayed
+    // set and no result ever advanced the round again. A spawned task finishes
+    // whether or not anybody is still waiting for the answer.
+    tokio::spawn(start_and_dispatch(state, id, fresh_start, rollback_to))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+/// The second half of `tourney_start`, run to completion in its own task.
+async fn start_and_dispatch(
+    state: AppState,
+    id: Uuid,
+    fresh_start: bool,
+    rollback_to: String,
+) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
     // Begin the onchain settle clock. This is the transition that gives the
     // games the whole of `settleTimeout` instead of whatever was left after the
     // field finished filling — see `startTournament` in ChessEscrow.
@@ -3491,7 +3591,8 @@ async fn tourney_start(
     // settle paths require `startedAt`), so proceeding would play a full
     // schedule for a pool that can only ever be refunded. The schedule and
     // scores are rebuilt from scratch on the next attempt, so there is nothing
-    // else to undo.
+    // else to undo — and the start is idempotent onchain, so that attempt
+    // succeeds even if this one's transaction did land.
     if fresh_start && state.0.settlement.is_onchain() {
         if let Err(e) = state.0.settlement.start_tournament(id).await {
             tracing::error!(tournament = %id, "onchain tournament start failed: {e:#}");
@@ -3602,13 +3703,23 @@ async fn dispatch_from_current(state: &AppState, tid: Uuid) {
                 status = %code,
                 "round dispatch blocked — tournament paused, NOT scored"
             );
-            crate::alert::fire(format!(
-                "⚠️ OpenChess: tournament {tid} paused at round {} — the server refused to \
-                 create its games ({code}). Nothing was scored and no pool was settled. \
-                 Resume it with POST /tournaments/{tid}/start once the cause has cleared \
-                 (maintenance drain? room ceiling?).",
-                round_idx + 1
-            ));
+            // Not during a shutdown: the drain refuses new games, so a round
+            // that comes due then is "blocked" by design, and the next boot
+            // abandons the event anyway — telling the operator to resume it is
+            // advice that cannot be followed.
+            if !state
+                .0
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                crate::alert::fire(format!(
+                    "⚠️ OpenChess: tournament {tid} paused at round {} — the server refused to \
+                     create its games ({code}). Nothing was scored and no pool was settled. \
+                     Resume it with POST /tournaments/{tid}/start once the cause has cleared \
+                     (maintenance drain? room ceiling?).",
+                    round_idx + 1
+                ));
+            }
             return;
         }
         if d.live > 0 {
@@ -3806,9 +3917,10 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
                     // The hook above already pushed this game into `t.games`;
                     // keep only what the durable write below needs.
                     Ok(resp) => created.push((resp.game_id, white.clone(), black.clone())),
-                    // The agent vanished between the claim and the dispatch:
-                    // neither side got to play → score it a draw (start_game has
-                    // already aborted the game and refunded any escrow).
+                    // The agent vanished (or never read its seat) between the
+                    // claim and the dispatch: neither side got to play → score
+                    // it a draw (start_game has already aborted the game and
+                    // refunded any escrow).
                     Err(StatusCode::FAILED_DEPENDENCY) => {
                         unregister();
                         release(&claimed);
@@ -3867,8 +3979,9 @@ async fn dispatch_round(state: &AppState, tid: Uuid, round_idx: usize) -> RoundD
         // call: a re-dispatch (see the doc comment) leaves earlier games of the
         // same round still in flight, and counting only the new ones would let
         // the round "finish" while they were still being played. A game whose
-        // routing is gone has resolved (or was pruned with its room), so the
-        // routing map is the liveness check.
+        // routing is gone has resolved (or was unregistered after a failed
+        // start), so the routing map is the liveness check — `prune_games`
+        // never prunes a route to a tournament still in play.
         //
         // Counted and written in ONE critical section, holding the routing map
         // inside the tournaments lock — the same nesting `record_outcome` uses
@@ -9105,5 +9218,231 @@ mod tests {
             state.0.lobby.tickets.lock().is_empty(),
             "with no stranded tickets left behind"
         );
+    }
+
+    /// A queued id whose ticket the age sweep deleted must be skipped, not
+    /// paired. The sweep cannot reach into the queue, so such ids linger at
+    /// its front; pairing against one used to make a phantom game, and the
+    /// vanished-ticket check would now refuse the pairing with a 409 — which
+    /// both gauntlet clients read as "your session was stopped".
+    #[tokio::test]
+    async fn a_stale_queue_entry_is_skipped_not_paired() {
+        let (state, _c, _r) = test_state();
+        let req = || QueueReq {
+            stake: None,
+            initial_secs: 60,
+            increment_secs: 1,
+            session_id: None,
+            name: None,
+            engine: None,
+            seat: None,
+            uci_options: None,
+        };
+        let stale = queue_join(State(state.clone()), player(&state, 1), Json(req()))
+            .await
+            .expect("first join waits")
+            .0
+            .ticket_id;
+        state.0.lobby.tickets.lock().remove(&stale); // the TTL sweep's work
+        let me = queue_join(State(state.clone()), player(&state, 2), Json(req()))
+            .await
+            .expect("an arrival behind a stale entry is not refused")
+            .0
+            .ticket_id;
+        assert_eq!(
+            state
+                .0
+                .lobby
+                .tickets
+                .lock()
+                .get(&me)
+                .map(|t| t.status.clone()),
+            Some("waiting".into()),
+            "it waits for a real opponent instead of being paired with a ghost"
+        );
+    }
+
+    /// A finished game's result is consumed by `results_task` AFTER its room
+    /// is evicted, and that task can run well behind. The sweep used to prune
+    /// any route without a room, so a result still in the queue found no
+    /// route and was dropped — the round never resolved (pool and all), or was
+    /// scored without that game.
+    #[tokio::test]
+    async fn the_sweep_never_strands_a_queued_result() {
+        let (state, _c, _r) = test_state();
+        let tid = started_tournament(&state, 2).await; // running, one live game
+        let lobby = &state.0.lobby;
+        let (in_tourney, in_gauntlet) = (Uuid::new_v4(), Uuid::new_v4());
+        lobby.game_to_tournament.lock().insert(in_tourney, tid);
+        let no_rooms = HashSet::new(); // the game has ended and left `rooms`
+
+        lobby.prune_games(&no_rooms);
+        lobby.prune_games(&no_rooms);
+        lobby.prune_games(&no_rooms);
+        assert!(
+            lobby.game_to_tournament.lock().contains_key(&in_tourney),
+            "a route into a running tournament is never pruned"
+        );
+
+        // A non-tournament route gets one full sweep of grace, then goes.
+        let lobby2 = Lobby::default();
+        lobby2
+            .game_to_gauntlet
+            .lock()
+            .insert(in_gauntlet, vec![(Uuid::new_v4(), Color::White)]);
+        lobby2.prune_games(&no_rooms);
+        assert!(
+            lobby2.game_to_gauntlet.lock().contains_key(&in_gauntlet),
+            "first sweep: kept"
+        );
+        lobby2.prune_games(&no_rooms);
+        assert!(
+            !lobby2.game_to_gauntlet.lock().contains_key(&in_gauntlet),
+            "second: pruned"
+        );
+
+        // And once the tournament is over its routes are ordinary again.
+        lobby.tournaments.lock().get_mut(&tid).unwrap().status = "settled".into();
+        lobby.prune_games(&no_rooms);
+        lobby.prune_games(&no_rooms);
+        assert!(!lobby.game_to_tournament.lock().contains_key(&in_tourney));
+    }
+
+    /// A client that disconnects mid-start must not strand the event. Hyper
+    /// drops the handler with the connection, and the status was already
+    /// `running`: cut off inside the onchain start, the event sat `running`
+    /// with no games and refused every retry; cut off mid-dispatch, the round
+    /// could never advance. The start now finishes in its own task.
+    #[tokio::test]
+    async fn a_start_survives_its_client_hanging_up() {
+        let gate = Arc::new(GatedStart::default());
+        let (state, _c, _r) = test_state_with_sink(gate.clone());
+        let (tid, org) = {
+            let org = bearer(&state.0.auth.mint_session(&test_wallet(0)));
+            let tid = tourney_create(
+                State(state.clone()),
+                org.clone(),
+                Json(TourneyCreateReq {
+                    name: "T".into(),
+                    buy_in: Some("1000000".into()),
+                    initial_secs: 60,
+                    increment_secs: 1,
+                    payout: None,
+                    admission: None,
+                }),
+            )
+            .await
+            .expect("create")
+            .0
+            .tournament_id;
+            seat_entrants(&state, tid, 2).await;
+            (tid, org)
+        };
+        let request = tokio::spawn({
+            let state = state.clone();
+            async move { tourney_start(State(state), Path(tid), org).await }
+        });
+        gate.entered.notified().await; // startTournament is in flight...
+        request.abort(); // ...and the organizer's tab closes
+        let _ = request.await;
+        gate.open.notify_one(); // the transaction lands
+        for _ in 0..200 {
+            if !state
+                .0
+                .lobby
+                .tournaments
+                .lock()
+                .get(&tid)
+                .unwrap()
+                .games
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).unwrap();
+        assert_eq!(t.status, "running");
+        assert!(!t.games.is_empty(), "the first round was dispatched anyway");
+        assert!(!t.dispatching, "and the dispatch finished");
+    }
+
+    /// A pooled-tournament sink whose `startTournament` blocks on a gate.
+    #[derive(Default)]
+    struct GatedStart {
+        entered: tokio::sync::Notify,
+        open: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl ledger::SettlementSink for GatedStart {
+        async fn open_escrow(
+            &self,
+            _g: Uuid,
+            _w: Address,
+            _b: Address,
+            _s: U256,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn report_result(&self, _g: Uuid, _w: Option<Address>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn is_onchain(&self) -> bool {
+            true
+        }
+        async fn bankroll_of(&self, _who: Address) -> Option<U256> {
+            Some(U256::from(1_000_000_000u64))
+        }
+        async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
+            Some((unix_now() + 3600, unix_now() + 86_400))
+        }
+        async fn start_tournament(&self, _tid: Uuid) -> anyhow::Result<()> {
+            self.entered.notify_one();
+            self.open.notified().await;
+            Ok(())
+        }
+    }
+
+    /// A buy-in must not be taken into a field that could no longer start.
+    /// `tourney_start` refuses a schedule that can't finish in the settle
+    /// window, so an entry that tips the field past it put real money into an
+    /// event nobody could ever play — refundable only once the window lapsed.
+    #[tokio::test]
+    async fn a_join_that_would_make_the_field_unstartable_is_refused() {
+        let sink = Arc::new(Window(Mutex::new(Some(86_400))));
+        let (state, _c, _r) = test_state_with_sink(sink.clone());
+        let (tid, _org) = pooled_tournament(&state, 3).await; // 10+5
+                                                              // 4 entrants play 3 rounds of (2x600 + 5x200 + 60)s = 6780s.
+        *sink.0.lock() = Some(8_000); // 80% budget = 6400s: room for 3, not 4
+        let late = test_wallet(9);
+        let r = tourney_join(
+            State(state.clone()),
+            Path(tid),
+            bearer(&state.0.auth.mint_session(&late)),
+            Json(JoinReq {
+                seat: None,
+                uci_options: None,
+                engine: None,
+                invite: None,
+            }),
+        )
+        .await;
+        assert_eq!(join_code(&r), StatusCode::CONFLICT);
+        // An existing entrant re-joining (the retry path) is unaffected.
+        let r = tourney_join(
+            State(state.clone()),
+            Path(tid),
+            bearer(&state.0.auth.mint_session(&test_wallet(1))),
+            Json(JoinReq {
+                seat: None,
+                uci_options: None,
+                engine: None,
+                invite: None,
+            }),
+        )
+        .await;
+        assert_eq!(join_code(&r), StatusCode::OK);
     }
 }

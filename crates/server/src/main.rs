@@ -868,16 +868,29 @@ const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 /// shutdown on real transactions would need seconds per game and would blow the
 /// kill timeout — the outbox exists precisely so we don't have to.
 async fn drain_live_rooms(state: &AppState) {
-    let deadline = tokio::time::Instant::now() + DRAIN_BUDGET;
+    let start = tokio::time::Instant::now();
+    let deadline = start + DRAIN_BUDGET;
     // No new games from here on (see `start_game_registered`), and let the
     // ones already past that check finish creating their rooms — otherwise
-    // the snapshot below misses them and their stakes stay locked.
+    // the snapshot below misses them and their stakes stay locked. Bounded to
+    // HALF the budget, so a start stuck on a slow chain cannot leave nothing
+    // for the games that are actually being played.
     state.0.shutting_down.store(true, Ordering::SeqCst);
+    let wait_until = start + DRAIN_BUDGET / 2;
     while state.0.starts_in_flight.load(Ordering::SeqCst) > 0 {
-        if tokio::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= wait_until {
+            let stuck = state.0.starts_in_flight.load(Ordering::SeqCst);
             tracing::error!(
-                "shutdown: a game start was still in flight when the drain budget ran out"
+                stuck,
+                "shutdown: game starts still in flight; their rooms will not be drained"
             );
+            // Its escrow may lock after we are gone, with no room to settle
+            // it — the stake then waits for the contract's claimTimeout. Say
+            // so, whatever happens to the rest of the drain.
+            alert::fire(format!(
+                "⚠️ OpenChess: {stuck} game start(s) were still in flight at shutdown. If a \
+                 staked game's openGame landed, its stakes wait for the contract's claimTimeout."
+            ));
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1359,7 +1372,7 @@ impl AppState {
         // `openGame` when the signal arrived created its room after the
         // drain's snapshot, and the process exited with that stake locked
         // until the contract's claimTimeout.
-        let _in_flight = InFlightStart::enter(&self.0.starts_in_flight);
+        let in_flight = InFlightStart::enter(&self.0.starts_in_flight);
         if self.0.shutting_down.load(Ordering::SeqCst) {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
@@ -1522,6 +1535,11 @@ impl AppState {
             self.0.results_tx.clone(),
         );
         self.0.rooms.lock().insert(game_id, handle);
+        // The room is now in the map the drain snapshots, which is all the
+        // in-flight count exists to guarantee. Holding it through seat
+        // delivery (5s per stalled agent) and any abort would only spend the
+        // drain's budget on a game it can already see.
+        drop(in_flight);
         self.0.live_games.lock().insert(
             game_id,
             LiveGame {
@@ -1586,7 +1604,8 @@ impl AppState {
             // other caller of `start_game`, park accept included). An agent
             // that cannot take a seat assignment within the timeout is treated
             // exactly like one that vanished: the game is aborted and refunded,
-            // and the caller scores it as a no-show.
+            // and the caller decides how to score it (a tournament pairing
+            // scores it as a draw — neither side played).
             let sent = tx
                 .send_timeout(
                     protocol::ServerToAgent::AssignSeat {
