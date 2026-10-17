@@ -114,6 +114,28 @@ export const isRanked = (t: Pick<Tournament, "buy_in">): boolean => kindOf(t) ==
 /** Is there prize money at all (whoever funded it)? */
 export const hasPrizePool = (t: Pick<Tournament, "buy_in">): boolean => kindOf(t) !== "casual";
 
+/** Why the server refused to start a tournament, from its bare status code.
+ *  Every 409 used to read "Need at least 2 entrants." — including a full field
+ *  refused because its rounds cannot finish before the escrow's settle window
+ *  closes, which told an organizer with eight entrants to go find a second one. */
+export function startRefusal(
+  status: number,
+  t: Pick<Tournament, "buy_in" | "players">,
+): string | null {
+  if (status === 409) {
+    // A bare 409 has several causes the client can't tell apart: already
+    // running, an unfunded free pool, or (on a server new enough to check) a
+    // schedule that can't finish inside the escrow's window. Only the entrant
+    // count is certain; for the rest, name the possibilities rather than guess.
+    if (t.players.length < 2) return "Need at least 2 entrants.";
+    if (kindOf(t) === "free")
+      return "Couldn’t start: it may already be running, its prize pool may still be empty, or there may not be enough time left to play every round.";
+    return "Couldn’t start: it may already be running, or there may not be enough time left in the escrow’s window to play every round.";
+  }
+  if (status === 502) return "Couldn’t reach the chain to start it. Try again in a moment.";
+  return null;
+}
+
 export type ClaimableTournament = {
   tournament_id: string;
   name: string;

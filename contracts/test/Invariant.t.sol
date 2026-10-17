@@ -107,12 +107,39 @@ contract Handler {
         tournaments.push(t);
     }
 
+    /// Mirrors ChessEscrow._canSettle.
+    function _canSettle(uint64 startedAt) internal view returns (bool) {
+        return startedAt != 0 && block.timestamp <= startedAt + escrow.settleTimeout();
+    }
+
+    /// Mirrors ChessEscrow._canRefund.
+    function _canRefund(uint64 openedAt, uint64 startedAt) internal view returns (bool) {
+        return startedAt == 0
+            ? block.timestamp > openedAt + escrow.entryWindow()
+            : block.timestamp > startedAt + escrow.settleTimeout();
+    }
+
+    /// Begin play. Without this in the handler set the fuzzer would never start
+    /// a tournament, every settle path would early-return, and the regime where
+    /// the escrow holds a committed-but-unpaid pool would go unexercised.
+    function startTournament(uint256 tSeed) public {
+        if (tournaments.length == 0) return;
+        bytes32 t = tournaments[tSeed % tournaments.length];
+        (,,,, uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        if (settled || startedAt != 0) return;
+        if (block.timestamp > openedAt + escrow.entryWindow()) return;
+        vm.prank(oracle);
+        escrow.startTournament(t);
+    }
+
     function enterTournament(uint256 tSeed, uint256 aSeed) public {
         if (tournaments.length == 0) return;
         bytes32 t = tournaments[tSeed % tournaments.length];
         address a = actors[aSeed % 3];
-        (uint256 buyIn,,,,, bool settled,,) = escrow.tournaments(t);
-        if (settled || escrow.tournamentEntered(t, a) || escrow.available(a) < buyIn) return;
+        (uint256 buyIn,,,, uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        if (settled || startedAt != 0) return;
+        if (block.timestamp > openedAt + escrow.entryWindow()) return;
+        if (escrow.tournamentEntered(t, a) || escrow.available(a) < buyIn) return;
         vm.prank(oracle);
         escrow.enterTournament(t, a);
     }
@@ -121,8 +148,8 @@ contract Handler {
         if (tournaments.length == 0) return;
         bytes32 t = tournaments[tSeed % tournaments.length];
         address a = actors[aSeed % 3];
-        (,,,, uint64 openedAt, bool settled,,) = escrow.tournaments(t);
-        if (settled || block.timestamp > openedAt + escrow.settleTimeout()) return;
+        (,,,, uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        if (settled || _canRefund(openedAt, startedAt)) return;
         uint256 cap = escrow.available(a);
         if (cap == 0) return;
         amt = (amt % cap) + 1;
@@ -135,8 +162,9 @@ contract Handler {
     function settleTournament(uint256 tSeed, uint256 seed) public {
         if (tournaments.length == 0) return;
         bytes32 t = tournaments[tSeed % tournaments.length];
-        (, uint256 pool,,, uint64 openedAt, bool settled,,) = escrow.tournaments(t);
-        if (settled || block.timestamp > openedAt + escrow.settleTimeout()) return;
+        (, uint256 pool,, , uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        openedAt; // settlement is keyed on startedAt now
+        if (settled || !_canSettle(startedAt)) return;
 
         address[] memory winners = new address[](3);
         uint256[] memory payouts = new uint256[](3);
@@ -157,8 +185,8 @@ contract Handler {
         if (tournaments.length == 0) return;
         bytes32 t = tournaments[tSeed % tournaments.length];
         address a = actors[aSeed % 3];
-        (uint256 buyIn,,,, uint64 openedAt, bool settled,,) = escrow.tournaments(t);
-        if (settled || buyIn == 0 || block.timestamp <= openedAt + escrow.settleTimeout()) return;
+        (uint256 buyIn,,,, uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        if (settled || buyIn == 0 || !_canRefund(openedAt, startedAt)) return;
         if (!escrow.tournamentEntered(t, a) || escrow.tournamentClaimed(t, a)) return;
         escrow.claimRefund(t, a);
     }
@@ -167,8 +195,8 @@ contract Handler {
         if (tournaments.length == 0) return;
         bytes32 t = tournaments[tSeed % tournaments.length];
         address a = actors[aSeed % 3];
-        (,,,, uint64 openedAt, bool settled,,) = escrow.tournaments(t);
-        if (settled || block.timestamp <= openedAt + escrow.settleTimeout()) return;
+        (,,,, uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        if (settled || !_canRefund(openedAt, startedAt)) return;
         if (escrow.sponsorship(t, a) == 0) return;
         escrow.refundSponsorship(t, a);
     }
@@ -184,8 +212,9 @@ contract Handler {
     function settleTournamentRoot(uint256 tSeed, uint256 seed) public {
         if (tournaments.length == 0) return;
         bytes32 t = tournaments[tSeed % tournaments.length];
-        (, uint256 pool,,, uint64 openedAt, bool settled,,) = escrow.tournaments(t);
-        if (settled || block.timestamp > openedAt + escrow.settleTimeout()) return;
+        (, uint256 pool,, , uint64 openedAt, uint64 startedAt, bool settled,,) = escrow.tournaments(t);
+        openedAt; // settlement is keyed on startedAt now
+        if (settled || !_canSettle(startedAt)) return;
 
         RootPayout memory p;
         p.a0 = actors[seed % 3];
@@ -272,7 +301,7 @@ contract SolvencyInvariant {
 
     function setUp() public {
         usdc = new MockUSDC();
-        escrow = new ChessEscrow(address(usdc), vm.addr(oracleKey), fee, 100, 3600);
+        escrow = new ChessEscrow(address(usdc), vm.addr(oracleKey), fee, 100, 3600, 1800);
         handler = new Handler(escrow, usdc, oracleKey, actors);
     }
 
@@ -303,7 +332,7 @@ contract SolvencyInvariant {
         // whole tournament half of the contract unverified.
         bytes32[] memory tids = handler.tournamentIdsAll();
         for (uint256 i = 0; i < tids.length; i++) {
-            (, uint256 pool, uint256 claimed,,,,,) = escrow.tournaments(tids[i]);
+            (, uint256 pool, uint256 claimed,,,,,,) = escrow.tournaments(tids[i]);
             require(claimed <= pool, "claimed > pool");
             sum += pool - claimed;
         }

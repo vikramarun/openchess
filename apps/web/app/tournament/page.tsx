@@ -31,6 +31,7 @@ import {
   isOrganizer,
   kindOf,
   sameEntrant,
+  startRefusal,
   type Admission,
   type Standing,
   type Tournament,
@@ -494,10 +495,12 @@ function TournamentClient() {
                   ? BOT_OFFLINE_MSG
                   : // 409 used to mean a display name collision, which cannot
                     // happen now that an entrant is a wallet. What is left is
-                    // the door being shut: started, settled, or at the entrant
-                    // cap.
+                    // the door being shut: started, settled, at the entrant
+                    // cap — or, for a paid event, its entry window has closed
+                    // or one more entrant would leave too little time to play
+                    // every round before the payout window ends.
                     r.status === 409
-                    ? "This tournament isn’t taking entries — it has already started or filled up."
+                    ? "This tournament isn’t taking entries — it has started, is full, or its entry window has closed."
                     : // The admission gate. The server answers 403 for every
                       // not-admitted case and never a 2xx — `fetch` counts 202
                       // as ok, so a "you're still pending" success code would be
@@ -540,13 +543,11 @@ function TournamentClient() {
         setErr(
           r.status === 503
             ? MAINTENANCE_MSG
-            : r.status === 409
-              ? "Need at least 2 entrants."
-              : r.status === 401
-                ? SESSION_EXPIRED
-                : r.status === 403
-                  ? "Only the organizer can start this tournament."
-                  : `Couldn’t start (${r.status}).`,
+            : r.status === 401
+              ? SESSION_EXPIRED
+              : r.status === 403
+                ? "Only the organizer can start this tournament."
+                : (startRefusal(r.status, t) ?? `Couldn’t start (${r.status}).`),
         );
       else setOpenTid(t.id);
     } catch {

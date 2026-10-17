@@ -38,3 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Test-only: `SettlementSink` is an `#[async_trait]` trait, so a test stub
 # implementing it needs the same attribute to desugar identically.
 async-trait = "0.1"
+# `test-util` (not in tokio's "full") gives `#[tokio::test(start_paused = true)]`,
+# so a test can wait out a real production timeout — e.g. the agent seat-dispatch
+# timeout — without spending the wall-clock seconds to do it.
+tokio = { workspace = true, features = ["test-util"] }

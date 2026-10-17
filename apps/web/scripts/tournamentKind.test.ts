@@ -13,6 +13,7 @@ import {
   hasPrizePool,
   isRanked,
   kindOf,
+  startRefusal,
   type Tournament,
 } from "../lib/tournaments";
 
@@ -88,6 +89,24 @@ check(
   "~~alice",
 );
 check("no labels at all still renders something", entrantLabel(lab({}), "bob"), "~bob");
+
+// A refused start says WHY. Every 409 used to read "Need at least 2
+// entrants." — including a full buy-in field refused because its rounds can't
+// finish inside the escrow's settle window.
+const field = ["0xa", "0xb", "0xc"];
+check("409, one entrant", startRefusal(409, { buy_in: "1000000", players: ["0xa"] }), "Need at least 2 entrants.");
+check(
+  "409, a full paid field is a time problem",
+  startRefusal(409, { buy_in: "1000000", players: field })?.includes("not be enough time"),
+  true,
+);
+check(
+  "409, a free event is an unfunded pool",
+  startRefusal(409, { buy_in: "0", players: field })?.includes("prize pool may still be empty"),
+  true,
+);
+check("502 is the chain, and retryable", startRefusal(502, { buy_in: "1000000", players: field })?.includes("Try again"), true);
+check("other codes fall through to the caller", startRefusal(500, { buy_in: null, players: field }), null);
 
 console.log(failed === 0 ? "\nall tournament-kind checks passed" : `\n${failed} FAILED`);
 process.exit(failed === 0 ? 0 : 1);
