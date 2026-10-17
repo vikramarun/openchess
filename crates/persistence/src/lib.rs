@@ -215,6 +215,9 @@ pub struct OpenTournamentRow {
     pub admission: String,
     pub invites: serde_json::Value,
     pub approvals: serde_json::Value,
+    /// Paid joins not yet confirmed seated (migration 0021). Must be restored,
+    /// or a restart forgets who may have paid without a seat.
+    pub unconfirmed_entries: serde_json::Value,
     /// How long ago the tournament was created, so the caller can restore its
     /// TTL clock instead of restarting it on every deploy. Computed by the
     /// database — the server has no chrono of its own.
@@ -594,6 +597,7 @@ impl Db {
         admission: &str,
         invites: &serde_json::Value,
         approvals: &serde_json::Value,
+        unconfirmed_entries: &serde_json::Value,
     ) -> Result<()> {
         // `payout` is deliberately absent from the DO UPDATE set: the prize
         // structure is decided once, at creation, and entrants join on the
@@ -602,8 +606,9 @@ impl Db {
         sqlx::query(
             r#"INSERT INTO tournaments
                  (id, name, buy_in, organizer, initial_secs, increment_secs, status, players, bots,
-                  entrant_wallets, entrant_engines, payout, admission, invites, approvals)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                  entrant_wallets, entrant_engines, payout, admission, invites, approvals,
+                  unconfirmed_entries)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status,
                  players=EXCLUDED.players, bots=EXCLUDED.bots,
                  entrant_wallets=EXCLUDED.entrant_wallets,
@@ -611,7 +616,8 @@ impl Db {
                  -- These DO change after creation (codes get minted and spent,
                  -- requests get decided), unlike `payout` and `admission`, which
                  -- are the terms a field joined on and stay as first written.
-                 invites=EXCLUDED.invites, approvals=EXCLUDED.approvals"#,
+                 invites=EXCLUDED.invites, approvals=EXCLUDED.approvals,
+                 unconfirmed_entries=EXCLUDED.unconfirmed_entries"#,
         )
         .bind(id)
         .bind(name)
@@ -628,6 +634,7 @@ impl Db {
         .bind(admission)
         .bind(invites)
         .bind(approvals)
+        .bind(unconfirmed_entries)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -643,7 +650,7 @@ impl Db {
         let rows = sqlx::query_as::<_, OpenTournamentRow>(
             r#"SELECT id, name, buy_in, organizer, initial_secs, increment_secs,
                       players, bots, entrant_wallets, entrant_engines,
-                      payout, admission, invites, approvals,
+                      payout, admission, invites, approvals, unconfirmed_entries,
                       GREATEST(0, EXTRACT(EPOCH FROM (now() - created_at))::BIGINT) AS age_secs
                FROM tournaments WHERE status='open'
                ORDER BY created_at DESC LIMIT $1"#,
@@ -676,6 +683,11 @@ impl Db {
     /// it, those entrants' buy-ins were refundable onchain and offered nowhere.
     /// The UI shows nothing for an `open` event until the chain's refund
     /// window has actually opened, so a live one still filling is unaffected.
+    ///
+    /// A wallet in `unconfirmed_entries` is matched too: one that paid but was
+    /// never seated (its entry landed after the start) is refunded in the
+    /// settlement, and in a Merkle-settled field it has to CLAIM that refund —
+    /// which it can only do from a list it appears on.
     pub async fn claimable_tournaments(
         &self,
         address: &str,
@@ -684,7 +696,8 @@ impl Db {
             r#"SELECT id, name, status FROM tournaments
                WHERE status IN ('open','complete','settled','abandoned','paused')
                  AND buy_in IS NOT NULL
-                 AND players @> to_jsonb($1::text)"#,
+                 AND (players @> to_jsonb($1::text)
+                      OR jsonb_exists(unconfirmed_entries, $1))"#,
         )
         .bind(address)
         .fetch_all(&self.pool)
@@ -1433,6 +1446,7 @@ mod tests {
                 "open",
                 &empty,
                 &empty,
+                &empty,
             )
             .await?;
             ids.push((id, status));
@@ -2000,6 +2014,62 @@ mod tests {
         assert_eq!(s.all.games, 5, "the All view is the two summed");
         assert_eq!(s.all.wins, s.ranked.wins + s.casual.wins);
         assert_eq!(s.casual.net, Decimal::ZERO, "free games stake nothing");
+        Ok(())
+    }
+
+    /// Who may have paid without a seat must survive a restart: an `open`
+    /// tournament is rehydrated from this row, and `tourney_start` seats any
+    /// recorded wallet the chain confirms paid. Lost here, a restart between a
+    /// failed join and the start leaves that buy-in in the pool unseated.
+    #[tokio::test]
+    async fn unconfirmed_entries_round_trip() -> Result<()> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return Ok(());
+        };
+        let db = Db::connect(&url).await?;
+        db.migrate().await?;
+        let id = Uuid::new_v4();
+        let empty = serde_json::json!({});
+        let pending = serde_json::json!({
+            "0xabc0000000000000000000000000000000000001": { "bot": true, "uci_options": [], "engine": null }
+        });
+        db.upsert_tournament(
+            id,
+            "rt",
+            Some("1000000"),
+            None,
+            60,
+            1,
+            "open",
+            &serde_json::json!([]),
+            &empty,
+            &empty,
+            &empty,
+            &serde_json::json!({ "bps": [10000] }),
+            "open",
+            &empty,
+            &empty,
+            &pending,
+        )
+        .await?;
+        let row = db
+            .open_tournaments(1000)
+            .await?
+            .into_iter()
+            .find(|r| r.id == id)
+            .expect("the open tournament comes back");
+        assert_eq!(row.unconfirmed_entries, pending);
+        // And a wallet recorded there can find the tournament in its claims
+        // list without being in `players` — a refund it may have to claim.
+        let claimable = db
+            .claimable_tournaments("0xabc0000000000000000000000000000000000001")
+            .await?;
+        assert!(claimable.iter().any(|r| r.id == id));
+        sqlx::query("DELETE FROM tournaments WHERE id = $1")
+            .bind(id)
+            .execute(&db.pool)
+            .await?;
         Ok(())
     }
 

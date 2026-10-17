@@ -761,15 +761,78 @@ struct ParkAcceptReq {
     uci_options: Option<HashMap<String, String>>,
 }
 
+/// A cancelled request must not leave money half-committed. Hyper drops a
+/// handler the moment its client disconnects, so any `.await` in it is a point
+/// where the work can simply stop — and these await an onchain transaction
+/// that moves real money. Cut off there, the escrow could lock (or the buy-in
+/// enter the pool) with no room, no launch token and no seat, the stake
+/// waiting out the contract's timeout; and a counterparty could do it on
+/// purpose by hanging up mid-accept. So the handler only spawns the work and
+/// awaits it: the task finishes whether or not anybody is still listening.
+///
+/// Finishing is not the same as delivering, though. The REQUESTER's seat token
+/// only ever travels in this response, so if they are gone it never arrives —
+/// and a game started anyway reaps them as a no-show and hands their stake to
+/// the opponent, which is worse than the locked escrow it replaced. The
+/// handler therefore flags `RequesterGone` when it is dropped, and the task
+/// checks it once the game exists: if the requester has left, the game is
+/// aborted and refunded and the offer goes back up, rather than played without
+/// them.
 async fn park_accept(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     body: Option<Json<ParkAcceptReq>>,
 ) -> Result<Json<ParkAcceptResp>, StatusCode> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let gone = RequesterGone::default();
+    let watch = gone.watch();
+    let result = tokio::spawn(park_accept_committed(state, id, headers, req, gone)).await;
+    watch.disarm();
+    result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+/// Set once the HTTP request that started some committed work is dropped
+/// before that work finished — i.e. nobody will receive its response.
+#[derive(Clone, Default)]
+struct RequesterGone(Arc<std::sync::atomic::AtomicBool>);
+
+impl RequesterGone {
+    fn is_set(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// A guard that sets the flag if it is dropped without `disarm` — which
+    /// is exactly what happens to it when hyper drops the handler.
+    fn watch(&self) -> GoneOnDrop {
+        GoneOnDrop(Some(self.0.clone()))
+    }
+}
+
+struct GoneOnDrop(Option<Arc<std::sync::atomic::AtomicBool>>);
+
+impl GoneOnDrop {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GoneOnDrop {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take() {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+async fn park_accept_committed(
+    state: AppState,
+    id: Uuid,
+    headers: HeaderMap,
+    req: ParkAcceptReq,
+    gone: RequesterGone,
+) -> Result<Json<ParkAcceptResp>, StatusCode> {
     // Drain: reject before claiming the offer so it isn't consumed on a 503.
     state.reject_if_draining()?;
-    let req = body.map(|Json(b)| b).unwrap_or_default();
     // Throttle per-IP on the CREATE budget, not the offers one: a successful
     // accept locks escrow onchain and spawns a room actor, which is exactly
     // the cost class that bucket meters (posting an offer commits nothing).
@@ -959,6 +1022,16 @@ async fn park_accept(
             return Err(e);
         }
     };
+    // The acceptor hung up while the game was being created: their seat token
+    // could only reach them in this response, so the game must not go ahead —
+    // see `park_accept`. Refund it and put the offer back up.
+    if gone.is_set() {
+        tracing::warn!(offer = %id, game_id = %resp.game_id, "acceptor left mid-accept; aborting and refunding");
+        state.abort_started_game(resp.game_id, wager).await;
+        release(&claimed);
+        unclaim();
+        return Err(StatusCode::REQUEST_TIMEOUT);
+    }
 
     // Unpack the [white, black] response back into poster/acceptor terms. Same
     // helper, read in reverse: `seats` is its own inverse, so the unpacking
@@ -1136,10 +1209,24 @@ struct QueueResp {
     ticket_id: Uuid,
 }
 
+/// See `park_accept`: the pairing awaits `openGame`, so it runs in its own task.
 async fn queue_join(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<QueueReq>,
+) -> Result<Json<QueueResp>, StatusCode> {
+    let gone = RequesterGone::default();
+    let watch = gone.watch();
+    let result = tokio::spawn(queue_join_committed(state, headers, req, gone)).await;
+    watch.disarm();
+    result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+async fn queue_join_committed(
+    state: AppState,
+    headers: HeaderMap,
+    req: QueueReq,
+    gone: RequesterGone,
 ) -> Result<Json<QueueResp>, StatusCode> {
     // Drain: reject before enqueueing (a match would spawn a game).
     state.reject_if_draining()?;
@@ -1452,6 +1539,15 @@ async fn queue_join(
             return Err(requeue_opp_then_fail(e));
         }
     };
+    // The joiner hung up while the game was being created: their ticket id
+    // only ever reaches them in this response, so they could never find their
+    // seat — see `park_accept`. Refund it and put the opponent back in line.
+    if gone.is_set() {
+        tracing::warn!(game_id = %resp.game_id, "queue joiner left mid-pairing; aborting and refunding");
+        state.abort_started_game(resp.game_id, wager).await;
+        release(&claimed);
+        return Err(requeue_opp_then_fail(StatusCode::REQUEST_TIMEOUT));
+    }
 
     // Attribute the game's result to any gauntlet sessions involved. The colour
     // here is what the session's seat actually plays — standings are scored
@@ -1760,6 +1856,20 @@ struct Tournament {
     /// `dispatch_from_current` advances on a zero, so nothing is lost by
     /// waiting.
     dispatching: bool,
+    /// Lowercased wallets whose paid join began an onchain `enterTournament`
+    /// but who are not (yet) seated in `players`. Recorded — and persisted —
+    /// BEFORE the buy-in moves, and cleared only once the wallet is seated.
+    ///
+    /// Every way a paid join can fail after the money moves strands a payer:
+    /// the read-back of a landed entry keeps failing, the client disconnects
+    /// mid-transaction, the process restarts, or the entry lands after the
+    /// organizer started the event. The payout divides the ONCHAIN pool across
+    /// the OFF-CHAIN field, so their buy-in used to go to everyone else.
+    /// `tourney_start` seats any of these the chain confirms paid
+    /// (`reconcile_entries`), and settlement refunds any still unseated
+    /// (`distribute_pool`). The chain is the only authority on who paid, so
+    /// nothing here is ever trusted on its own.
+    unconfirmed_entries: HashMap<String, PendingEntry>,
     /// Pairings awarded without a game (a bot seat that was offline at its
     /// round's dispatch). They score exactly like a played game, so a standings
     /// table that omitted them would not add up — every point has to be
@@ -1825,6 +1935,20 @@ const MAX_JOIN_REQUESTS: usize = 256;
 struct BotEntry {
     wallet: String,
     uci_options: Vec<(String, String)>,
+}
+
+/// What a paid join asked for, kept with its `unconfirmed_entries` record so
+/// that a payer seated later by `reconcile_entries` gets the seat the join
+/// would have given them — a bot entrant seated as a browser seat forfeits
+/// every round.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+struct PendingEntry {
+    #[serde(default)]
+    bot: bool,
+    #[serde(default)]
+    uci_options: Vec<(String, String)>,
+    #[serde(default)]
+    engine: Option<String>,
 }
 
 /// A pairing decided without a game being played.
@@ -2089,6 +2213,7 @@ async fn tourney_create(
             current_round: 0,
             round_remaining: 0,
             dispatching: false,
+            unconfirmed_entries: HashMap::new(),
             forfeits: Vec::new(),
             entrant_bots: HashMap::new(),
             entrant_engines: HashMap::new(),
@@ -2187,6 +2312,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
                     .unwrap_or_else(|| "open".into()),
                 serde_json::to_value(&t.invites).unwrap_or_else(|_| json!({})),
                 serde_json::to_value(&t.approvals).unwrap_or_else(|_| json!({})),
+                serde_json::to_value(&t.unconfirmed_entries).unwrap_or_else(|_| json!({})),
             )
         })
     };
@@ -2205,6 +2331,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
         admission,
         invites,
         approvals,
+        unconfirmed,
     )) = snap
     {
         db.upsert_tournament(
@@ -2223,6 +2350,7 @@ async fn persist_tournament(state: &AppState, tid: Uuid) -> Result<(), ()> {
             &admission,
             &invites,
             &approvals,
+            &unconfirmed,
         )
         .await
         .map_err(|e| {
@@ -2261,14 +2389,28 @@ struct JoinResp {
 /// **The gate runs before the money**, always, and that ordering is the whole
 /// design: there is no onchain path to return a rejected applicant's entry
 /// before the settle timeout, so anyone who paid first and was refused second
-/// would have USDC locked in a tournament they are not in — the exact failure
-/// `tourney_join_inner` already fires a `🚨` alert for when a buy-in lands after
-/// a start. So approval and invite are settled here, above `enter_tournament`.
+/// would have USDC in a tournament they are not in — the failure
+/// `tourney_join_inner` alerts on (and settlement has to refund) when a buy-in
+/// lands after a start. So approval and invite are settled here, above
+/// `enter_tournament`.
 async fn tourney_join(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     Json(req): Json<JoinReq>,
+) -> Result<Json<JoinResp>, StatusCode> {
+    // See `park_accept`: a paid join awaits `enterTournament`, and an invite
+    // code is reserved across it, so it runs in its own task.
+    tokio::spawn(tourney_join_committed(state, id, headers, req))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+async fn tourney_join_committed(
+    state: AppState,
+    id: Uuid,
+    headers: HeaderMap,
+    req: JoinReq,
 ) -> Result<Json<JoinResp>, StatusCode> {
     // Guard BEFORE the admission gate, not after. The invite path below reserves
     // a code under the lobby lock and — on every outcome, including failure —
@@ -2401,12 +2543,22 @@ async fn tourney_join_inner(
     // state and `tournament_deadlines` returns None.
     let caller = state.authed_wallet(&headers);
     let field = state.0.lobby.tournaments.lock().get(&id).map(|t| {
-        let already_in = caller
+        let me = caller.as_deref().map(str::to_lowercase);
+        let already_in = me
             .as_deref()
             .is_some_and(|w| t.players.iter().any(|p| p.eq_ignore_ascii_case(w)));
+        // Payers still awaiting confirmation will be seated at the start if
+        // the chain says they paid, so they count toward the field this join
+        // would make — or a later join could fill the schedule they need.
+        let pending = t
+            .unconfirmed_entries
+            .keys()
+            .filter(|w| Some(w.as_str()) != me.as_deref())
+            .filter(|w| !t.players.iter().any(|p| p.eq_ignore_ascii_case(w)))
+            .count();
         (
             t.buy_in.is_some(),
-            t.players.len(),
+            t.players.len() + pending,
             already_in,
             t.initial_secs,
             t.increment_secs,
@@ -2465,7 +2617,11 @@ async fn tourney_join_inner(
             t.get(&id)
                 .is_some_and(|t| t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)))
         };
+        let key = wallet.to_lowercase();
         if already {
+            if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
+                t.unconfirmed_entries.remove(&key);
+            }
             if persist_tournament(&state, id).await.is_err() {
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
             }
@@ -2482,8 +2638,56 @@ async fn tourney_join_inner(
         // need no prior entry. So a free sponsored tournament costs the oracle
         // exactly two transactions, `openTournament` and settle, whatever the
         // size of the field.
-        if buy_in > U256::ZERO && state.0.settlement.enter_tournament(id, addr).await.is_err() {
-            return Err(StatusCode::BAD_GATEWAY);
+        if buy_in > U256::ZERO {
+            // Record the attempt — durably — BEFORE the money moves. Every way
+            // this join can fail from here on leaves a buy-in that may be in the
+            // pool with no seat, and that record is how `tourney_start` seats
+            // it and settlement refunds it (see `Tournament::unconfirmed_entries`).
+            let intent = PendingEntry {
+                bot,
+                uci_options: clean_uci_options(req.uci_options.clone()),
+                engine: req.engine.as_deref().and_then(sanitize_label),
+            };
+            // `fresh`: no earlier attempt of this wallet's is still outstanding.
+            // Only a record THIS call created may be withdrawn below — an
+            // earlier attempt's transaction may still land.
+            let fresh = match state.0.lobby.tournaments.lock().get_mut(&id) {
+                Some(t) if t.status == "open" => {
+                    t.unconfirmed_entries.insert(key.clone(), intent).is_none()
+                }
+                _ => return Err(StatusCode::CONFLICT),
+            };
+            let withdraw = |state: &AppState| {
+                if fresh {
+                    if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
+                        t.unconfirmed_entries.remove(&key);
+                    }
+                }
+            };
+            if persist_tournament(&state, id).await.is_err() {
+                // Nothing has moved: refuse rather than pay unrecorded.
+                withdraw(&state);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            if let Err(e) = state.0.settlement.enter_tournament(id, addr).await {
+                // Definitely not entered (the estimate failed, so nothing was
+                // broadcast — no funds, window closed — or it mined and
+                // reverted): nothing was paid, so forget the attempt. Kept, it
+                // would cost every start a chain read, and an empty wallet
+                // could pile them up for free.
+                if e.downcast_ref::<ledger::EntryNotMade>().is_some() {
+                    withdraw(&state);
+                    let _ = persist_tournament(&state, id).await;
+                    return Err(StatusCode::BAD_GATEWAY);
+                }
+                // Otherwise it may well have landed (a read-back that kept
+                // failing, a receipt lost to the RPC): ask once more, and seat
+                // on a yes. If not, the record STAYS, and the chain is asked
+                // again before the field is fixed and before the pool is paid.
+                if state.0.settlement.tournament_entered(id, addr).await != Some(true) {
+                    return Err(StatusCode::BAD_GATEWAY);
+                }
+            }
         }
         {
             let mut t = state.0.lobby.tournaments.lock();
@@ -2499,10 +2703,17 @@ async fn tourney_join_inner(
             // before the await, and concurrent joins past MAX_TOURNAMENT_PLAYERS
             // would break the O(n²) bounds the round-robin math relies on.
             match t.get_mut(&id) {
-                Some(t) if t.status == "open" && t.players.len() < MAX_TOURNAMENT_PLAYERS => {
+                // Seated already counts — `tourney_start`'s reconciliation can
+                // seat a confirmed payer while this join is still waiting on
+                // its transaction, and the event may have started since.
+                Some(t)
+                    if t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet))
+                        || (t.status == "open" && t.players.len() < MAX_TOURNAMENT_PLAYERS) =>
+                {
                     if !t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet)) {
                         t.players.push(wallet.clone());
                     }
+                    t.unconfirmed_entries.remove(&key);
                     if let Some(e) = req.engine.as_deref().and_then(sanitize_label) {
                         t.entrant_engines.insert(wallet.clone(), e);
                     }
@@ -2523,12 +2734,15 @@ async fn tourney_join_inner(
                     // that lost this race cost the entrant nothing, and paging
                     // an operator for it would train them to ignore the alert
                     // that matters.
+                    // Their attempt stays in `unconfirmed_entries`: a settlement
+                    // refunds the buy-in in its payout, and an event that ends
+                    // unsettled (abandoned, swept) refunds it via `claimRefund`.
                     if buy_in > U256::ZERO {
                         crate::alert::fire(format!(
-                            "🚨 OpenChess: wallet {wallet} paid a buy-in to tournament {id} that \
+                            "⚠️ OpenChess: wallet {wallet} paid a buy-in to tournament {id} that \
                              started, closed, or filled during the join. They are NOT in the \
-                             schedule; their entry needs a manual return (or claimRefund after \
-                             the settle timeout)."
+                             schedule. If the event settles, its payout refunds them; otherwise \
+                             their entry is returned by claimRefund once the window lapses."
                         ));
                     }
                     return Err(StatusCode::CONFLICT);
@@ -3441,6 +3655,13 @@ async fn tourney_start(
         authorize_start(t, caller.as_deref())?;
     }
 
+    // Before anything is sized or fixed: seat every recorded paid join the
+    // chain confirms. Starting fixes the field, and a payer left out of it
+    // would play nothing while their buy-in paid everyone else.
+    if state.0.settlement.is_onchain() {
+        reconcile_entries(&state, id).await?;
+    }
+
     // A free-entry event's prize is entirely the sponsors'. Nobody has paid
     // anything in, so an unfunded one would run a full round-robin and pay out
     // nothing — and unlike a buy-in tournament there is no entry to refund
@@ -3621,6 +3842,130 @@ async fn start_and_dispatch(
         .map(|t| t.games.clone())
         .unwrap_or_default();
     Ok(Json(games))
+}
+
+/// How many `tournamentEntered` reads run at once when reconciling. Records
+/// are bounded in practice (a definitive failure forgets its attempt), but a
+/// start must never fire an unbounded burst at the oracle's RPC.
+const ENTRY_CHECK_CONCURRENCY: usize = 16;
+
+/// Ask the chain, concurrently but bounded, which of `wallets` hold an entry.
+/// Each answer is `None` when the read failed (after `tries` attempts).
+async fn entries_onchain(
+    state: &AppState,
+    tid: Uuid,
+    wallets: Vec<String>,
+    tries: usize,
+) -> Vec<(String, Address, Option<bool>)> {
+    use futures_util::StreamExt;
+    futures_util::stream::iter(wallets.into_iter().filter_map(|wallet| {
+        let addr = wallet.parse::<Address>().ok()?; // not an address: cannot have paid
+        let sink = state.0.settlement.clone();
+        Some(async move {
+            let mut entered = None;
+            for attempt in 0..tries {
+                entered = sink.tournament_entered(tid, addr).await;
+                if entered.is_some() {
+                    break;
+                }
+                if attempt + 1 < tries {
+                    tokio::time::sleep(std::time::Duration::from_millis(POOL_READ_RETRY_MS)).await;
+                }
+            }
+            (wallet, addr, entered)
+        })
+    }))
+    .buffer_unordered(ENTRY_CHECK_CONCURRENCY)
+    .collect()
+    .await
+}
+
+/// Seat every wallet in `unconfirmed_entries` that the chain confirms has PAID
+/// into this still-`open` tournament — a join that reported failure (or never
+/// reported at all) after its `enterTournament` landed — with the seat its
+/// join asked for (bot binding, engine).
+///
+/// A wallet the chain says has not entered stays recorded rather than being
+/// dropped: its transaction may still land, and settlement asks again. If the
+/// chain cannot be asked about any of them, the start is refused (502, the
+/// organizer retries) — fixing the field blind is how a payer gets left out.
+async fn reconcile_entries(state: &AppState, tid: Uuid) -> Result<(), StatusCode> {
+    let pending: Vec<String> = {
+        let ts = state.0.lobby.tournaments.lock();
+        match ts.get(&tid) {
+            Some(t) if t.status == "open" => t
+                .unconfirmed_entries
+                .keys()
+                .filter(|w| !t.players.iter().any(|p| p.eq_ignore_ascii_case(w)))
+                .cloned()
+                .collect(),
+            _ => return Ok(()),
+        }
+    };
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let mut confirmed = Vec::new();
+    for (wallet, _, entered) in entries_onchain(state, tid, pending, 1).await {
+        match entered {
+            Some(true) => confirmed.push(wallet),
+            Some(false) => {} // not (yet) in: kept, and re-checked at settlement
+            None => {
+                tracing::warn!(tournament = %tid, %wallet, "refusing to start: could not confirm a paid join");
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        }
+    }
+    if confirmed.is_empty() {
+        return Ok(());
+    }
+    let seated: Vec<String> = {
+        let mut ts = state.0.lobby.tournaments.lock();
+        let Some(t) = ts.get_mut(&tid) else {
+            return Ok(());
+        };
+        let mut seated = Vec::new();
+        for wallet in confirmed {
+            if t.status != "open"
+                || t.players.len() >= MAX_TOURNAMENT_PLAYERS
+                || t.players.iter().any(|p| p.eq_ignore_ascii_case(&wallet))
+            {
+                continue; // left recorded: settlement refunds a payer it can't seat
+            }
+            let Some(intent) = t.unconfirmed_entries.remove(&wallet) else {
+                continue;
+            };
+            t.players.push(wallet.clone());
+            if let Some(e) = intent.engine {
+                t.entrant_engines.insert(wallet.clone(), e);
+            }
+            if intent.bot {
+                t.entrant_bots.insert(
+                    wallet.clone(),
+                    BotEntry {
+                        wallet: wallet.clone(),
+                        uci_options: intent.uci_options,
+                    },
+                );
+            }
+            seated.push(wallet);
+        }
+        seated
+    };
+    if !seated.is_empty() {
+        tracing::warn!(tournament = %tid, ?seated, "seated paid entries whose joins had not confirmed");
+        crate::alert::fire(format!(
+            "⚠️ OpenChess: tournament {tid} — seated {} wallet(s) whose buy-in landed onchain \
+             after their join reported failure: {}. Nothing is lost; check the RPC if this \
+             recurs.",
+            seated.len(),
+            seated.join(", ")
+        ));
+        persist_tournament(state, tid)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    Ok(())
 }
 
 /// Who may start (or resume) a tournament: anyone for a casual one; for one
@@ -4429,6 +4774,12 @@ pub async fn recover_tournaments(state: &AppState) {
                     current_round: 0,
                     round_remaining: 0,
                     dispatching: false,
+                    unconfirmed_entries: serde_json::from_value(r.unconfirmed_entries)
+                        .unwrap_or_else(|e| {
+                            // Losing this silently is losing who may have paid.
+                            tracing::error!(tournament = %r.id, "unreadable unconfirmed_entries: {e}");
+                            HashMap::new()
+                        }),
                     forfeits: Vec::new(),
                     entrant_bots,
                     entrant_engines: serde_json::from_value(r.entrant_engines).unwrap_or_default(),
@@ -4675,6 +5026,25 @@ async fn distribute_pool(
             .ok_or_else(|| anyhow::anyhow!("pool overflow"))?
     };
 
+    // Refund every wallet that PAID into the pool but is not in the field —
+    // an entry that landed after the start, or a join whose confirmation
+    // never came back (see `Tournament::unconfirmed_entries`). The pool is
+    // read off the chain and so includes their buy-in; without this it was
+    // divided among the field, so the payer funded everyone else's prizes.
+    // `settleTournament` pays any address, so the refund rides the same
+    // signed payout. The chain decides who paid; if it cannot be asked, the
+    // settlement fails closed (and alerts) rather than guess either way.
+    let refunds = unseated_payers(state, tid, standings).await?;
+    let refunded = buy_in
+        .checked_mul(refunds.len() as u128)
+        .ok_or_else(|| anyhow::anyhow!("refund overflow"))?;
+    let pool = pool
+        .checked_sub(refunded)
+        .ok_or_else(|| anyhow::anyhow!("refunds of {refunded} exceed the pool of {pool}"))?;
+    if !refunds.is_empty() {
+        tracing::warn!(tournament = %tid, ?refunds, "refunding paid entrants who were never seated");
+    }
+
     let by_rank = payout_split(pool, standings, spec)?;
 
     // `standings` and `by_rank` are the same order, so read across by index —
@@ -4689,11 +5059,15 @@ async fn distribute_pool(
         addrs.push(addr);
         payouts.push(U256::from(by_rank[i]));
     }
+    for addr in &refunds {
+        addrs.push(*addr);
+        payouts.push(U256::from(buy_in));
+    }
 
     // Large fields settle via a Merkle root (O(1) per winner claim); small
     // fields settle directly. Settlement is enqueued to a DURABLE outbox (a
     // worker drains it onchain, with retry); with no DB we settle inline.
-    if n > ROOT_SETTLE_THRESHOLD {
+    if addrs.len() > ROOT_SETTLE_THRESHOLD {
         // Only winners (amount > 0) become leaves; losers already paid at entry.
         let leaves: Vec<(Address, U256)> = addrs
             .iter()
@@ -4746,6 +5120,43 @@ async fn distribute_pool(
             }
         }
     }
+}
+
+/// Recorded paid joins (`unconfirmed_entries`) that are not in `standings` and
+/// that the chain confirms DID enter — each owed its buy-in back. Off-chain
+/// there is no authority on who paid, and nothing is refunded.
+async fn unseated_payers(
+    state: &AppState,
+    tid: Uuid,
+    standings: &[(String, f64)],
+) -> anyhow::Result<Vec<Address>> {
+    if !state.0.settlement.is_onchain() {
+        return Ok(Vec::new());
+    }
+    let candidates: Vec<String> = state
+        .0
+        .lobby
+        .tournaments
+        .lock()
+        .get(&tid)
+        .map(|t| {
+            t.unconfirmed_entries
+                .keys()
+                .filter(|w| !standings.iter().any(|(p, _)| p.eq_ignore_ascii_case(w)))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut owed = Vec::new();
+    for (wallet, addr, entered) in entries_onchain(state, tid, candidates, POOL_READ_RETRIES).await
+    {
+        match entered {
+            Some(true) => owed.push(addr),
+            Some(false) => {} // never paid: nothing owed
+            None => anyhow::bail!("could not confirm whether {wallet} paid into tournament {tid}"),
+        }
+    }
+    Ok(owed)
 }
 
 #[derive(Serialize)]
@@ -9444,5 +9855,482 @@ mod tests {
         )
         .await;
         assert_eq!(join_code(&r), StatusCode::OK);
+    }
+
+    /// An in-memory escrow for the paid-join paths: it tracks who entered and
+    /// the pool, can hold an entry on a gate, can land an entry but report
+    /// failure (a read-back that never confirmed), and records payouts.
+    #[derive(Default)]
+    struct ChainBook {
+        entered: Mutex<HashSet<Address>>,
+        pool: Mutex<u128>,
+        flaky: Mutex<HashSet<Address>>,
+        reads_fail: std::sync::atomic::AtomicBool,
+        gated: std::sync::atomic::AtomicBool,
+        at_gate: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        paid: Mutex<Vec<(Address, U256)>>,
+        refunds: Mutex<Vec<Uuid>>,
+        broke: Mutex<HashSet<Address>>,
+        window_left: Mutex<Option<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ledger::SettlementSink for ChainBook {
+        async fn open_escrow(
+            &self,
+            _g: Uuid,
+            _w: Address,
+            _b: Address,
+            _s: U256,
+        ) -> anyhow::Result<()> {
+            if self.gated.load(std::sync::atomic::Ordering::SeqCst) {
+                self.at_gate.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+        async fn report_result(&self, g: Uuid, w: Option<Address>) -> anyhow::Result<()> {
+            if w.is_none() {
+                self.refunds.lock().push(g);
+            }
+            Ok(())
+        }
+        fn is_onchain(&self) -> bool {
+            true
+        }
+        async fn bankroll_of(&self, _who: Address) -> Option<U256> {
+            Some(U256::from(1_000_000_000u64))
+        }
+        async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
+            let left = self.window_left.lock().unwrap_or(86_400);
+            Some((unix_now() + 3600, unix_now() + left))
+        }
+        async fn enter_tournament(&self, _tid: Uuid, who: Address) -> anyhow::Result<()> {
+            if self.broke.lock().contains(&who) {
+                return Err(anyhow::Error::new(ledger::EntryNotMade(
+                    "gas estimate failed: InsufficientUnlocked".into(),
+                )));
+            }
+            if self.gated.load(std::sync::atomic::Ordering::SeqCst) {
+                self.at_gate.notify_one();
+                self.release.notified().await;
+            }
+            self.entered.lock().insert(who);
+            *self.pool.lock() += 1_000_000;
+            if self.flaky.lock().contains(&who) {
+                anyhow::bail!("enterTournament landed, but its read-back never confirmed");
+            }
+            Ok(())
+        }
+        async fn tournament_entered(&self, _tid: Uuid, who: Address) -> Option<bool> {
+            if self.reads_fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            Some(self.entered.lock().contains(&who))
+        }
+        async fn tournament_pool(&self, _tid: Uuid) -> Option<U256> {
+            Some(U256::from(*self.pool.lock()))
+        }
+        async fn settle_tournament(
+            &self,
+            _tid: Uuid,
+            who: Vec<Address>,
+            amounts: Vec<U256>,
+        ) -> anyhow::Result<()> {
+            self.paid.lock().extend(who.into_iter().zip(amounts));
+            Ok(())
+        }
+    }
+
+    fn join_as(wallet: &str, state: &AppState) -> (HeaderMap, Json<JoinReq>) {
+        (
+            bearer(&state.0.auth.mint_session(wallet)),
+            Json(JoinReq {
+                seat: None,
+                uci_options: None,
+                engine: None,
+                invite: None,
+            }),
+        )
+    }
+
+    /// Wait (bounded) for a condition the spawned work will make true.
+    async fn eventually(mut f: impl FnMut() -> bool) -> bool {
+        for _ in 0..400 {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        f()
+    }
+
+    /// A paid join whose read-back never confirmed — the entry LANDED, the join
+    /// reported 502 — must still end up in the field. The start is where the
+    /// field is fixed, so it asks the chain about every recorded attempt and
+    /// seats the confirmed payers; otherwise their buy-in sat in the pool the
+    /// payout divided among everyone else.
+    #[tokio::test]
+    async fn a_paid_join_that_reported_failure_is_seated_at_the_start() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, org) = pooled_tournament(&state, 2).await;
+        let late = test_wallet(7);
+        book.flaky.lock().insert(late.parse().unwrap());
+        // The RPC is down for the join's confirming read too, so the join
+        // really does report failure.
+        book.reads_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (h, j) = join_as(&late, &state);
+        let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
+        assert_eq!(
+            join_code(&r),
+            StatusCode::BAD_GATEWAY,
+            "the join reports failure"
+        );
+        assert!(!state
+            .0
+            .lobby
+            .tournaments
+            .lock()
+            .get(&tid)
+            .unwrap()
+            .players
+            .contains(&late));
+
+        // Can't confirm it: the start refuses rather than fix the field blind.
+        book.reads_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let refused = tourney_start(State(state.clone()), Path(tid), org.clone()).await;
+        assert_eq!(refused.err(), Some(StatusCode::BAD_GATEWAY));
+
+        book.reads_fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = tourney_start(State(state.clone()), Path(tid), org)
+            .await
+            .expect("starts once the payer is confirmed");
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).unwrap();
+        assert!(t.players.contains(&late), "the payer is seated");
+        assert!(t.unconfirmed_entries.is_empty());
+        assert_eq!(t.players.len(), 3);
+    }
+
+    /// The common case recovers on the spot: the entry landed, its read-back
+    /// failed, and one more look at the chain says so — the join seats the
+    /// payer and succeeds instead of reporting a failure that wasn't one.
+    #[tokio::test]
+    async fn a_landed_entry_whose_read_back_failed_still_joins() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, _org) = pooled_tournament(&state, 2).await;
+        let late = test_wallet(7);
+        book.flaky.lock().insert(late.parse().unwrap());
+        let (h, j) = join_as(&late, &state);
+        let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
+        assert_eq!(join_code(&r), StatusCode::OK);
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).unwrap();
+        assert!(t.players.contains(&late));
+        assert!(t.unconfirmed_entries.is_empty());
+    }
+
+    /// An entry that lands after the organizer started the event cannot be
+    /// seated — the schedule is fixed — so it is REFUNDED in the settlement
+    /// payout, not divided among the field as it used to be.
+    #[tokio::test]
+    async fn a_payer_who_missed_the_start_is_refunded_at_settlement() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, org) = pooled_tournament(&state, 2).await;
+        let late = test_wallet(7);
+
+        // The late join is mid-`enterTournament` when the organizer starts.
+        book.gated.store(true, std::sync::atomic::Ordering::SeqCst);
+        let joining = tokio::spawn({
+            let state = state.clone();
+            let (h, j) = join_as(&late, &state);
+            async move { tourney_join(State(state), Path(tid), h, j).await }
+        });
+        book.at_gate.notified().await;
+        let _ = tourney_start(State(state.clone()), Path(tid), org)
+            .await
+            .expect("start: the payer hasn't landed yet, so nothing to seat");
+        book.gated.store(false, std::sync::atomic::Ordering::SeqCst);
+        book.release.notify_one(); // the entry lands — after the start
+        assert_eq!(join_code(&joining.await.unwrap()), StatusCode::CONFLICT);
+
+        let (standings, spec) = {
+            let ts = state.0.lobby.tournaments.lock();
+            let t = ts.get(&tid).unwrap();
+            assert!(!t.players.contains(&late), "not in the schedule");
+            assert!(
+                t.unconfirmed_entries.contains_key(&late),
+                "but recorded as having tried to pay"
+            );
+            let s: Vec<(String, f64)> = t
+                .players
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), if i == 0 { 1.0 } else { 0.0 }))
+                .collect();
+            (s, t.payout.clone())
+        };
+        distribute_pool(&state, tid, "1000000", &standings, &spec)
+            .await
+            .expect("settles");
+        let paid = book.paid.lock().clone();
+        let to_late: U256 = paid
+            .iter()
+            .filter(|(a, _)| *a == late.parse::<Address>().unwrap())
+            .map(|(_, v)| *v)
+            .sum();
+        assert_eq!(
+            to_late,
+            U256::from(1_000_000u64),
+            "the late payer gets their buy-in back"
+        );
+        let total: U256 = paid.iter().map(|(_, v)| *v).sum();
+        assert_eq!(
+            total,
+            U256::from(3_000_000u64),
+            "and the whole pool is accounted for"
+        );
+    }
+
+    /// A client that disconnects mid-`enterTournament` must still be seated:
+    /// hyper drops the handler with the connection, and the buy-in was already
+    /// on its way into the pool.
+    #[tokio::test]
+    async fn a_paid_join_survives_its_client_hanging_up() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, _org) = pooled_tournament(&state, 2).await;
+        let late = test_wallet(7);
+        book.gated.store(true, std::sync::atomic::Ordering::SeqCst);
+        let request = tokio::spawn({
+            let state = state.clone();
+            let (h, j) = join_as(&late, &state);
+            async move { tourney_join(State(state), Path(tid), h, j).await }
+        });
+        book.at_gate.notified().await;
+        request.abort(); // the tab closes mid-transaction
+        let _ = request.await;
+        book.release.notify_one();
+        assert!(
+            eventually(|| state
+                .0
+                .lobby
+                .tournaments
+                .lock()
+                .get(&tid)
+                .unwrap()
+                .players
+                .contains(&late))
+            .await,
+            "the entry still completes and the payer is seated"
+        );
+    }
+
+    /// A staked park acceptor who hangs up mid-`openGame` is REFUNDED, not
+    /// forfeited. Cancelled outright, the accept used to stop with the escrow
+    /// locked and no room (24h until claimTimeout). Merely finished in a task,
+    /// it was worse: the acceptor's seat token only travels in the response
+    /// nobody received, so the game started without them, reaped them as a
+    /// no-show and paid their stake to the poster.
+    #[tokio::test]
+    async fn a_park_acceptor_who_hangs_up_is_refunded_not_forfeited() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let offer_id = park_create(
+            State(state.clone()),
+            player(&state, 1),
+            Json(ParkCreateReq {
+                stake: Some("1000000".into()),
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .offer_id;
+        book.gated.store(true, std::sync::atomic::Ordering::SeqCst);
+        let request = tokio::spawn({
+            let state = state.clone();
+            let h = player(&state, 2);
+            async move {
+                park_accept(
+                    State(state),
+                    Path(offer_id),
+                    h,
+                    Some(Json(ParkAcceptReq::default())),
+                )
+                .await
+            }
+        });
+        book.at_gate.notified().await;
+        request.abort();
+        let _ = request.await;
+        book.release.notify_one();
+        assert!(
+            eventually(|| book.refunds.lock().len() == 1).await,
+            "the game that was created is refunded"
+        );
+        assert!(
+            eventually(|| state
+                .0
+                .lobby
+                .park
+                .lock()
+                .get(&offer_id)
+                .is_some_and(|o| o.status == "open"))
+            .await,
+            "and the poster's offer goes back up, not into a game nobody will join"
+        );
+    }
+
+    /// And a queue joiner who hangs up mid-pairing: their ticket id only ever
+    /// reaches them in the response, so the game is refunded and the waiting
+    /// player goes back to the front of the queue.
+    #[tokio::test]
+    async fn a_queue_joiner_who_hangs_up_is_refunded_not_forfeited() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let req = || QueueReq {
+            stake: Some("1000000".into()),
+            initial_secs: 60,
+            increment_secs: 1,
+            session_id: None,
+            name: None,
+            engine: None,
+            seat: None,
+            uci_options: None,
+        };
+        let first = queue_join(State(state.clone()), player(&state, 1), Json(req()))
+            .await
+            .expect("waits")
+            .0
+            .ticket_id;
+        book.gated.store(true, std::sync::atomic::Ordering::SeqCst);
+        let request = tokio::spawn({
+            let state = state.clone();
+            let h = player(&state, 2);
+            async move { queue_join(State(state), h, Json(req())).await }
+        });
+        book.at_gate.notified().await;
+        request.abort();
+        let _ = request.await;
+        book.release.notify_one();
+        assert!(
+            eventually(|| book.refunds.lock().len() == 1).await,
+            "the game that was created is refunded"
+        );
+        assert!(
+            eventually(|| state
+                .0
+                .lobby
+                .tickets
+                .lock()
+                .get(&first)
+                .is_some_and(|t| t.status == "waiting"))
+            .await,
+            "and the waiting player is back in line, not in a game alone"
+        );
+    }
+
+    /// An entry that DEFINITELY didn't happen (its gas estimate failed — no
+    /// funds) leaves no record behind. Kept, each would cost every start a
+    /// chain read, and an empty wallet could pile them up for free.
+    #[tokio::test]
+    async fn a_definitely_failed_entry_leaves_no_record() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, _org) = pooled_tournament(&state, 2).await;
+        let broke = test_wallet(7);
+        book.broke.lock().insert(broke.parse().unwrap());
+        let (h, j) = join_as(&broke, &state);
+        let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
+        assert_eq!(join_code(&r), StatusCode::BAD_GATEWAY);
+        assert!(state
+            .0
+            .lobby
+            .tournaments
+            .lock()
+            .get(&tid)
+            .unwrap()
+            .unconfirmed_entries
+            .is_empty());
+    }
+
+    /// A payer seated by reconciliation gets the seat their join asked for.
+    /// Seated as a browser seat, a bot entrant's agent is never dispatched and
+    /// it forfeits every round — losing a buy-in settlement would have refunded.
+    #[tokio::test]
+    async fn a_reconciled_bot_entrant_keeps_its_bot_seat() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, org) = pooled_tournament(&state, 2).await;
+        let late = test_wallet(7);
+        let (_tx, _rx) = register_bot(&state, &late);
+        book.flaky.lock().insert(late.parse().unwrap());
+        book.reads_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let r = tourney_join(
+            State(state.clone()),
+            Path(tid),
+            bearer(&state.0.auth.mint_session(&late)),
+            Json(JoinReq {
+                seat: Some("bot".into()),
+                uci_options: None,
+                engine: None,
+                invite: None,
+            }),
+        )
+        .await;
+        assert_eq!(join_code(&r), StatusCode::BAD_GATEWAY);
+        book.reads_fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = tourney_start(State(state.clone()), Path(tid), org)
+            .await
+            .expect("start");
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).unwrap();
+        assert!(t.players.contains(&late));
+        assert!(
+            t.entrant_bots.contains_key(&late),
+            "seated as the bot it joined as"
+        );
+    }
+
+    /// A payer awaiting confirmation counts toward the field a later join
+    /// would make. Otherwise that join could fill the schedule, and seating the
+    /// payer at the start would push the field past what the settle window
+    /// fits — a start refused on every retry, the event dead.
+    #[tokio::test]
+    async fn a_pending_payer_counts_toward_the_schedule() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, _org) = pooled_tournament(&state, 3).await; // 10+5
+        let pending = test_wallet(7);
+        book.flaky.lock().insert(pending.parse().unwrap());
+        book.reads_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (h, j) = join_as(&pending, &state);
+        let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
+        assert_eq!(join_code(&r), StatusCode::BAD_GATEWAY);
+        book.reads_fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        // 4 entrants play 3 rounds (6780s), 5 play 5 (11300s): a budget of
+        // 6800s (80% of 8500) fits the 3 seated + one more, not + the payer.
+        *book.window_left.lock() = Some(8_500);
+        let (h, j) = join_as(&test_wallet(8), &state);
+        let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
+        assert_eq!(join_code(&r), StatusCode::CONFLICT);
     }
 }
