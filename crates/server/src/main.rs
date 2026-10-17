@@ -1643,6 +1643,15 @@ impl AppState {
     /// locked) but can never be played. Refunds a wagered escrow by settling
     /// it as a draw; evicts room/tokens/live-game state.
     async fn abort_started_game(&self, game_id: GameId, wager: Option<WagerSeats>) {
+        // End the room itself before anything else, not just our handle on it.
+        // A seat that already attached (a bot agent dispatched a moment ago)
+        // holds its own command channel and would otherwise keep the room —
+        // and itself — alive for up to the whole clock, while the eviction
+        // below tells the registry its agent is free.
+        let room = self.0.rooms.lock().get(&game_id).map(|h| h.cmd_tx.clone());
+        if let Some(tx) = room {
+            let _ = tx.send(room::RoomCmd::Close).await;
+        }
         if wager.is_some() {
             // Draw settlement refunds both stakes. If this fails the funds are
             // still recoverable via the contract's claimTimeout — log loudly.

@@ -1011,6 +1011,13 @@ async fn park_accept_committed(
     let meta = seats(poster_white, poster_meta, acceptor_meta);
     let delivery = seats(poster_white, poster_delivery, acceptor_delivery);
     // A staked offer is ranked via its wager; a free one is casual.
+    // Already gone before anything was spent: don't open an escrow (an oracle
+    // transaction, and a refund to follow) for a requester nobody can seat.
+    if gone.is_set() && !acceptor_bot {
+        release(&claimed);
+        unclaim();
+        return Err(StatusCode::REQUEST_TIMEOUT);
+    }
     let resp = match state
         .start_game(tc, "park", wager, Ladder::Casual, meta, delivery)
         .await
@@ -1024,8 +1031,10 @@ async fn park_accept_committed(
     };
     // The acceptor hung up while the game was being created: their seat token
     // could only reach them in this response, so the game must not go ahead —
-    // see `park_accept`. Refund it and put the offer back up.
-    if gone.is_set() {
+    // see `park_accept`. Refund it and put the offer back up. NOT for a bot
+    // seat: its token went to the acceptor's agent, nobody is stranded, and
+    // aborting would tear down a game both agents may already be playing.
+    if gone.is_set() && !acceptor_bot {
         tracing::warn!(offer = %id, game_id = %resp.game_id, "acceptor left mid-accept; aborting and refunding");
         state.abort_started_game(resp.game_id, wager).await;
         release(&claimed);
@@ -1529,6 +1538,12 @@ async fn queue_join_committed(
     let meta = seats(opp_white, opp_meta, my_meta);
     let delivery = seats(opp_white, opp_delivery, my_delivery);
     // Staked tiers are ranked via their wager.
+    // Already gone before anything was spent: don't open an escrow for a
+    // joiner nobody can seat.
+    if gone.is_set() && !bot {
+        release(&claimed);
+        return Err(requeue_opp_then_fail(StatusCode::REQUEST_TIMEOUT));
+    }
     let resp = match state
         .start_game(tc, "gauntlet", wager, Ladder::Casual, meta, delivery)
         .await
@@ -1542,7 +1557,8 @@ async fn queue_join_committed(
     // The joiner hung up while the game was being created: their ticket id
     // only ever reaches them in this response, so they could never find their
     // seat — see `park_accept`. Refund it and put the opponent back in line.
-    if gone.is_set() {
+    // Not for a bot seat, whose agent already holds its token.
+    if gone.is_set() && !bot {
         tracing::warn!(game_id = %resp.game_id, "queue joiner left mid-pairing; aborting and refunding");
         state.abort_started_game(resp.game_id, wager).await;
         release(&claimed);
@@ -2675,16 +2691,28 @@ async fn tourney_join_inner(
                 // reverted): nothing was paid, so forget the attempt. Kept, it
                 // would cost every start a chain read, and an empty wallet
                 // could pile them up for free.
+                //
+                // "This attempt didn't enter" is not "this wallet didn't pay":
+                // a concurrent join of the same wallet (a double-click, a
+                // retry) can land first, which is exactly why this one's
+                // estimate reverted. So ask the chain before forgetting: a yes
+                // seats them below, and an unanswered read keeps the record.
                 if e.downcast_ref::<ledger::EntryNotMade>().is_some() {
-                    withdraw(&state);
-                    let _ = persist_tournament(&state, id).await;
-                    return Err(StatusCode::BAD_GATEWAY);
-                }
-                // Otherwise it may well have landed (a read-back that kept
-                // failing, a receipt lost to the RPC): ask once more, and seat
-                // on a yes. If not, the record STAYS, and the chain is asked
-                // again before the field is fixed and before the pool is paid.
-                if state.0.settlement.tournament_entered(id, addr).await != Some(true) {
+                    match state.0.settlement.tournament_entered(id, addr).await {
+                        Some(true) => {} // paid after all: fall through and seat
+                        Some(false) => {
+                            withdraw(&state);
+                            let _ = persist_tournament(&state, id).await;
+                            return Err(StatusCode::BAD_GATEWAY);
+                        }
+                        None => return Err(StatusCode::BAD_GATEWAY),
+                    }
+                } else if state.0.settlement.tournament_entered(id, addr).await != Some(true) {
+                    // Otherwise it may well have landed (a read-back that kept
+                    // failing, a receipt lost to the RPC): asked once more,
+                    // and seated on a yes. If not, the record STAYS, and the
+                    // chain is asked again before the field is fixed and
+                    // before the pool is paid.
                     return Err(StatusCode::BAD_GATEWAY);
                 }
             }
@@ -9872,6 +9900,7 @@ mod tests {
         paid: Mutex<Vec<(Address, U256)>>,
         refunds: Mutex<Vec<Uuid>>,
         broke: Mutex<HashSet<Address>>,
+        landed_elsewhere: Mutex<HashSet<Address>>,
         window_left: Mutex<Option<u64>>,
     }
 
@@ -9907,6 +9936,15 @@ mod tests {
             Some((unix_now() + 3600, unix_now() + left))
         }
         async fn enter_tournament(&self, _tid: Uuid, who: Address) -> anyhow::Result<()> {
+            if self.landed_elsewhere.lock().contains(&who) {
+                // Another attempt of this wallet's landed first; this one's
+                // estimate reverts AlreadyEntered.
+                self.entered.lock().insert(who);
+                *self.pool.lock() += 1_000_000;
+                return Err(anyhow::Error::new(ledger::EntryNotMade(
+                    "gas estimate failed: AlreadyEntered".into(),
+                )));
+            }
             if self.broke.lock().contains(&who) {
                 return Err(anyhow::Error::new(ledger::EntryNotMade(
                     "gas estimate failed: InsufficientUnlocked".into(),
@@ -10332,5 +10370,126 @@ mod tests {
         let (h, j) = join_as(&test_wallet(8), &state);
         let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
         assert_eq!(join_code(&r), StatusCode::CONFLICT);
+    }
+
+    /// A BOT-seat acceptor who hangs up is not aborted: its seat token went to
+    /// its agent, so nobody is stranded — and aborting tore down a game both
+    /// agents could already be playing, then reported the poster's agent free
+    /// for a new game it would never show up to.
+    #[tokio::test]
+    async fn a_bot_seat_acceptor_who_hangs_up_still_plays() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (_tok, mut agent) = register_bot(&state, &test_wallet(2));
+        let offer_id = park_create(
+            State(state.clone()),
+            player(&state, 1),
+            Json(ParkCreateReq {
+                stake: Some("1000000".into()),
+                initial_secs: 60,
+                increment_secs: 1,
+                name: None,
+                engine: None,
+                seat: None,
+                uci_options: None,
+            }),
+        )
+        .await
+        .expect("create")
+        .0
+        .offer_id;
+        book.gated.store(true, std::sync::atomic::Ordering::SeqCst);
+        let request = tokio::spawn({
+            let state = state.clone();
+            let h = player(&state, 2);
+            async move {
+                park_accept(
+                    State(state),
+                    Path(offer_id),
+                    h,
+                    Some(Json(ParkAcceptReq {
+                        seat: Some("bot".into()),
+                        ..Default::default()
+                    })),
+                )
+                .await
+            }
+        });
+        book.at_gate.notified().await;
+        request.abort();
+        let _ = request.await;
+        book.release.notify_one();
+        assert!(
+            eventually(|| state
+                .0
+                .lobby
+                .park
+                .lock()
+                .get(&offer_id)
+                .is_some_and(|o| o.status == "matched"))
+            .await,
+            "the game goes ahead"
+        );
+        assert!(book.refunds.lock().is_empty(), "and is not refunded");
+        assert!(
+            matches!(agent.try_recv(), Ok(ServerToAgent::AssignSeat { .. })),
+            "the acceptor's agent holds its seat"
+        );
+    }
+
+    /// An abort ENDS the room, not just the server's handle on it. A seat
+    /// already attached holds its own command channel, so evicting the handle
+    /// left the room — and that agent — alive in a game that no longer existed
+    /// while the registry called the agent free.
+    #[tokio::test]
+    async fn an_aborted_game_closes_its_room() {
+        let (state, _c, _r) = test_state();
+        let resp = state
+            .start_game(
+                protocol::TimeControl {
+                    initial_ms: 60_000,
+                    increment_ms: 0,
+                },
+                "park",
+                None,
+                Ladder::Casual,
+                Default::default(),
+                [SeatDelivery::Browser, SeatDelivery::Browser],
+            )
+            .await
+            .expect("game");
+        // What an attached seat holds.
+        let attached = state
+            .0
+            .rooms
+            .lock()
+            .get(&resp.game_id)
+            .unwrap()
+            .cmd_tx
+            .clone();
+        state.abort_started_game(resp.game_id, None).await;
+        tokio::time::timeout(Duration::from_secs(2), attached.closed())
+            .await
+            .expect("the room actor exits, even with a seat attached");
+    }
+
+    /// "This attempt didn't enter" is not "this wallet didn't pay": a
+    /// concurrent join of the same wallet can land first — which is why this
+    /// one's estimate reverted. Forgetting the record then left a paid wallet
+    /// neither seated nor refunded; the chain is asked first.
+    #[tokio::test]
+    async fn a_wallet_that_paid_through_another_attempt_is_seated() {
+        let book = Arc::new(ChainBook::default());
+        let (state, _c, _r) = test_state_with_sink(book.clone());
+        let (tid, _org) = pooled_tournament(&state, 2).await;
+        let w = test_wallet(7);
+        book.landed_elsewhere.lock().insert(w.parse().unwrap());
+        let (h, j) = join_as(&w, &state);
+        let r = tourney_join(State(state.clone()), Path(tid), h, j).await;
+        assert_eq!(join_code(&r), StatusCode::OK);
+        let ts = state.0.lobby.tournaments.lock();
+        let t = ts.get(&tid).unwrap();
+        assert!(t.players.contains(&w));
+        assert!(t.unconfirmed_entries.is_empty());
     }
 }

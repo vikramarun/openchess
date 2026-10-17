@@ -80,6 +80,13 @@ pub enum RoomCmd {
     /// `claimTimeout`. Acks once the result is DURABLE (persisted + enqueued),
     /// not once it is onchain — see `Room::shutdown`.
     Shutdown { resp: oneshot::Sender<()> },
+    /// The game was aborted before it could be played
+    /// (`AppState::abort_started_game`), which has already refunded it. End
+    /// the actor WITHOUT recording a result: that drops the seat channels, so
+    /// an agent already attached is let go instead of sitting in a game that
+    /// no longer exists while the registry calls it free — free enough to be
+    /// claimed for a NEW game it would then never show up to.
+    Close,
 }
 
 /// Current game state for a mid-join spectator.
@@ -375,6 +382,10 @@ impl Room {
             RoomCmd::Shutdown { resp } => {
                 self.shutdown().await;
                 let _ = resp.send(());
+            }
+            RoomCmd::Close => {
+                tracing::info!(game_id = %self.game_id, "room closed by an abort");
+                self.closing = true;
             }
             RoomCmd::Ready { color } => {
                 match color {
