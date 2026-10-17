@@ -632,9 +632,11 @@ wallet.
   settlement for one that did. `startTournament` is refused past the first, so a
   pool is never simultaneously settleable and refundable — that disjointness is
   the safety property, and `_canSettle`/`_canRefund` are where it lives. Three
-  riders. **The contract is ahead of the live deployment** (constructor change ⇒
-  redeploy, see [DEPLOYMENTS.md](DEPLOYMENTS.md)), and the server and web must
-  run against BOTH. Adding `startedAt` changed the WIDTH of what `tournaments()`
+  riders. **The contract is ahead of the live deployment, on purpose** —
+  v2 stays live until buy-in tournaments are promoted (constructor change ⇒
+  redeploy, deferred; on v2 the worst case is a slower refund, never a loss —
+  see [DEPLOYMENTS.md](DEPLOYMENTS.md)), so the server and web must run against
+  BOTH. Adding `startedAt` changed the WIDTH of what `tournaments()`
   returns (8 words on v2, 9 now), so never decode it with the vendored ABI: the
   server goes through `OnchainSettlement::read_tournament` and the web through
   `lib/tournamentRecord.ts`, both of which take either layout. A vendored-ABI

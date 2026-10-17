@@ -1,6 +1,12 @@
 # Deployments
 
-> **⚠️ `contracts/src/ChessEscrow.sol` is AHEAD of the live v2 deployment.**
+> **`contracts/src/ChessEscrow.sol` is ahead of the live v2 deployment, and v2
+> stays live for now — the redeploy is deliberately deferred, not pending.**
+> Decided 2026-10-17: nothing on v2 is a blocker. Staked 1v1 games are untouched
+> by the change, and for tournaments the worst v2 outcome is a DELAY, never a
+> loss (see "What v2 costs" below). Redeploy before buy-in tournaments are
+> promoted as a product, not before.
+>
 > A pre-launch review found that the tournament settle clock started at
 > `openTournament` — i.e. at CREATION — while `enterTournament` had no deadline
 > of its own, so a field could still be filling after settlement had already
@@ -19,7 +25,7 @@
 >   refundable. An event now gets the WHOLE settle window for its games instead
 >   of whatever was left after the field filled.
 >
-> Until the redeploy, the server runs against BOTH contracts — and that is a
+> The server runs against BOTH contracts — and that is a
 > tested claim, not an assumption (`the_server_runs_against_the_live_v2_escrow`
 > in `crates/ledger`, which drives every tournament path against the real v2
 > bytecode vendored as `crates/ledger/abi/ChessEscrowV2.json`):
@@ -40,15 +46,26 @@
 >   the contract, and the schedule guard and entry-deadline check work against
 >   v2 today.
 >
-> **No bankroll migration is needed**, as of 2026-10-17: v2, v1 and the dead
-> deployment all hold 0 USDC, and v2 has never had a deposit or a game (its only
-> transactions are the ownership handover). Recheck before cutting over — run
-> `.claude/skills/test-openchess/scripts/verify-deployed.py <address>` (added in
-> #65), or read each escrow's USDC balance. Also confirm the server's `ESCROW_ADDR` is v2's
-> address: the oracle's only escrow transactions ever (two `openTournament`
-> calls, 2026-08-09) went to **v1**, a day before v2 existed, and it has sent
-> none since — so the chain alone cannot show which escrow production points
-> at. `GET /config` reports it as `escrow`.
+> **What v2 costs** (why it is fine for now). The server is what stops the bad
+> outcome above on v2: every join and start sizes the worst-case schedule
+> against the live onchain deadline (`openedAt + settleTimeout`) and refuses
+> one that could not finish, so nobody pays into an event that cannot settle.
+> If that check ever failed, entrants still get their buy-in back through
+> `claimRefund` after `settleTimeout` — slower, never lost. What v2 gives up:
+> a field that fills slowly gets its start refused instead of played (fill time
+> eats play time), an event that never starts locks buy-ins for the full
+> `settleTimeout` rather than `entryWindow`, and the deadline rule is enforced
+> by our server rather than by the contract.
+>
+> **When you do redeploy, no bankroll migration is needed**, as of 2026-10-17:
+> v2, v1 and the dead deployment all hold 0 USDC, and v2 has never had a deposit
+> or a game (its only transactions are the ownership handover). Recheck before
+> cutting over — run `.claude/skills/test-openchess/scripts/verify-deployed.py
+> <address>` (added in #65), or read each escrow's USDC balance. Production's
+> `ESCROW_ADDR` is confirmed to be v2: `GET /config` reported `escrow` =
+> `0x7a53…4D68` after the 2026-10-17 server deploy (Fly v104). That had to be
+> read from the server, because the oracle's only escrow transactions ever (two
+> `openTournament` calls, 2026-08-09) went to **v1**, a day before v2 existed.
 >
 > When redeploying, set `ENTRY_WINDOW` (default 4h against a 24h
 > `SETTLE_TIMEOUT`; it must be strictly less) and update the table below.
