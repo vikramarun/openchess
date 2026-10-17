@@ -12,7 +12,7 @@ Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
 ## Build / test / run
 ```bash
 cargo build && cargo test          # set DATABASE_URL to also run the persistence test
-(cd contracts && forge test)       # Foundry: 34 tests incl. a solvency invariant
+(cd contracts && forge test)       # Foundry: 41 tests incl. a solvency invariant
 (cd apps/web && pnpm install && pnpm test:book)   # polyglot .bin key vectors
 (cd apps/web && pnpm test:books)   # every built-in book walks clean (incl. castling)
 (cd apps/web && pnpm test:openings) # shipped book.json: legal + standard UCI
@@ -29,6 +29,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:payouts) # a tournament's prize split adds up to the pool
 (cd apps/web && pnpm test:tourney) # buy-in vs free vs casual (a "0" buy-in is truthy)
 (cd apps/web && pnpm test:sponsor) # sponsoring a pool, and getting it back if the event dies
+(cd apps/web && pnpm test:tourneyrecord) # the escrow's tournament record, in both contract layouts
 (cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts

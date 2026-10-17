@@ -123,11 +123,14 @@ export function startRefusal(
   t: Pick<Tournament, "buy_in" | "players">,
 ): string | null {
   if (status === 409) {
+    // A bare 409 has several causes the client can't tell apart: already
+    // running, an unfunded free pool, or (on a server new enough to check) a
+    // schedule that can't finish inside the escrow's window. Only the entrant
+    // count is certain; for the rest, name the possibilities rather than guess.
     if (t.players.length < 2) return "Need at least 2 entrants.";
-    if (kindOf(t) === "free") return "The prize pool is empty — a sponsor has to fund it before it can start.";
-    if (kindOf(t) === "buyin")
-      return "There isn’t enough time left in the escrow’s window to play every round. Try a faster time control in a new tournament.";
-    return "This tournament can’t be started right now — it may already be running.";
+    if (kindOf(t) === "free")
+      return "Couldn’t start: it may already be running, its prize pool may still be empty, or there may not be enough time left to play every round.";
+    return "Couldn’t start: it may already be running, or there may not be enough time left in the escrow’s window to play every round.";
   }
   if (status === 502) return "Couldn’t reach the chain to start it. Try again in a moment.";
   return null;
