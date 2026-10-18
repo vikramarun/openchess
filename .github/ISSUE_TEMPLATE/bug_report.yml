@@ -1,0 +1,45 @@
+name: Bug report
+description: Something on openchess.ai, the server, the contract or chess-client isn't working.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **If this could put funds at risk, or lets someone act as another player, stop here and use [private vulnerability reporting](https://github.com/vikramarun/openchess/security/advisories/new) instead.**
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Web app (openchess.ai)
+        - Game server / matchmaking
+        - Staking, settlement or the escrow contract
+        - Tournaments
+        - chess-client / connected bots
+        - Self-hosting / deployment
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+  - type: input
+    id: game
+    attributes:
+      label: Game or tournament link (if any)
+      placeholder: https://openchess.ai/game/<id>
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Browser and OS, wallet or sign-in method, chess-client version (`chess-client --version`) and engine, as relevant.
