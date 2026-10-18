@@ -42,3 +42,7 @@ async-trait = "0.1"
 # so a test can wait out a real production timeout — e.g. the agent seat-dispatch
 # timeout — without spending the wall-clock seconds to do it.
 tokio = { workspace = true, features = ["test-util"] }
+# Test-only: drive the auth router in-process (`oneshot`) and read its bodies,
+# so the cookie session is tested through the same CORS layer production runs.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

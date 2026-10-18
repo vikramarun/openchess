@@ -11,9 +11,11 @@
 // lib/browserBot.ts), not localStorage.
 
 export const KEYS = {
-  /** SIWE session token. */
+  /** A SIWE bearer token an older version stored. Nothing writes it now: the
+   *  session is an httpOnly cookie, and lib/authedFetch.ts reads this only to
+   *  move a returning visitor onto it (`adoptLegacySession`). */
   token: "openchess.token",
-  /** Wallet the stored session was issued for (lowercased). */
+  /** Wallet the session was issued for (lowercased): the "signed in" marker. */
   addr: "openchess.addr",
   /** UCI option overrides relayed to a connected agent. */
   botOptions: "openchess.botOptions",

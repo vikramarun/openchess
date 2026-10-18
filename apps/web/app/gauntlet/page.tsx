@@ -11,7 +11,7 @@ import { loadBotOptions, useBotStatus } from "@/lib/bot";
 import { SERVER_HTTP } from "@/lib/config";
 import { BOT_OFFLINE_MSG, MAINTENANCE_MSG } from "@/lib/copy";
 import { fmtUsdc, parseUsdc } from "@/lib/escrow";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -51,7 +51,7 @@ export default function GauntletPage() {
 }
 
 function GauntletClient() {
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const { config, wagerOn } = useOnchainConfig();
 
   const [stake, setStake] = useState("");
@@ -68,7 +68,7 @@ function GauntletClient() {
   // Latest games-count, read without re-triggering the queue loop.
   const gamesRef = useRef(0);
 
-  const bot = useBotStatus(token);
+  const bot = useBotStatus(sessionWallet);
   const botPlays = bot.online && useBot;
   useEffect(() => {
     gamesRef.current = stats?.games ?? 0;
@@ -229,7 +229,7 @@ function GauntletClient() {
     setErr(null);
     // Every gauntlet needs a session now, staked or not (the page is gated too,
     // so this only fires on one that expired while the tab was open).
-    if (!token) return setErr(SESSION_EXPIRED);
+    if (!sessionWallet) return setErr(SESSION_EXPIRED);
     let stakeBase: string | undefined;
     if (wantStake) {
       try {
@@ -272,10 +272,7 @@ function GauntletClient() {
   const stop = async () => {
     if (!session) return;
     try {
-      await fetch(`${SERVER_HTTP}/gauntlet/${session}/stop`, {
-        method: "POST",
-        headers: token ? { authorization: `Bearer ${token}` } : {},
-      });
+      await authedFetch(`${SERVER_HTTP}/gauntlet/${session}/stop`, { method: "POST" });
     } catch {
       /* ignore */
     }

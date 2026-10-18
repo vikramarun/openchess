@@ -47,7 +47,9 @@ flowchart TB
 Sign-in is [Dynamic](https://dynamic.xyz): email or Google logins get an embedded
 wallet, and browser wallets work directly. Either way the browser signs an
 EIP-4361 (SIWE) message. The embedded wallet is an ordinary EOA, so the server
-just `ecrecover`s the signature. Every matchmaking route requires that session,
+just `ecrecover`s the signature. The browser's session is an httpOnly cookie
+(`api.openchess.ai` sits on the same site as the web app so a `SameSite=Strict`
+cookie can reach it), and `chess-client` uses a bearer token. Every matchmaking route requires that session,
 free ones included, because each seats a player in a game that lands in a
 history and moves an Elo. The one unauthenticated game route is `POST /games`,
 used by the no-account engine demo at `/play`. Its games seat nobody and are

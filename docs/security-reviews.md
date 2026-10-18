@@ -19,9 +19,6 @@ The open items, in rough order of risk:
   tournament payout is not even constrained to the event's entrants onchain;
   the contract only enforces payouts ≤ pool. There is no dispute window.
 - **The owner is a single hardware wallet,** and `setOracle` has no timelock.
-- **Session tokens live in `localStorage`.** Any XSS could steal one, and a
-  session can commit its wallet's escrow balance to staked games (up to the cap
-  per game). It should become an httpOnly cookie.
 - **Launch tokens ride in the WebSocket URL's query string.** They're bearer
   capabilities, so keep them on TLS and out of logs. A leaked one can only throw
   a game: payouts go to the seat's wallet, which is fixed when the escrow opens.
@@ -52,6 +49,7 @@ Kinds of bugs found and fixed over the rounds below:
 | 6 | 2026-08-09 | Launch review of the tournament and identity work |
 | 7 | 2026-08-19 | Pre-launch security review (six findings) |
 | 8 | 2026-10-17 | Reviews of round 7's fixes, plus accept/join hardening |
+| 9 | 2026-10-17 | Web session moved from `localStorage` to an httpOnly cookie |
 
 File and line references in each round point at the code as it was then.
 
@@ -279,7 +277,7 @@ critical/drain bug; the genuine findings were fixed:
 | SIWE hardcoded Chain ID 8453 (breaks Base Sepolia / real domains); errors swallowed | High (FE) | Fixed | Chain id from the connected chain; sign-in errors surfaced in the UI. |
 | WalletConnect projectId placeholder fails silently | Med (FE) | Fixed | Warns loudly in-browser when unset (injected wallets still work). |
 | Spectator move-apply could throw and kill the WS loop | Low (FE) | Fixed | Legality-guarded apply + try/catch; plus WS reconnect with backoff. |
-| Session token in localStorage; no money UI yet | Med (FE) | **Open** | Accepted while the token gated nothing onchain. Staking has since shipped, so a stolen session can now commit its wallet's balance to games; listed as open at the top of this doc. |
+| Session token in localStorage; no money UI yet | Med (FE) | Fixed (round 9) | Accepted while the token gated nothing onchain. Once staking shipped, a stolen session could commit its wallet's balance to games. The web session is now an httpOnly cookie; see round 9. |
 
 Confirmed correct by the review: pooled-at-entry solvency, settle-vs-refund
 mutual exclusion, cross-tournament pool isolation, Merkle leaf double-hash
@@ -464,3 +462,56 @@ introduced, and a hardening pass on accepts and joins followed (PRs #64, #66).
   reconciled with the chain at start, and refunded at settlement if still
   unseated.
 
+# Round 9: the web session becomes an httpOnly cookie (2026-10-17)
+
+Closes the last open web finding (round 1's M5, round 2's "session token in
+localStorage"). Staking made it concrete: an XSS that read the token could
+stake the victim's escrow balance in games, up to 25 USDC each, from anywhere,
+for the rest of the session's 24h.
+
+- **The cookie.** `POST /auth/verify` with `cookie: true` sets
+  `__Host-openchess_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`, no
+  `Domain`, `Max-Age` = the 24h TTL) and leaves the token out of the response
+  body. The web app keeps only the wallet address in `localStorage`, as the
+  UI's "signed in" marker. That address is public anyway.
+- **Same site, not a proxy.** `fly.dev` is on the Public Suffix List, so a
+  cookie from `openchess.fly.dev` is third-party on `openchess.ai`, and Safari
+  and Brave drop those. Proxying through Vercel would have sent every request
+  to Fly from Vercel's IPs, which breaks the per-IP rate limiter keyed on
+  `Fly-Client-IP`, and Vercel rewrites can't carry WebSockets. The API moves to
+  `api.openchess.ai`, same site as the web app, with a Fly certificate. Safari's
+  rule capping cookies from CNAME-cloaked hosts at 7 days doesn't matter
+  against a 24h session.
+- **CSRF.** `SameSite=Strict` stops cross-site requests. The cookie also only
+  counts alongside an `X-OpenChess-Session` header (a cross-site form can't set
+  one, and on a `fetch` it forces a preflight that only `WEB_ORIGIN` passes)
+  and an `Origin` equal to `WEB_ORIGIN`. A cookie without the header is ignored.
+- **Strict auth kept.** The page can't see its cookie, so the header doubles as
+  "I'm presenting a credential". A request with the header but no valid cookie
+  gets a 401, as a stale bearer does, never a downgrade to anonymous. That keeps
+  `authed_wallet_strict`'s contract and lets `authedFetch` self-heal.
+- **No sign-outs from the migration.** A `localStorage` bearer left by an
+  earlier version is traded for the cookie once (`POST /auth/cookie`) and
+  deleted, but only after `/auth/me` confirms the cookie came back. If that
+  fails it stays in use. A dead one is cleared like any other 401.
+- **Sign-out revokes.** `POST /auth/logout` ends the session server-side.
+  Before, a sign-out only forgot the token locally and left it valid. The
+  response doesn't clear the cookie, so a sign-in racing it (an account switch)
+  keeps its new cookie.
+- **Fail loudly, not silently.** Sign-in checks `/auth/me` and errors if the
+  browser didn't keep the cookie. A production web build refuses to build if
+  `NEXT_PUBLIC_SERVER_HTTP` isn't an https origin on the same site, so merging
+  before the API moves fails the deploy instead of breaking sign-in.
+- **Unchanged.** `chess-client` and the house bot still use bearer tokens, and
+  a bearer wins when both are present. Launch tokens still ride in the
+  WebSocket query (listed above).
+
+Residual: script running on `openchess.ai` can still act as the signed-in
+player while the page is open. That's inherent to any browser session, and CSP
+is the control for it.
+
+Tests: 11 server tests (`main.rs`: credential resolution, the cookie's
+attributes, the bearer still working for the native client, adoption, logout,
+`/auth/me`, the credentialed CORS preflight) and `pnpm test:auth` (cookie
+requests, the self-heal, every migration branch, sign-in's cookie check, the
+same-site rule).

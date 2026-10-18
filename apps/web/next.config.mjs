@@ -1,3 +1,5 @@
+import { sameSite } from "./lib/sameSite.mjs";
+
 /** @type {import('next').NextConfig} */
 
 // --- Security headers -------------------------------------------------------
@@ -15,8 +17,28 @@
 // loaded from jsDelivr with SRI, and is now vendored into app/ instead, so
 // there is one less third-party origin and no SRI hashes to re-pin on a bump.
 const isProd = process.env.NODE_ENV === "production";
-const SERVER_HTTP = process.env.NEXT_PUBLIC_SERVER_HTTP || "http://127.0.0.1:8080";
-const SERVER_WS = process.env.NEXT_PUBLIC_SERVER_WS || "ws://127.0.0.1:8080";
+// `localhost`, not 127.0.0.1: the dev page is http://localhost:3000, and the
+// session cookie only rides along to an API on the same site (lib/sameSite.mjs).
+const SERVER_HTTP = process.env.NEXT_PUBLIC_SERVER_HTTP || "http://localhost:8080";
+const SERVER_WS = process.env.NEXT_PUBLIC_SERVER_WS || "ws://localhost:8080";
+
+// --- Production guard: the API must be same-site ----------------------------
+// Sign-in is an httpOnly SameSite=Strict cookie set by the game server, which a
+// browser only sends to an API on the same site as the page. Pointed at a
+// cross-site API (openchess.fly.dev) the build would deploy fine and every
+// sign-in would fail. Vercel keeps the previous deployment live when a build
+// fails, so refusing to build here turns "merged before the API moved to
+// api.openchess.ai" into a failed deploy instead of an outage. Production only:
+// previews and CI builds use whatever env they have.
+if (process.env.VERCEL_ENV === "production") {
+  const site = process.env.NEXT_PUBLIC_SITE_URL || "https://openchess.ai";
+  if (!sameSite(SERVER_HTTP, site) || !SERVER_HTTP.startsWith("https://")) {
+    throw new Error(
+      `NEXT_PUBLIC_SERVER_HTTP (${SERVER_HTTP}) must be an https origin on the same site as ` +
+        `${site} (e.g. https://api.openchess.ai), or the session cookie is never sent. See SECURITY.md.`,
+    );
+  }
+}
 
 const connectSrc = [
   "'self'",

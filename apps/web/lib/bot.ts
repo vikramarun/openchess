@@ -46,13 +46,13 @@ export async function fetchBot(): Promise<BotStatus> {
 }
 
 /** React hook: the signed-in user's connected-bot status, polled every
- *  `intervalMs` while `token` is set (offline when signed out). Shared by the
+ *  `intervalMs` while `sessionWallet` is set (offline when signed out). Shared by the
  *  lobby, gauntlet, tournament, and connect pages (connect polls faster for
  *  snappy "online" feedback the moment the client pairs). */
-export function useBotStatus(token: string | null, intervalMs = 5000): BotStatus {
+export function useBotStatus(sessionWallet: string | null, intervalMs = 5000): BotStatus {
   const [bot, setBot] = useState<BotStatus>(BOT_OFFLINE);
   useEffect(() => {
-    if (!token) {
+    if (!sessionWallet) {
       setBot(BOT_OFFLINE);
       return;
     }
@@ -64,7 +64,7 @@ export function useBotStatus(token: string | null, intervalMs = 5000): BotStatus
       alive = false;
       clearInterval(t);
     };
-  }, [token, intervalMs]);
+  }, [sessionWallet, intervalMs]);
   return bot;
 }
 

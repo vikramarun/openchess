@@ -44,10 +44,10 @@ let blobSizeFor: (quality: number) => number = () => 20_000;
   },
 };
 
-(globalThis as unknown as { URL: unknown }).URL = {
-  createObjectURL: () => "blob:stub",
-  revokeObjectURL: () => {},
-};
+// Patch the two statics rather than replacing `URL`: the module loader needs
+// the real constructor to resolve the modules imported below.
+URL.createObjectURL = () => "blob:stub";
+URL.revokeObjectURL = () => {};
 
 // Image stub: `src = …` resolves onload with the dimensions the test asked for,
 // or fails like a format this browser can't decode.
@@ -71,8 +71,9 @@ let decodeFails = false;
 
 // Seeded under the PRE-NAMESPACE key on purpose: an upload from a returning
 // visitor who hasn't re-signed-in must still carry their session, which means
-// going through lib/storage.ts's migration rather than around it.
-const store = new Map<string, string>([["chess_token", "tok-123"]]);
+// going through lib/storage.ts's migration rather than around it. The value is
+// the wallet marker; the session itself is the httpOnly cookie (lib/session.ts).
+const store = new Map<string, string>([["chess_addr", "0xabc"]]);
 const dispatched: string[] = [];
 const localStorageStub = {
   getItem: (k: string) => store.get(k) ?? null,
@@ -213,7 +214,12 @@ async function main() {
   decodeFails = false;
 
   // --- what goes on the wire ----------------------------------------------
-  const calls: { url: string; method?: string; type: string | null; auth: string | null }[] = [];
+  const calls: {
+    url: string;
+    method?: string;
+    type: string | null;
+    auth: [RequestCredentials | undefined, string | null];
+  }[] = [];
   let status = 204;
   (globalThis as unknown as { fetch: unknown }).fetch = async (
     u: string,
@@ -224,7 +230,7 @@ async function main() {
       url: u,
       method: init.method,
       type: h.get("content-type"),
-      auth: h.get("authorization"),
+      auth: [init.credentials, h.get("x-openchess-session")],
     });
     return { status, ok: status >= 200 && status < 300 } as Response;
   };
@@ -234,7 +240,7 @@ async function main() {
   check("upload posts the image itself", calls[0]?.method, "POST");
   check("to the session-bound route (no address in it)", calls[0]?.url, `${SERVER_HTTP}/profile/avatar`);
   check("typed as jpeg, which is what the server sniffs", calls[0]?.type, "image/jpeg");
-  check("carrying the SIWE session", calls[0]?.auth, "Bearer tok-123");
+  check("carrying the SIWE session cookie", calls[0]?.auth, ["include", "1"]);
 
   // The header chip lives in a different branch of the React tree, so without
   // this event it keeps showing the old picture (or the pawn) until a reload.

@@ -5,7 +5,7 @@ import { useAccount } from "wagmi";
 
 import { authedFetch, SESSION_EXPIRED } from "@/lib/authedFetch";
 import { SERVER_HTTP } from "@/lib/config";
-import { authToken } from "@/lib/escrow";
+import { authAddress } from "@/lib/escrow";
 import { useMaintenance } from "@/lib/maintenance";
 
 /** Mount gate: the wagmi hook lives in the inner component, which only renders
@@ -34,7 +34,7 @@ function MaintenanceBannerInner() {
   async function toggle(on: boolean) {
     // The endpoint needs a SIWE session; without one the POST just 403s. Guide
     // the owner to sign in first instead of surfacing a confusing failure.
-    if (!authToken()) {
+    if (!authAddress()) {
       setErr("Sign in with the owner wallet to use this.");
       return;
     }

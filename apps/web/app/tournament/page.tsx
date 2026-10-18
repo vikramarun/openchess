@@ -37,7 +37,7 @@ import {
   type Tournament,
   type TournamentGame,
 } from "@/lib/tournaments";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 import { useAvailable } from "@/lib/useBankroll";
 import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
@@ -145,7 +145,7 @@ const isFinished = (t: Tournament) =>
 
 function TournamentClient() {
   const { address } = useAccount();
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const { config, wagerOn } = useOnchainConfig();
   const [tourneys, setTourneys] = useState<Tournament[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -180,7 +180,7 @@ function TournamentClient() {
   // My own seat tokens for the open tournament (game_id -> seat).
   const [myTokens, setMyTokens] = useState<Record<string, MyGame>>({});
 
-  const bot = useBotStatus(token);
+  const bot = useBotStatus(sessionWallet);
   const { available } = useAvailable(config?.escrow);
 
   /** Who I am in this tournament.
@@ -365,7 +365,7 @@ function TournamentClient() {
     // the lobby loads, and without it a casual entrant who opened the page
     // before that landed would sit on "Taking your seat…" for the whole round.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openT?.id, openMe, openT?.current_round, openT?.games.length, token, address]);
+  }, [openT?.id, openMe, openT?.current_round, openT?.games.length, sessionWallet, address]);
 
   // The structure the create form currently describes, or the reason it isn't
   // one. Shown live under the field so a creator sees "these add up to 90%"
@@ -385,7 +385,7 @@ function TournamentClient() {
     if ("error" in payoutDraft) return setErr(payoutDraft.error);
     let buyInBase: string | undefined;
     if (buyIn.trim()) {
-      if (!token)
+      if (!sessionWallet)
         return setErr("Sign in (top right) to create a tournament with an entry fee.");
       // viem's parseUnits accepts `-`, `.`, `-0` and friends (its regex allows
       // an empty integer AND fraction), all of which come back as 0n — so a
@@ -444,7 +444,7 @@ function TournamentClient() {
             ? // A gated tournament needs an organizer who can open the gate, so
               // the server refuses an anonymous one. Otherwise it's a stale
               // session, which is what SESSION_EXPIRED explains.
-              admission !== "open" && !token
+              admission !== "open" && !sessionWallet
               ? "Sign in (top right) to create a tournament people have to be let into."
               : SESSION_EXPIRED
             : r.status === 402
@@ -473,7 +473,7 @@ function TournamentClient() {
     setErr(null);
     // Every entry needs a session now, free or paid: the entrant IS the wallet.
     // The page is gated too, so this only fires on an expired session.
-    if (!token) return setErr(SESSION_EXPIRED);
+    if (!sessionWallet) return setErr(SESSION_EXPIRED);
     try {
       const r = await authedFetch(`${SERVER_HTTP}/tournaments/${t.id}/join`, {
         method: "POST",
@@ -529,7 +529,7 @@ function TournamentClient() {
 
   const startT = async (t: Tournament) => {
     setErr(null);
-    if (t.buy_in && !token) return setErr("Sign in (top right) to start your tournament.");
+    if (t.buy_in && !sessionWallet) return setErr("Sign in (top right) to start your tournament.");
     try {
       // authedFetch, not a bare bearer: starting is organizer-authenticated, and
       // a session that lapsed (every server redeploy voids them) would otherwise
@@ -636,7 +636,7 @@ function TournamentClient() {
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <button
                       className="primary"
-                      disabled={requesting || !token}
+                      disabled={requesting || !sessionWallet}
                       onClick={async () => {
                         setErr(null);
                         setRequesting(true);
@@ -656,7 +656,7 @@ function TournamentClient() {
                       {requesting ? "Asking…" : "Ask to join"}
                     </button>
                     <span className="muted" style={{ fontSize: 13 }}>
-                      {token
+                      {sessionWallet
                         ? "The organizer decides. Asking costs nothing."
                         : "Sign in (top right) to ask — approval is tied to your wallet."}
                     </span>
@@ -965,7 +965,7 @@ function TournamentClient() {
         {/* Only reachable on an EXPIRED session — the page itself is gated now,
             so nobody signed out ever sees this form. Kept because that case is
             real and the alternative is a Create button that 401s silently. */}
-        {admission !== "open" && !token && (
+        {admission !== "open" && !sessionWallet && (
           <div className="muted" style={{ fontSize: 12, marginTop: 4, color: "#e0a06c" }}>
             Your sign-in expired — minting codes and approving entrants are the
             organizer&apos;s, so a gated tournament needs one.

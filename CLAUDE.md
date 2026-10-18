@@ -32,7 +32,7 @@ cargo build && cargo test          # set DATABASE_URL to also run the persistenc
 (cd apps/web && pnpm test:payouts) # a tournament's prize split adds up to the pool
 (cd apps/web && pnpm test:tourney) # buy-in vs free vs casual (a "0" buy-in is truthy)
 (cd apps/web && pnpm test:sponsor) # sponsoring a pool, and getting it back if the event dies
-(cd apps/web && pnpm test:auth)    # authed fetch: an expired session self-heals
+(cd apps/web && pnpm test:auth)    # cookie session: self-heals, migrates off localStorage
 (cd apps/web && pnpm test:prefs)   # board/piece theming (the two theme-apply paths must agree)
 (cd apps/web && pnpm test:brand)   # the mark: app/icon.svg must match lib/brand.ts
 (cd apps/web && pnpm test:font)    # the UI font is loaded, not just named
@@ -303,9 +303,9 @@ wallet.
   legitimate lost the right: `chess-client` is wallet-bound by design, and the
   house bot posts under `HOUSE_WALLET`. **`POST /games` is the one door that
   stays open** (see `TEST_MODE` below). A client that talks to any of the five
-  must send the bearer unconditionally — `apps/web` routes them all through
-  `authedFetch`, and `chess-client gauntlet` now resolves a session up front
-  rather than sending one only when staked.
+  must present its session unconditionally — `apps/web` routes them all
+  through `authedFetch`, and `chess-client gauntlet` now resolves a session up
+  front rather than sending one only when staked.
   **Admission LATCHES while a board is live, and ONLY then.** `RequireSignIn`
   re-walls a gated page on any auth loss — our sign-out button, Dynamic's
   profile widget, a wallet disconnect, a 401 dropping the token — EXCEPT while
@@ -823,6 +823,38 @@ wallet.
   adoption and that a current value beats a stale legacy leftover). A test
   harness stubbing `window` must put `localStorage` on it, not only on
   `globalThis`: storage.ts reads `window.localStorage` to stay SSR-safe.
+  `token` stays in `KEYS` only so the cookie migration can read it; nothing
+  writes it.
+- **The web session is an httpOnly cookie, and the page never holds a
+  credential.** A session can stake its wallet's escrow balance, so one script
+  could read was an XSS away from being stolen. `auth::presented_session` is the
+  ONLY reader of a request's session, for both kinds: a bearer (`chess-client`,
+  the house bot; wins when present) or the `__Host-openchess_session` cookie
+  (`HttpOnly; Secure; SameSite=Strict`, host-only). Five things to keep.
+  (1) **The cookie counts only with `X-OpenChess-Session` AND
+  `Origin == WEB_ORIGIN`.** That pair is the CSRF defence, and the header is
+  also the client saying "I am presenting a credential": the page can't see its
+  cookie, so header-but-no-valid-cookie must 401 exactly like a stale bearer
+  (`authed_wallet_strict`), never go anonymous. A cookie with no header is
+  ignored, which is also what makes a leftover cookie after sign-out inert.
+  (2) **The API must be on the web app's SITE** (`api.openchess.ai`; `fly.dev`
+  is a public suffix, so `openchess.fly.dev` is third-party and Safari drops
+  the cookie). `next.config.mjs` refuses a production build that isn't, and
+  sign-in checks `/auth/me` and fails loudly if the cookie didn't stick.
+  Dev uses `localhost:8080`, never `127.0.0.1`, for the same reason.
+  (3) **CORS has credentials on, so no `*` anywhere** — tower-http panics on the
+  combination; methods/headers mirror the preflight, safe only because the
+  origin is pinned (`cors_layer`).
+  (4) **Logout revokes but sends no clearing `Set-Cookie`**: `clearAuth` fires
+  it without waiting, and an account switch signs straight back in, so a late
+  clearing header would delete the NEW cookie.
+  (5) **`localStorage` holds only the wallet marker** (`openchess.addr`), and
+  `useSession`/`authAddress` read it. A legacy bearer (`openchess.token` /
+  `chess_token`) is traded for the cookie once by `adoptLegacySession` and
+  deleted only after `/auth/me` confirms the cookie came back. Keep that
+  confirmation, or a browser that refuses the cookie is signed out by the
+  migration. Nothing may write a token to storage again. `pnpm test:auth` and
+  the cookie tests in `main.rs` pin all of it.
 - **An authed poster must never appear anonymous.** Auth is optional on casual
   offers, so a stale bearer used to be treated as "no credential" and the offer
   recorded no `poster_addr`, which silently disabled the client's self-match
