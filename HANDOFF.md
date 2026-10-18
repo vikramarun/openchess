@@ -21,7 +21,8 @@ docs.
   `0x7a536bEF5cd9694ACaED7Bc5fE65e463Db5d4D68` (chain 8453), owned by a
   hardware wallet (`0x4392…DF6A`, Ownable2Step accepted), oracle `0xE41A…7B53`
   (funded). The v1 at `0x7Cc1…923D` is superseded (held 0 USDC at cutover).
-  See [DEPLOYMENTS.md](DEPLOYMENTS.md).
+  `contracts/` is v2 (a two-clock tournament contract was written and reverted
+  undeployed) — see [DEPLOYMENTS.md](DEPLOYMENTS.md).
 - **Server** (`chess-server`) runs on Fly at `openchess.fly.dev`; **web** on
   Vercel at `openchess.ai`. `GET /config` → `wager_enabled:true`.
 - **Working end-to-end:** the casual lobby (create/join/watch, in-browser

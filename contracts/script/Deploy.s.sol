@@ -20,14 +20,13 @@ interface VmScript {
 ///     --rpc-url $BASE_SEPOLIA_RPC --private-key $DEPLOYER_KEY --broadcast --verify
 ///
 /// Base mainnet:
-///   ORACLE=0x.. FEE_RECIPIENT=0x.. FEE_BPS=100 SETTLE_TIMEOUT=86400 ENTRY_WINDOW=14400 \
+///   ORACLE=0x.. FEE_RECIPIENT=0x.. FEE_BPS=100 SETTLE_TIMEOUT=86400 \
 ///   forge script script/Deploy.s.sol:Deploy \
 ///     --rpc-url $BASE_RPC --private-key $DEPLOYER_KEY --broadcast --verify
 ///
 /// `TOKEN` defaults to the canonical Circle USDC for the connected chain
 /// (Base mainnet / Base Sepolia); override for anything else. `FEE_RECIPIENT`
-/// defaults to ORACLE, `FEE_BPS` to 100 (1%), `SETTLE_TIMEOUT` to 24h, and
-/// `ENTRY_WINDOW` to 4h (it must be strictly less than `SETTLE_TIMEOUT`).
+/// defaults to ORACLE, `FEE_BPS` to 100 (1%), `SETTLE_TIMEOUT` to 24h.
 contract Deploy {
     VmScript constant vm = VmScript(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
 
@@ -42,21 +41,14 @@ contract Deploy {
         address feeRecipient = vm.envOr("FEE_RECIPIENT", oracle);
         uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(100))); // 1%
         uint64 settleTimeout = uint64(vm.envOr("SETTLE_TIMEOUT", uint256(86400))); // 24h
-        // Entries close well before settlement must happen, leaving the rest of
-        // the window for the games themselves. Default 4h of a 24h window.
-        uint64 entryWindow = uint64(vm.envOr("ENTRY_WINDOW", uint256(4 * 3600)));
-        // The constructor only insists entry closes before settlement, so 0 —
-        // a typo, or a unit mix-up — would deploy an escrow where every buy-in
-        // tournament is unenterable and unstartable from the block it opens,
-        // fixable only by another redeploy. Refuse it here instead.
-        require(entryWindow >= 10 minutes, "ENTRY_WINDOW is under 10 minutes (it is in SECONDS)");
-        // Same failure for the settle window, and worse: it also bounds every
-        // staked GAME (`claimTimeout` refunds once it lapses), so minutes typed
-        // as seconds would let anyone refund a game while it is being played.
+        // A unit mix-up here (minutes typed as seconds) is unfixable without a
+        // redeploy, and worse than it looks: the settle window also bounds every
+        // staked GAME (`claimTimeout` refunds once it lapses), so a tiny one
+        // would let anyone refund a game while it is being played.
         require(settleTimeout >= 1 hours, "SETTLE_TIMEOUT is under 1 hour (it is in SECONDS)");
 
         vm.startBroadcast();
-        escrow = new ChessEscrow(token, oracle, feeRecipient, feeBps, settleTimeout, entryWindow);
+        escrow = new ChessEscrow(token, oracle, feeRecipient, feeBps, settleTimeout);
         vm.stopBroadcast();
     }
 }

@@ -2551,12 +2551,11 @@ async fn tourney_join_inner(
     if full {
         return Err(StatusCode::CONFLICT); // entrant cap reached
     }
-    // Past the contract's entry window this join can only fail, and failing at
-    // the door beats failing as a reverted oracle transaction: `enterTournament`
-    // now refuses late entries, and before the redeploy that added that refusal
-    // the entry would have "succeeded" into an event with no time left to be
-    // settled. Only meaningful for a real pool — a casual event has no chain
-    // state and `tournament_deadlines` returns None.
+    // Past the contract's settle deadline an entry can only ever be refunded:
+    // `enterTournament` has no deadline of its own, so it would "succeed" into
+    // an event with no time left to be settled. Only meaningful for a real
+    // pool — a casual event has no chain state and `tournament_deadline`
+    // returns None.
     let caller = state.authed_wallet(&headers);
     let field = state.0.lobby.tournaments.lock().get(&id).map(|t| {
         let me = caller.as_deref().map(str::to_lowercase);
@@ -2582,11 +2581,9 @@ async fn tourney_join_inner(
     });
     if let Some((true, entrants, already_in, initial_secs, increment_secs)) = field {
         if state.0.settlement.is_onchain() {
-            if let Some((entry_deadline, settle_deadline)) =
-                state.0.settlement.tournament_deadlines(id).await
-            {
-                if unix_now() > entry_deadline {
-                    tracing::info!(tournament = %id, "refusing a join past the entry window");
+            if let Some(settle_deadline) = state.0.settlement.tournament_deadline(id).await {
+                if unix_now() > settle_deadline {
+                    tracing::info!(tournament = %id, "refusing a join past the settle deadline");
                     return Err(StatusCode::CONFLICT);
                 }
                 // Don't take a buy-in into a field that could no longer START:
@@ -3757,8 +3754,8 @@ async fn tourney_start(
         // Fail CLOSED when the deadline can't be read: starting blind is how
         // a schedule that cannot be settled gets played, and the organizer can
         // simply retry. (A tournament without a pool has no chain state.)
-        let Some((_, settle_deadline)) = state.0.settlement.tournament_deadlines(id).await else {
-            tracing::warn!(tournament = %id, "refusing to start: could not read its onchain deadlines");
+        let Some(settle_deadline) = state.0.settlement.tournament_deadline(id).await else {
+            tracing::warn!(tournament = %id, "refusing to start: could not read its onchain deadline");
             return Err(StatusCode::BAD_GATEWAY);
         };
         let remaining = settle_deadline.saturating_sub(unix_now());
@@ -3774,12 +3771,9 @@ async fn tourney_start(
         }
     }
 
-    let fresh_start;
-    let rollback_to;
     {
         let mut ts = state.0.lobby.tournaments.lock();
         let t = ts.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
-        let prev_status = t.status.clone();
         // Re-checked under the lock, where the state changes — see `authorize_start`.
         authorize_start(t, caller.as_deref())?;
         validate_tc(t.initial_secs, t.increment_secs)?;
@@ -3805,21 +3799,15 @@ async fn tourney_start(
             t.current_round = 0;
         }
         t.status = "running".into();
-        // Only a FRESH start begins the onchain clock; a resume is already
-        // started and `startTournament` would revert `AlreadyStarted`.
-        fresh_start = prev_status == "open" && t.buy_in.is_some();
-        rollback_to = prev_status;
     }
 
     // Everything from here runs in its OWN task. The status above is already
     // `running`; if this request were cancelled part-way (the client drops
     // the connection, and hyper drops the handler with it) nothing would roll
-    // it back: cut off during the onchain start, the event sat `running` with
-    // no games, refused every retry, and — once the start had landed — could
-    // never be restarted either; cut off mid-dispatch, `dispatching` stayed
-    // set and no result ever advanced the round again. A spawned task finishes
-    // whether or not anybody is still waiting for the answer.
-    tokio::spawn(start_and_dispatch(state, id, fresh_start, rollback_to))
+    // it back: cut off mid-dispatch, `dispatching` stayed set and no result
+    // ever advanced the round again. A spawned task finishes whether or not
+    // anybody is still waiting for the answer.
+    tokio::spawn(start_and_dispatch(state, id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
@@ -3828,30 +3816,7 @@ async fn tourney_start(
 async fn start_and_dispatch(
     state: AppState,
     id: Uuid,
-    fresh_start: bool,
-    rollback_to: String,
 ) -> Result<Json<Vec<TourneyGame>>, StatusCode> {
-    // Begin the onchain settle clock. This is the transition that gives the
-    // games the whole of `settleTimeout` instead of whatever was left after the
-    // field finished filling — see `startTournament` in ChessEscrow.
-    //
-    // On failure roll the status back rather than dispatching: a tournament
-    // running in memory with no onchain start cannot be settled at all (both
-    // settle paths require `startedAt`), so proceeding would play a full
-    // schedule for a pool that can only ever be refunded. The schedule and
-    // scores are rebuilt from scratch on the next attempt, so there is nothing
-    // else to undo — and the start is idempotent onchain, so that attempt
-    // succeeds even if this one's transaction did land.
-    if fresh_start && state.0.settlement.is_onchain() {
-        if let Err(e) = state.0.settlement.start_tournament(id).await {
-            tracing::error!(tournament = %id, "onchain tournament start failed: {e:#}");
-            if let Some(t) = state.0.lobby.tournaments.lock().get_mut(&id) {
-                t.status = rollback_to;
-            }
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    }
-
     if let Some(db) = &state.0.db {
         let _ = db.set_tournament_status(id, "running").await;
     }
@@ -5304,10 +5269,10 @@ mod tests {
             self.0.map(U256::from)
         }
         // A real escrow always answers this for a pooled tournament (or the
-        // read fails, which refuses the start): a fresh event, entry open for
-        // an hour, a full day to settle.
-        async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
-            Some((unix_now() + 3600, unix_now() + 86_400))
+        // read fails, which refuses the start): a fresh event, a full day to
+        // settle.
+        async fn tournament_deadline(&self, _tid: Uuid) -> Option<u64> {
+            Some(unix_now() + 86_400)
         }
     }
 
@@ -8145,80 +8110,6 @@ mod tests {
         tid
     }
 
-    /// A tournament that is running in memory but never started onchain cannot
-    /// be settled at all — both settle paths require `startedAt` — so a full
-    /// schedule would be played for a pool that can only ever be refunded.
-    /// The start must therefore roll back, not proceed.
-    #[tokio::test]
-    async fn a_failed_onchain_start_does_not_leave_a_tournament_running() {
-        struct StartFails;
-        #[async_trait::async_trait]
-        impl ledger::SettlementSink for StartFails {
-            async fn open_escrow(
-                &self,
-                _g: Uuid,
-                _w: Address,
-                _b: Address,
-                _s: U256,
-            ) -> anyhow::Result<()> {
-                Ok(())
-            }
-            async fn report_result(&self, _g: Uuid, _w: Option<Address>) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn is_onchain(&self) -> bool {
-                true
-            }
-            async fn bankroll_of(&self, _who: Address) -> Option<U256> {
-                Some(U256::from(1_000_000_000u64))
-            }
-            async fn tournament_pool(&self, _tid: Uuid) -> Option<U256> {
-                Some(U256::from(10_000_000u64))
-            }
-            async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
-                Some((unix_now() + 3600, unix_now() + 86_400))
-            }
-            async fn start_tournament(&self, _tid: Uuid) -> anyhow::Result<()> {
-                anyhow::bail!("startTournament REVERTED onchain")
-            }
-        }
-
-        let (state, _c, _r) = test_state_with_sink(Arc::new(StartFails));
-        let organizer = test_wallet(0);
-        let tok = state.0.auth.mint_session(&organizer);
-        let tid = tourney_create(
-            State(state.clone()),
-            bearer(&tok),
-            Json(TourneyCreateReq {
-                name: "T".into(),
-                buy_in: Some("1000000".into()),
-                initial_secs: 60,
-                increment_secs: 1,
-                payout: None,
-                admission: None,
-            }),
-        )
-        .await
-        .expect("create")
-        .0
-        .tournament_id;
-        seat_entrants(&state, tid, 2).await;
-
-        let started = tourney_start(State(state.clone()), Path(tid), bearer(&tok)).await;
-        assert_eq!(
-            started.err(),
-            Some(StatusCode::BAD_GATEWAY),
-            "a failed onchain start must fail the request"
-        );
-        let t = state.0.lobby.tournaments.lock();
-        let t = t.get(&tid).expect("still present");
-        assert_eq!(
-            t.status, "open",
-            "and must leave the event startable, not running"
-        );
-        assert!(t.games.is_empty(), "no games were dispatched");
-    }
-
     /// M-02, the pure arithmetic: which schedules fit a 24h settle window.
     ///
     /// A round-robin's rounds run one after another, so they add up. The limits
@@ -8304,10 +8195,8 @@ mod tests {
         async fn tournament_pool(&self, _tid: Uuid) -> Option<U256> {
             Some(U256::from(10_000_000u64))
         }
-        async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
-            self.0
-                .lock()
-                .map(|left| (unix_now() + left, unix_now() + left))
+        async fn tournament_deadline(&self, _tid: Uuid) -> Option<u64> {
+            self.0.lock().map(|left| unix_now() + left)
         }
     }
 
@@ -9747,103 +9636,6 @@ mod tests {
         assert!(!lobby.game_to_tournament.lock().contains_key(&in_tourney));
     }
 
-    /// A client that disconnects mid-start must not strand the event. Hyper
-    /// drops the handler with the connection, and the status was already
-    /// `running`: cut off inside the onchain start, the event sat `running`
-    /// with no games and refused every retry; cut off mid-dispatch, the round
-    /// could never advance. The start now finishes in its own task.
-    #[tokio::test]
-    async fn a_start_survives_its_client_hanging_up() {
-        let gate = Arc::new(GatedStart::default());
-        let (state, _c, _r) = test_state_with_sink(gate.clone());
-        let (tid, org) = {
-            let org = bearer(&state.0.auth.mint_session(&test_wallet(0)));
-            let tid = tourney_create(
-                State(state.clone()),
-                org.clone(),
-                Json(TourneyCreateReq {
-                    name: "T".into(),
-                    buy_in: Some("1000000".into()),
-                    initial_secs: 60,
-                    increment_secs: 1,
-                    payout: None,
-                    admission: None,
-                }),
-            )
-            .await
-            .expect("create")
-            .0
-            .tournament_id;
-            seat_entrants(&state, tid, 2).await;
-            (tid, org)
-        };
-        let request = tokio::spawn({
-            let state = state.clone();
-            async move { tourney_start(State(state), Path(tid), org).await }
-        });
-        gate.entered.notified().await; // startTournament is in flight...
-        request.abort(); // ...and the organizer's tab closes
-        let _ = request.await;
-        gate.open.notify_one(); // the transaction lands
-        for _ in 0..200 {
-            if !state
-                .0
-                .lobby
-                .tournaments
-                .lock()
-                .get(&tid)
-                .unwrap()
-                .games
-                .is_empty()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let ts = state.0.lobby.tournaments.lock();
-        let t = ts.get(&tid).unwrap();
-        assert_eq!(t.status, "running");
-        assert!(!t.games.is_empty(), "the first round was dispatched anyway");
-        assert!(!t.dispatching, "and the dispatch finished");
-    }
-
-    /// A pooled-tournament sink whose `startTournament` blocks on a gate.
-    #[derive(Default)]
-    struct GatedStart {
-        entered: tokio::sync::Notify,
-        open: tokio::sync::Notify,
-    }
-
-    #[async_trait::async_trait]
-    impl ledger::SettlementSink for GatedStart {
-        async fn open_escrow(
-            &self,
-            _g: Uuid,
-            _w: Address,
-            _b: Address,
-            _s: U256,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn report_result(&self, _g: Uuid, _w: Option<Address>) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn is_onchain(&self) -> bool {
-            true
-        }
-        async fn bankroll_of(&self, _who: Address) -> Option<U256> {
-            Some(U256::from(1_000_000_000u64))
-        }
-        async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
-            Some((unix_now() + 3600, unix_now() + 86_400))
-        }
-        async fn start_tournament(&self, _tid: Uuid) -> anyhow::Result<()> {
-            self.entered.notify_one();
-            self.open.notified().await;
-            Ok(())
-        }
-    }
-
     /// A buy-in must not be taken into a field that could no longer start.
     /// `tourney_start` refuses a schedule that can't finish in the settle
     /// window, so an entry that tips the field past it put real money into an
@@ -9931,9 +9723,8 @@ mod tests {
         async fn bankroll_of(&self, _who: Address) -> Option<U256> {
             Some(U256::from(1_000_000_000u64))
         }
-        async fn tournament_deadlines(&self, _tid: Uuid) -> Option<(u64, u64)> {
-            let left = self.window_left.lock().unwrap_or(86_400);
-            Some((unix_now() + 3600, unix_now() + left))
+        async fn tournament_deadline(&self, _tid: Uuid) -> Option<u64> {
+            Some(unix_now() + self.window_left.lock().unwrap_or(86_400))
         }
         async fn enter_tournament(&self, _tid: Uuid, who: Address) -> anyhow::Result<()> {
             if self.landed_elsewhere.lock().contains(&who) {

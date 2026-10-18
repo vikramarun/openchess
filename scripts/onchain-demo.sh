@@ -30,7 +30,7 @@ cd "$ROOT/contracts"
 echo "== deploying MockUSDC + ChessEscrow (oracle=$A1, fee=1%) =="
 USDC=$(forge create test/ChessEscrow.t.sol:MockUSDC --rpc-url $RPC --private-key $K0 --broadcast --json | jget "['deployedTo']")
 ESCROW=$(forge create src/ChessEscrow.sol:ChessEscrow --rpc-url $RPC --private-key $K0 --broadcast --json \
-  --constructor-args $USDC $A1 $A0 100 3600 1800 | jget "['deployedTo']")  # ... settleTimeout entryWindow
+  --constructor-args $USDC $A1 $A0 100 3600 | jget "['deployedTo']")
 echo "USDC=$USDC ESCROW=$ESCROW"
 
 fund() { # key addr

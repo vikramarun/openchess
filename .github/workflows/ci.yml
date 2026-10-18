@@ -124,11 +124,6 @@ jobs:
           pnpm test:payouts
           pnpm test:tourney
           pnpm test:sponsor
-          # The escrow's tournament record has two layouts (v2: 8 words; the
-          # two-clock contract adds startedAt). A fixed-ABI decode reads every
-          # open tournament as nonexistent on the new one, so the claim and
-          # refund buttons silently vanish — and the refund clock differs too.
-          pnpm test:tourneyrecord
           # Guards the two halves of the castling-notation trap: a king-takes-rook
           # move in the shipped book, or one reaching an engine, silently
           # truncates the engine's position, and every move it returns after

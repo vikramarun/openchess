@@ -1,59 +1,40 @@
 # Deployments
 
-> **⚠️ `contracts/src/ChessEscrow.sol` is AHEAD of the live v2 deployment.**
-> A pre-launch review found that the tournament settle clock started at
-> `openTournament` — i.e. at CREATION — while `enterTournament` had no deadline
-> of its own, so a field could still be filling after settlement had already
-> become impossible. Both settle paths revert permanently past the window and
-> `claimRefund` opens at the same instant, so such an event pays nobody and
-> discards its standings.
+> **`contracts/src/ChessEscrow.sol` IS the live v2 contract.** The source, its
+> tests, the deploy script and the vendored ABI (`crates/ledger/abi/ChessEscrow.json`)
+> all match what is deployed at `0x7a53…4D68`, so reading the repo tells you how
+> production behaves.
 >
-> Two changes, both needing a **fresh deployment** (the constructor signature
-> changed, so this is a redeploy, not an upgrade — see below on migration):
-> - an immutable **`entryWindow`** with an `EntryWindowClosed` revert, and
-> - **`startTournament`**, an oracle-only transition that starts the settle
->   clock when play begins. Entry and the right to start both close at
->   `openedAt + entryWindow`; settlement runs from `startedAt + settleTimeout`;
->   refunds open exactly when the ability to start closes. Those windows are
->   disjoint by construction, so a pool is never both settleable and
->   refundable. An event now gets the WHOLE settle window for its games instead
->   of whatever was left after the field filled.
+> A two-clock tournament lifecycle was written after v2 (an `entryWindow` that
+> closes entry and the right to start, and a `startTournament` that starts the
+> settle clock when play begins) and **reverted on 2026-10-17 without ever being
+> deployed**, together with the server and web support for it. Nothing about v2
+> blocks: staked 1v1 games were never affected, and for tournaments the worst
+> v2 outcome is a DELAY, never a loss. The server stops the bad case — a field
+> still filling, or a schedule still running, once v2's single settle clock
+> (`openedAt + settleTimeout`, running from CREATION) has lapsed — by sizing
+> every join and start against the live onchain deadline and refusing one that
+> could not finish. If that check ever failed, entrants still get their buy-in
+> back through `claimRefund` after `settleTimeout`. What v2 gives up: a field
+> that fills slowly gets its start refused instead of played, an event that
+> never starts locks buy-ins for the full `settleTimeout`, and the deadline is
+> enforced by our server rather than by the contract.
 >
-> Until the redeploy, the server runs against BOTH contracts — and that is a
-> tested claim, not an assumption (`the_server_runs_against_the_live_v2_escrow`
-> in `crates/ledger`, which drives every tournament path against the real v2
-> bytecode vendored as `crates/ledger/abi/ChessEscrowV2.json`):
-> - The vendored ABI (`crates/ledger/abi/ChessEscrow.json`) is built from the
->   NEW source. The `Tournament` struct gained `startedAt`, so `tournaments()`
->   returns 8 words on v2 and 9 on the new contract. Every tournament read goes
->   through `OnchainSettlement::read_tournament`, which decodes either layout;
->   decoding with the vendored ABI alone failed every read against v2 and broke
->   tournament creation, payouts and the settled check. The web app does the
->   same (`apps/web/lib/tournamentRecord.ts`).
-> - That width is also the capability marker: on v2 `start_tournament` is a
->   no-op (its settle clock has run since `openTournament`), and
->   `tournament_deadlines` reports v2's single clock, `openedAt + settleTimeout`.
->   A FAILED read is never taken to mean "v2" — it fails the start instead,
->   since skipping `startTournament` on the new contract would leave an event
->   unsettleable and refundable mid-play.
-> - So **the deploy order does not matter**: the server and web can ship before
->   the contract, and the schedule guard and entry-deadline check work against
->   v2 today.
+> The two-clock version is in git history at `9f4f6e0` (contract, tests, and
+> the dual-layout server/web reads). Revisit it before buy-in tournaments are
+> promoted as a product. It is a constructor change (⇒ a redeploy, not an
+> upgrade) and adds `startedAt` to the `Tournament` struct, which changes the
+> WIDTH of what `tournaments()` returns — so the server and web must read both
+> layouts until the cutover, and must be deployed first.
 >
-> **No bankroll migration is needed**, as of 2026-10-17: v2, v1 and the dead
-> deployment all hold 0 USDC, and v2 has never had a deposit or a game (its only
-> transactions are the ownership handover). Recheck before cutting over — run
-> `.claude/skills/test-openchess/scripts/verify-deployed.py <address>` (added in
-> #65), or read each escrow's USDC balance. Also confirm the server's `ESCROW_ADDR` is v2's
-> address: the oracle's only escrow transactions ever (two `openTournament`
-> calls, 2026-08-09) went to **v1**, a day before v2 existed, and it has sent
-> none since — so the chain alone cannot show which escrow production points
-> at. `GET /config` reports it as `escrow`.
->
-> When redeploying, set `ENTRY_WINDOW` (default 4h against a 24h
-> `SETTLE_TIMEOUT`; it must be strictly less) and update the table below.
-> `SETTLE_CONFIRMATIONS` (server-side, default 1) is the separate dial for how
-> many blocks a money-backed write waits before it is treated as real.
+> Production's `ESCROW_ADDR` is confirmed to be v2: `GET /config` reported
+> `escrow` = `0x7a53…4D68` after the 2026-10-17 server deploy (Fly v104). That
+> had to be read from the server, because the oracle's only escrow transactions
+> ever (two `openTournament` calls, 2026-08-09) went to **v1**, a day before v2
+> existed. To check a deployment against a ref, run
+> `.claude/skills/test-openchess/scripts/verify-deployed.py <address>`.
+> `SETTLE_CONFIRMATIONS` (server-side, default 1) is the dial for how many
+> blocks a money-backed write waits before it is treated as real.
 
 ## Base mainnet (chain 8453) — **v2, live**
 
@@ -63,9 +44,8 @@
 Adds tournament sponsorship (`sponsorTournament`, `refundSponsorship`,
 `sponsorship`), a buy-in that may be zero so entry can be free, and a
 `claimRefund` guard for that case. This is what `ESCROW_ADDR` should point at
-(see the note above on confirming it). Its ABI and bytecode are frozen in
-`crates/ledger/abi/ChessEscrowV2.json` for the compatibility test;
-`ChessEscrow.json` is vendored from the newer source.
+(confirmed, see the note above). `contracts/src/ChessEscrow.sol` and the
+vendored `crates/ledger/abi/ChessEscrow.json` are this contract.
 
 | Parameter | Value |
 |---|---|
