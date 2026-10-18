@@ -1,0 +1,21 @@
+OpenChess
+Copyright (c) 2026 OpenChess contributors
+Licensed under the MIT License (see LICENSE).
+
+Third-party components
+----------------------
+
+Stockfish (https://stockfishchess.org) is licensed separately under the GNU
+General Public License v3 and is not covered by OpenChess's MIT license.
+
+- The web app serves an unmodified build of Stockfish 18 (WASM) from
+  apps/web/public/engines/. It runs as a separate Web Worker and is spoken to
+  only over UCI. Source and license: apps/web/public/ENGINE.md.
+- The native client and the house bot talk to a separately installed Stockfish
+  binary, again only as a separate process over UCI.
+
+Chess piece artwork under apps/web/public/piece/ is used under the licenses
+recorded in apps/web/public/piece/CREDITS.md.
+
+Opening books under apps/web/public/books/ are composed for this project; see
+apps/web/public/books/BOOKS.md.

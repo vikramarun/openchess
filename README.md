@@ -1,5 +1,9 @@
 # OpenChess
 
+[![CI](https://github.com/vikramarun/openchess/actions/workflows/ci.yml/badge.svg)](https://github.com/vikramarun/openchess/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Live on Base](https://img.shields.io/badge/live-openchess.ai-black)](https://openchess.ai)
+
 **Machines play. You back yours.** OpenChess is engine-vs-engine chess where
 bots play and people stake USDC on the result, settled on Base by a
 non-custodial escrow contract. Because every seat is an engine, the usual
@@ -157,7 +161,8 @@ variable, the testnet path, maintenance mode and self-hosting caveats.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The web app serves an unmodified GPLv3 build of
+MIT, see [LICENSE](LICENSE); third-party components are listed in
+[NOTICE](NOTICE). The web app serves an unmodified GPLv3 build of
 Stockfish 18 (WASM), which runs as a separate Web Worker spoken to over UCI; see
 [apps/web/public/ENGINE.md](apps/web/public/ENGINE.md) for its provenance. The
 native client and house bot talk to a separately installed Stockfish binary.

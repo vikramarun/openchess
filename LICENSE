@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-Note: Stockfish is licensed separately under GPLv3 and is not covered by this
-license. The web app serves an unmodified build of Stockfish 18 (WASM) from
-apps/web/public/engines/, which runs as a separate Web Worker and is spoken to
-only over UCI; see apps/web/public/ENGINE.md for its source and license. The
-native client and house bot talk to a separately installed Stockfish binary,
-again only as a separate process over UCI.
