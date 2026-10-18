@@ -6,13 +6,31 @@
 //! is still fresh (single-use; expires via sweep), and the recovered signer
 //! equals the address stated in the message. Then we mint a TTL'd session token
 //! bound to that wallet.
+//!
+//! A session reaches us one of two ways, and `presented_session` is the only
+//! place that reads either:
+//!
+//! - `Authorization: Bearer <token>` — the native `chess-client` and the house
+//!   bot. The token travels in the response body and the caller keeps it.
+//! - The `__Host-openchess_session` cookie — the web app. httpOnly, so script on
+//!   the page (an XSS) can never read it, which is the whole point: a session
+//!   commits its wallet's escrow balance to staked games, so a stolen token used
+//!   to be stealable money. The web app is the ONLY cookie client, and the
+//!   cookie only counts when the request also carries `X-OpenChess-Session` and
+//!   comes from `WEB_ORIGIN` (see `presented_session` for why both).
+//!
+//! The cookie is SameSite=Strict and host-only, so it needs the API on the same
+//! SITE as the web app (`api.openchess.ai` beside `openchess.ai`); from
+//! `openchess.fly.dev` it would be a third-party cookie that Safari drops.
+//! SECURITY.md records the design and the alternatives it beat.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -34,6 +52,100 @@ fn expected_chain_id() -> String {
     std::env::var("SIWE_CHAIN_ID").unwrap_or_else(|_| "8453".into())
 }
 
+/// The web app's full origin. It is both the CORS allow-origin (`main.rs`) and
+/// the only `Origin` a session cookie is honoured from.
+pub(crate) fn web_origin() -> String {
+    std::env::var("WEB_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into())
+}
+
+/// The web session cookie. `__Host-` makes the browser refuse it unless it is
+/// Secure, `Path=/` and has no `Domain` — so it is pinned to the API host and no
+/// sibling subdomain can set or shadow it.
+pub(crate) const SESSION_COOKIE: &str = "__Host-openchess_session";
+
+/// Sent by the web app on every request it means to be signed in. Two jobs:
+///
+/// - **CSRF.** A custom header can't be set by a cross-site form or `<img>`,
+///   and on a cross-origin `fetch` it forces a CORS preflight that only
+///   `WEB_ORIGIN` passes. A cookie without it is ignored.
+/// - **"I am presenting a credential."** The browser can't read the httpOnly
+///   cookie, and it may have dropped it (expiry, cleared site data). Without a
+///   way to say "I meant to be signed in", a missing cookie would downgrade the
+///   caller to anonymous — the exact footgun `authed_wallet_strict` exists to
+///   refuse. With it, header-but-no-valid-cookie is a 401, like a stale bearer.
+pub(crate) const SESSION_HEADER: &str = "x-openchess-session";
+
+/// What credential a request offered.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Presented {
+    /// Nothing: a genuinely anonymous caller.
+    None,
+    /// A session token to look up (from the bearer or the cookie).
+    Token(String),
+    /// Something was offered and it can't be a session: a malformed
+    /// `Authorization`, or the session header with no cookie / the wrong
+    /// `Origin`. Strict callers 401 on it.
+    Invalid,
+}
+
+/// The single reader of a request's session credential.
+///
+/// The bearer wins when present: it is explicit, and it is how the native
+/// client (which never has the cookie) authenticates. Otherwise the cookie
+/// counts only alongside `SESSION_HEADER` and an `Origin` equal to
+/// `WEB_ORIGIN`. The `Origin` check is belt-and-braces over the preflight the
+/// header already forces: it keeps the cookie bound to the web app even if the
+/// CORS layer is ever loosened. A browser always sends `Origin` here, because
+/// the web app and the API are different origins.
+pub(crate) fn presented_session(headers: &HeaderMap) -> Presented {
+    if let Some(value) = headers.get(header::AUTHORIZATION) {
+        return match value.to_str().ok().and_then(|v| v.strip_prefix("Bearer ")) {
+            Some(token) => Presented::Token(token.to_string()),
+            None => Presented::Invalid,
+        };
+    }
+    if !headers.contains_key(SESSION_HEADER) {
+        // A cookie on its own authenticates nothing (see SESSION_HEADER).
+        return Presented::None;
+    }
+    let origin_ok = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|o| o == web_origin());
+    if !origin_ok {
+        return Presented::Invalid;
+    }
+    match session_cookie(headers) {
+        Some(token) => Presented::Token(token),
+        None => Presented::Invalid,
+    }
+}
+
+/// The session cookie's value, across every `Cookie` header (HTTP/2 may split
+/// them).
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == SESSION_COOKIE)
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// `Set-Cookie` for a web session. Max-Age matches the server TTL; the server
+/// is still the authority (a restart voids every session long before that).
+fn session_set_cookie(token: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
+        SESSION_TTL.as_secs()
+    ))
+    // A token is 32 hex chars, so this can't fail; never panic on a sign-in.
+    .unwrap_or_else(|_| HeaderValue::from_static(""))
+}
+
 #[derive(Default)]
 pub struct Auth {
     nonces: Mutex<HashMap<String, Instant>>,
@@ -44,6 +156,11 @@ pub struct Auth {
 }
 
 impl Auth {
+    /// End a session (sign-out). Unknown tokens are a no-op.
+    pub fn revoke(&self, token: &str) {
+        self.sessions.lock().remove(token);
+    }
+
     pub fn wallet_for_token(&self, token: &str) -> Option<String> {
         let sessions = self.sessions.lock();
         let (wallet, issued) = sessions.get(token)?;
@@ -99,6 +216,8 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/nonce", get(nonce))
         .route("/auth/verify", post(verify))
         .route("/auth/me", get(me))
+        .route("/auth/cookie", post(adopt_cookie))
+        .route("/auth/logout", post(logout))
         .route("/auth/link", post(link))
         .route("/auth/link/claim", post(link_claim))
 }
@@ -123,18 +242,25 @@ async fn nonce(State(state): State<AppState>) -> Json<NonceResp> {
 struct VerifyReq {
     message: String,
     signature: String,
+    /// The web app asks for its session as an httpOnly cookie instead of a
+    /// token in the body. The native client omits it and keeps the bearer.
+    #[serde(default)]
+    cookie: bool,
 }
 
 #[derive(Serialize)]
 struct VerifyResp {
-    token: String,
+    /// Absent when the session went into the cookie: a token in the body is one
+    /// a script on the page could read, which is what the cookie is avoiding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     address: String,
 }
 
 async fn verify(
     State(state): State<AppState>,
     Json(req): Json<VerifyReq>,
-) -> Result<Json<VerifyResp>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let fields = SiweFields::parse(&req.message).ok_or(StatusCode::BAD_REQUEST)?;
 
     // Fail closed on misconfig: a real (onchain) deployment must set SIWE_DOMAIN
@@ -169,10 +295,68 @@ async fn verify(
     }
 
     let token = state.0.auth.mint_session(&recovered);
-    Ok(Json(VerifyResp {
-        token,
-        address: recovered,
-    }))
+    Ok(session_response(token, recovered, req.cookie))
+}
+
+/// A freshly minted session, as a cookie (web) or a body token (native).
+fn session_response(token: String, address: String, cookie: bool) -> Response {
+    if cookie {
+        (
+            [(header::SET_COOKIE, session_set_cookie(&token))],
+            Json(VerifyResp {
+                token: None,
+                address,
+            }),
+        )
+            .into_response()
+    } else {
+        Json(VerifyResp {
+            token: Some(token),
+            address,
+        })
+        .into_response()
+    }
+}
+
+/// Move a bearer session into the cookie: `POST` with `Authorization: Bearer`.
+///
+/// For one migration only. Web sessions used to live in `localStorage`, and a
+/// returning visitor still holding one must not be signed out by the deploy
+/// that stops storing it — so the web app trades it here once and deletes its
+/// copy. The same token is reused rather than rotated: a lost response then
+/// leaves the client's retry working instead of 401ing it out of a live
+/// session. Bearer-only on purpose; there is nothing to adopt from a cookie.
+async fn adopt_cookie(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .to_string();
+    let address = state
+        .0
+        .auth
+        .wallet_for_token(&token)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(session_response(token, address, true))
+}
+
+/// End the presented session (cookie or bearer). Always 204: signing out of a
+/// session that already died is not an error.
+///
+/// Deliberately sends no clearing `Set-Cookie`. The web app fires this
+/// without waiting and may sign straight back in (an account switch), so a
+/// clearing header landing after the new sign-in's response would delete the
+/// NEW cookie. The dead cookie left behind is inert: revoked here, and the web
+/// app stops sending it (and the session header) the moment it signs out.
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
+    if let Presented::Token(token) = presented_session(&headers) {
+        state.0.auth.revoke(&token);
+    }
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Serialize)]
@@ -214,7 +398,7 @@ async fn link_claim(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let token = state.0.auth.mint_session(&wallet);
     Ok(Json(VerifyResp {
-        token,
+        token: Some(token),
         address: wallet,
     }))
 }
@@ -224,16 +408,11 @@ struct MeResp {
     address: String,
 }
 
+/// The wallet the presented session belongs to. The web app calls it right
+/// after sign-in to prove the cookie actually stuck (it can't read the cookie).
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeResp>, StatusCode> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
     let address = state
-        .0
-        .auth
-        .wallet_for_token(token)
+        .authed_wallet(&headers)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Json(MeResp { address }))
 }

@@ -5,6 +5,7 @@
 import { formatUnits, parseUnits } from "viem";
 
 import { SERVER_HTTP } from "./config";
+import { forgetLegacyBearer, revokeSession } from "./session";
 import { clearKey, readMigrated, writeKey } from "./storage";
 
 export const USDC_DECIMALS = 6;
@@ -85,36 +86,41 @@ export async function fetchConfig(): Promise<OnchainConfig | null> {
   }
 }
 
-/** Fired (same-tab) whenever the stored session changes, so useAuthToken
- *  subscribers re-read instead of snapshotting a stale token. Cross-tab changes
- *  arrive via the native `storage` event. */
+/** Fired (same-tab) whenever the session changes, so useSession subscribers
+ *  re-read instead of snapshotting a stale value. Cross-tab changes arrive via
+ *  the native `storage` event. */
 export const AUTH_EVENT = "chess-auth-changed";
 
 function notifyAuthChanged() {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(AUTH_EVENT));
 }
 
-/** The stored SIWE session token (set by the sign-in flow). */
-export function authToken(): string | null {
-  return readMigrated("token");
-}
-
-/** The wallet address the stored session was issued for (lowercased), or null. */
+/** The wallet this browser holds a session for (lowercased), or null when
+ *  signed out. This is the "signed in" signal for the whole UI.
+ *
+ *  It is a MARKER, not a credential: the session itself is an httpOnly cookie
+ *  (lib/session.ts) that no script can read, so stealing this value gets an
+ *  attacker a public address and nothing else. The server is the authority —
+ *  a marker whose cookie has died 401s on the next authed call, and
+ *  `authedFetch` drops it. */
 export function authAddress(): string | null {
   return readMigrated("addr");
 }
 
-/** Persist a SIWE session bound to the wallet it was issued for, and notify
- *  subscribers. */
-export function setAuth(token: string, address: string) {
+/** Record a session the server just issued (its cookie is already set) for the
+ *  wallet it was issued to, and notify subscribers. */
+export function setAuth(address: string) {
   if (typeof window === "undefined") return;
-  writeKey("token", token);
   writeKey("addr", address.toLowerCase());
+  // Whatever bearer an older version stored is superseded by the cookie.
+  forgetLegacyBearer();
   notifyAuthChanged();
 }
 
-/** Drop the stored SIWE session (on disconnect, account switch, a 401, the
- *  stale-session auto-logout — every way a session ends, chosen or not).
+/** Drop the session (on disconnect, account switch, a 401, the stale-session
+ *  auto-logout — every way a session ends, chosen or not), and revoke it on the
+ *  server: the page can't delete the httpOnly cookie itself, and a sign-out
+ *  that left the session live would be one in name only.
  *
  *  Deliberately ONE function for all of them. The sign-in gate does not care
  *  which path cleared the session: it re-walls gated pages whenever the visitor
@@ -125,6 +131,10 @@ export function setAuth(token: string, address: string) {
  *  from a wallet-side disconnect at this layer. */
 export function clearAuth() {
   if (typeof window === "undefined") return;
+  // Revoke while the request can still present the session (it reads the
+  // legacy bearer, if any, before it is deleted below). Only when there was a
+  // session: a sign-out on a signed-out page has nothing to end.
+  if (authAddress() || readMigrated("token")) revokeSession();
   clearKey("token");
   clearKey("addr");
   notifyAuthChanged();

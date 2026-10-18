@@ -18,6 +18,8 @@ The 25 USDC stake cap is the guardrail standing in for them.
 - **Owner.** The contract owner is a hardware wallet. The `Ownable2Step`
   transfer has been accepted.
 - **TLS.** HTTPS for the web app and the server, WSS for game sockets.
+- **Web sessions are httpOnly cookies** (code). The live cutover is the
+  unchecked item below.
 - **Strict boot.** `REQUIRE_ONCHAIN=1` makes the server refuse to boot unless
   Postgres, onchain settlement, `SIWE_DOMAIN` and `WEB_ORIGIN` are all
   configured.
@@ -36,6 +38,10 @@ The 25 USDC stake cap is the guardrail standing in for them.
 - [ ] **Oracle key in a KMS/HSM.** Today `ORACLE_KEY` is a plaintext secret.
   Signing is a single `sign_hash` call on a digest the contract computes, so
   swapping in an external signer (alloy supports AWS KMS) is mechanical.
+- [ ] **Serve the API at `api.openchess.ai`.** The web session is a
+  `SameSite=Strict` cookie, which only works with the API on the same site as
+  the web app. Until the cutover below, production keeps running the previous
+  web build, with its `localStorage` token.
 - [ ] **Multisig owner, with `setOracle` behind a timelock.** Without these, an
   oracle rotation takes effect instantly.
 - [ ] **A multisig or threshold oracle**, which needs ERC-1271 support in the
@@ -158,6 +164,35 @@ fail closed: they're refused, not lost. Keep it funded and watch the balance.
 On the server, set `WEB_ORIGIN` to the web app's full origin (used for CORS), and
 `SIWE_DOMAIN` to its host. The host must equal the browser's URL exactly.
 
+### The API must be on the web app's site
+
+The web session is an httpOnly `SameSite=Strict` cookie set by the game server
+([SECURITY.md](../SECURITY.md#trust-model)), so the browser only sends it to a
+server on the same site as the web app: `api.openchess.ai` beside
+`openchess.ai`, not `openchess.fly.dev` (`fly.dev` is a public suffix, so every
+Fly app is its own site). A production Vercel build refuses to build when
+`NEXT_PUBLIC_SERVER_HTTP` isn't an https origin on the same site as
+`NEXT_PUBLIC_SITE_URL`. A failed build leaves the previous deployment live.
+
+The cutover, in this order. Every step before the last keeps the current web
+build working, because the server still accepts bearer tokens:
+
+1. Deploy the server (`./scripts/deploy-server.sh`). It adds the cookie routes
+   and credentialed CORS. The bearer path is unchanged.
+2. `fly certs add api.openchess.ai`, then create the DNS record Fly prints (a
+   CNAME to `openchess.fly.dev`, or A/AAAA to the app's IPs). Wait for
+   `fly certs show api.openchess.ai` to report the certificate issued.
+3. On Vercel (production), set `NEXT_PUBLIC_SERVER_HTTP=https://api.openchess.ai`
+   and `NEXT_PUBLIC_SERVER_WS=wss://api.openchess.ai`, and redeploy the current
+   build. It still uses bearer tokens, now against the new host.
+4. Merge the web change. The new build signs in with the cookie and moves
+   anyone still holding a `localStorage` token over to it without signing them
+   out.
+
+Local dev works the same way: the page is `http://localhost:3000`, so the
+API has to be `http://localhost:8080` (the default), not `127.0.0.1`, which is a
+different site. Chrome and Firefox accept a `Secure` cookie on `localhost`.
+
 ### Dynamic (sign-in)
 
 In the [Dynamic dashboard](https://app.dynamic.xyz), for each environment:
@@ -255,7 +290,7 @@ Anvil.
 | `RPC_URL`, `ESCROW_ADDR`, `ORACLE_KEY` | — | Onchain settlement. If any is missing, the server logs settlements instead and refuses every stake |
 | `SIWE_DOMAIN` | — | Must equal the web app's host |
 | `SIWE_CHAIN_ID` | `8453` | Chain expected in SIWE messages (84532 for Base Sepolia) |
-| `WEB_ORIGIN` | — | CORS allow-origin: the web app's full origin |
+| `WEB_ORIGIN` | — | CORS allow-origin: the web app's full origin. Also the only `Origin` a session cookie is accepted from |
 | `REQUIRE_ONCHAIN` | off | `1` refuses to boot unless the database, onchain settlement, `SIWE_DOMAIN` and `WEB_ORIGIN` are all set |
 | `HOUSE_WALLET` | — | The house bot's address. Without it, quick play falls back to the `/play` demo |
 | `HOUSE_USERNAME` | `HouseBot` | Username granted to `HOUSE_WALLET` at boot. It's reserved for everyone else |
@@ -281,7 +316,7 @@ Anvil.
 
 | Variable | Purpose |
 |---|---|
-| `NEXT_PUBLIC_SERVER_HTTP` | The game server's HTTPS origin |
+| `NEXT_PUBLIC_SERVER_HTTP` | The game server's HTTPS origin. Must be on the same site as the web app (`https://api.openchess.ai`), or the session cookie is never sent |
 | `NEXT_PUBLIC_SERVER_WS` | The game server's WSS origin |
 | `NEXT_PUBLIC_DYNAMIC_ENV_ID` | Dynamic environment id: sandbox for previews, live for production |
 | `NEXT_PUBLIC_SITE_URL` | Canonical origin for metadata and share cards. Defaults to production, so set it on previews |

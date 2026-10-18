@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { loadBotOptions, saveBotOptions, useBotStatus } from "@/lib/bot";
 import { authedFetch } from "@/lib/authedFetch";
 import { GITHUB_REPO, SERVER_HTTP } from "@/lib/config";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 
 /** Prebuilt client binaries published by .github/workflows/release.yml —
  *  artifact names there are load-bearing for these URLs (the workflow's
@@ -39,7 +39,7 @@ function guessPlatform(): (typeof DOWNLOADS)[number]["key"] | "mobile" {
 export function ConnectEngine() {
   // Reactive: reflects a sign-in / sign-out that happens on the same page (e.g.
   // the header AuthButton on /profile) without a reload.
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const [code, setCode] = useState<string | null>(null);
   const [codeErr, setCodeErr] = useState<string | null>(null);
   const [enginePath, setEnginePath] = useState("stockfish");
@@ -61,11 +61,11 @@ export function ConnectEngine() {
   useEffect(() => {
     setCode(null);
     setCodeErr(null);
-  }, [token]);
+  }, [sessionWallet]);
 
   // Signed in → mint the pairing code automatically (single-use, 10 min).
   useEffect(() => {
-    if (!token || code) return;
+    if (!sessionWallet || code) return;
     (async () => {
       try {
         const r = await authedFetch(`${SERVER_HTTP}/auth/link`, { method: "POST" });
@@ -75,10 +75,10 @@ export function ConnectEngine() {
         setCodeErr("Server unreachable.");
       }
     })();
-  }, [token, code]);
+  }, [sessionWallet, code]);
 
   // Live status: flips to "online" the moment the client connects (poll fast).
-  const bot = useBotStatus(token, 3000);
+  const bot = useBotStatus(sessionWallet, 3000);
 
   const isWindows = platform === "windows-x64";
   const command = useMemo(() => {
@@ -259,7 +259,7 @@ export function ConnectEngine() {
 
           <div className="panel" style={{ marginBottom: 16 }}>
             <b style={{ color: "var(--text-strong)" }}>2 · Run it</b>
-            {!token && (
+            {!sessionWallet && (
               <p className="muted" style={{ fontSize: 14 }}>
                 <b>Sign in with your wallet first</b> (top right). Bots are wallet-bound, so your
                 games count toward your profile and can carry stakes. A single-use pairing code is
@@ -297,7 +297,7 @@ export function ConnectEngine() {
               {copied ? "Copied ✓" : code ? "Copy command" : "Sign in to get the command"}
             </button>
             {codeErr && <div style={{ color: "#e06c6c", fontSize: 13, marginTop: 8 }}>{codeErr}</div>}
-            {token && (
+            {sessionWallet && (
               <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
                 Waiting for your bot to connect… this page updates the moment it's online. The
                 code is single-use and expires in 10 minutes; reload for a fresh one. Headless

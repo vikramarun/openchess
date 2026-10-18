@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { cooldownMessage, USERNAME_MAX, validateUsername } from "@/lib/username";
 import { checkAvailable, setUsername } from "@/lib/usernameApi";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 
 /** Claim or change the signed-in wallet's username.
  *
@@ -23,7 +23,7 @@ export function UsernameEditor({
   nextChangeAt: string | null;
   onChanged: () => void;
 }) {
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -59,7 +59,7 @@ export function UsernameEditor({
     };
   }, [trimmed, open, locked, unchanged, check?.ok]);
 
-  if (!token) {
+  if (!sessionWallet) {
     return (
       <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
         Sign in to pick a username.

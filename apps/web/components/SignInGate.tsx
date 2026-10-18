@@ -8,7 +8,7 @@ import { useAccount } from "wagmi";
 import { dynamicConfigured } from "@/lib/dynamicEnv";
 import { useLiveSeats } from "@/lib/liveSeat";
 import { markSignInIntent } from "@/lib/signInIntent";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 import { useMounted } from "@/lib/useMounted";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 
@@ -21,7 +21,7 @@ export type AuthState = "checking" | "in" | "out";
 /** Is this visitor signed in enough to be seated?
  *
  *  A held SIWE session answers "yes" immediately, with no wait on `/config` —
- *  that is the whole reason this isn't `!!token && configLoaded`. Every route
+ *  that is the whole reason this isn't `!!sessionWallet && configLoaded`. Every route
  *  that matters is gated on this hook, so making a returning player watch a
  *  round trip before their own lobby renders would tax the common case to serve
  *  the empty one.
@@ -37,11 +37,11 @@ export type AuthState = "checking" | "in" | "out";
  *  strongest credential that exists — resolves one config fetch later. */
 export function useAuthState(): AuthState {
   const mounted = useMounted();
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const { config, wagerOn } = useOnchainConfig();
   const { isConnected, address } = useAccount();
 
-  if (token) return "in";
+  if (sessionWallet) return "in";
   // The one genuinely unknowable moment: localStorage is client-only, so the
   // server render and the first client render cannot see a session that exists.
   if (!mounted) return "checking";
@@ -119,7 +119,7 @@ export function SignInGate({
  *  is signed out with no board open. The two halves matter equally.
  *
  *  Why the hold exists: these children own live games. `<SeatGame>` lives under
- *  here, so any of the ordinary ways a token disappears mid-game — `authedFetch`
+ *  here, so any of the ordinary ways a session disappears mid-game — `authedFetch`
  *  dropping a stale one on a 401, the 24h session TTL lapsing, a wallet
  *  disconnect or account switch in the header firing `clearAuth` — would
  *  otherwise unmount the board and close its socket. A seat that is GONE
@@ -163,7 +163,7 @@ export function RequireSignIn({
   if (state === "in" && !admitted) setAdmitted(true);
   // The un-latch, same discipline. Signed out AND no live board → the wall is
   // the truth again, whichever way the session ended (our sign-out button,
-  // Dynamic's widget, a wallet disconnect, a 401 dropping the token). While a
+  // Dynamic's widget, a wallet disconnect, a 401 dropping the session). While a
   // board is open the latch holds and the game is untouchable — see the
   // component comment and lib/liveSeat.ts.
   if (state === "out" && admitted && liveSeats === 0) setAdmitted(false);

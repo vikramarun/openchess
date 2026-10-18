@@ -44,6 +44,17 @@ has the full table.
     the two players in that game.
   - **Tournaments.** The contract checks that payouts don't exceed the pool,
     not who they go to. A compromised key could pay a tournament pool to anyone.
+- **Sessions: an httpOnly cookie.** Signing in gives the browser a session
+  cookie (`__Host-openchess_session`: `HttpOnly`, `Secure`, `SameSite=Strict`,
+  host-only, 24h) that no script on the page can read. A session can commit its
+  wallet's escrow balance to staked games, so a session readable by script would
+  let any XSS steal it and stake from anywhere. The cookie only authenticates a
+  request that also carries the `X-OpenChess-Session` header and comes from the
+  web app's own origin, which blocks cross-site request forgery. An XSS that
+  ran while you had the page open could still act as you *in that tab*. That's
+  true of any browser session, and the Content-Security-Policy is the defence
+  against it. Signing out revokes the session on the server. The native
+  `chess-client` uses a bearer token, which you hold yourself.
 - **Administration: the owner.** A single hardware wallet. It can:
   - rotate the oracle immediately (no timelock);
   - set the rake, up to 10%;
@@ -56,13 +67,10 @@ has the full table.
 These are deliberate, documented, and the reason stakes are capped at 25 USDC
 (server-enforced):
 
-- **No third-party audit** of the contract. There have been eight rounds of
+- **No third-party audit** of the contract. There have been nine rounds of
   internal review; see [docs/security-reviews.md](docs/security-reviews.md).
 - **The oracle key is a hot key** held as a server secret, not in a KMS/HSM, and
   it isn't a multisig or threshold signer.
-- **Session tokens are stored in `localStorage`.** Any XSS could steal one, and
-  a stolen session can stake its wallet's escrow balance in games. Moving to an
-  httpOnly cookie is planned.
 - **Launch tokens ride in the WebSocket URL's query string.** A leaked one lets
   someone play, and throw, that seat. It can't redirect the payout, which is
   bound to the seat's wallet when the escrow opens.

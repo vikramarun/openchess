@@ -22,7 +22,7 @@ import {
   seatColor,
   type OfferGroup,
 } from "@/lib/offers";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 import { useAvailable } from "@/lib/useBankroll";
 import { useOnchainConfig } from "@/lib/useOnchainConfig";
 import { TC_NAME, TIME_CONTROLS, tcLabel, type TimeControl } from "@/lib/timeControls";
@@ -111,7 +111,7 @@ export function Lobby({
 }) {
   const router = useRouter();
   const { address } = useAccount();
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const { config, wagerOn } = useOnchainConfig();
   const [offers, setOffers] = useState<Offer[]>([]);
   const [live, setLive] = useState<LiveGame[]>([]);
@@ -124,7 +124,7 @@ export function Lobby({
   const [active, setActive] = useState<Active | null>(null);
   const [useBot, setUseBot] = useState(true); // prefer the bot when it's online
 
-  const bot = useBotStatus(token);
+  const bot = useBotStatus(sessionWallet);
   const botPlays = bot.online && useBot;
 
   useEffect(() => {
@@ -223,7 +223,7 @@ export function Lobby({
       alive = false;
       clearInterval(t);
     };
-  }, [pending, token]);
+  }, [pending, sessionWallet]);
 
   const { available } = useAvailable(config?.escrow);
 
@@ -291,12 +291,12 @@ export function Lobby({
     let stakeBase: string | undefined;
     const wantStake = stakeStr.trim().length > 0;
     if (wantStake) {
-      if (!token) return setErr("Connect a wallet and sign in to stake.");
+      if (!sessionWallet) return setErr("Connect a wallet and sign in to stake.");
       const amt = tryParse(stakeStr);
       if (amt == null || amt <= 0n) return setErr("Enter a valid USDC stake.");
       stakeBase = amt.toString();
     }
-    if (botPlays && !token) return setErr("Sign in to play with your bot.");
+    if (botPlays && !sessionWallet) return setErr("Sign in to play with your bot.");
     // Prove the engine works BEFORE any money is committed. Building it after
     // the offer is accepted means a failed 7 MB download forfeits an escrowed
     // stake through the server's never-started reap — and nothing about that
@@ -356,8 +356,8 @@ export function Lobby({
     const o = group.offer;
     setErr(null);
     const wagered = !!o.stake;
-    if (wagered && !token) return setErr("Connect a wallet and sign in to join a staked game.");
-    if (botPlays && !token) return setErr("Sign in to play with your bot.");
+    if (wagered && !sessionWallet) return setErr("Connect a wallet and sign in to join a staked game.");
+    if (botPlays && !sessionWallet) return setErr("Sign in to play with your bot.");
     if (!botPlays) {
       // Same gate on the accept side: accepting locks stakes immediately.
       try {

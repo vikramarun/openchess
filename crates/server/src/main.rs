@@ -55,6 +55,20 @@ pub const MAX_STAKE: u128 = 25_000_000;
 /// enough that one unresponsive agent cannot stall a tournament round.
 pub const AGENT_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// CORS for the one web origin, WITH credentials: the web app's session is an
+/// httpOnly cookie (`auth.rs`), and a browser neither sends it on a
+/// cross-origin `fetch` nor lets the page read the response unless the server
+/// says `Allow-Credentials: true`. That forbids the `*` wildcards this layer
+/// used to have (tower-http panics on the combination), so methods and headers
+/// mirror the preflight instead — safe only because the origin is pinned.
+fn cors_layer(origin: axum::http::HeaderValue) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(origin)
+        .allow_credentials(true)
+        .allow_methods(tower_http::cors::AllowMethods::mirror_request())
+        .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
+}
+
 #[derive(Clone)]
 pub struct AppState(pub Arc<Inner>);
 
@@ -434,7 +448,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Restrict CORS to the configured web origin (no permissive on a money API).
     // A malformed WEB_ORIGIN logs and falls back rather than panicking at boot.
-    let web_origin = std::env::var("WEB_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".into());
+    let web_origin = auth::web_origin();
     let origin_val = web_origin
         .parse::<axum::http::HeaderValue>()
         .unwrap_or_else(|_| {
@@ -443,10 +457,7 @@ async fn main() -> anyhow::Result<()> {
             );
             "http://localhost:3000".parse().unwrap()
         });
-    let cors = CorsLayer::new()
-        .allow_origin(origin_val)
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any);
+    let cors = cors_layer(origin_val);
 
     let app = Router::new()
         // Friendly root so the API doesn't 404 (Fly's post-deploy smoke test
@@ -1680,14 +1691,13 @@ impl AppState {
         self.0.tokens.lock().get(token).copied()
     }
 
-    /// The authenticated wallet for a request, from its `Authorization: Bearer`.
+    /// The authenticated wallet for a request: its `Authorization: Bearer`, or
+    /// the web app's session cookie (`auth::presented_session` reads both).
     pub fn authed_wallet(&self, headers: &HeaderMap) -> Option<String> {
-        let token = headers
-            .get("authorization")?
-            .to_str()
-            .ok()?
-            .strip_prefix("Bearer ")?;
-        self.0.auth.wallet_for_token(token)
+        match auth::presented_session(headers) {
+            auth::Presented::Token(token) => self.0.auth.wallet_for_token(&token),
+            auth::Presented::None | auth::Presented::Invalid => None,
+        }
     }
 
     /// Like `authed_wallet`, but tells "no credential offered" apart from "a
@@ -1702,20 +1712,23 @@ impl AppState {
     /// production as the house bot repeatedly joining its own challenge and
     /// having the game rejected for same-wallet seats. Fail loudly instead, so
     /// the caller re-authenticates rather than posting as a stranger.
+    ///
+    /// The web app's cookie session keeps the same contract: it sends
+    /// `X-OpenChess-Session` whenever it believes it is signed in, so a cookie
+    /// that expired, was cleared, or never stuck is a 401 here — never a
+    /// silent downgrade to anonymous.
     pub fn authed_wallet_strict(&self, headers: &HeaderMap) -> Result<Option<String>, StatusCode> {
-        let Some(value) = headers.get("authorization") else {
-            return Ok(None); // genuinely anonymous — legitimate for casual play
-        };
-        let token = value
-            .to_str()
-            .ok()
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-        self.0
-            .auth
-            .wallet_for_token(token)
-            .map(Some)
-            .ok_or(StatusCode::UNAUTHORIZED)
+        match auth::presented_session(headers) {
+            // Genuinely anonymous — legitimate for casual play.
+            auth::Presented::None => Ok(None),
+            auth::Presented::Invalid => Err(StatusCode::UNAUTHORIZED),
+            auth::Presented::Token(token) => self
+                .0
+                .auth
+                .wallet_for_token(&token)
+                .map(Some)
+                .ok_or(StatusCode::UNAUTHORIZED),
+        }
     }
 
     /// Whether the server is in maintenance/drain mode (no new games).
@@ -2225,6 +2238,360 @@ mod tests {
         assert_eq!(
             state.authed_wallet_strict(&h),
             Ok(Some("0xabc".to_string()))
+        );
+    }
+
+    // ---- Web sessions as an httpOnly cookie (auth.rs `presented_session`) ----
+
+    /// What the web app sends on a request it means to be signed in: the
+    /// cookie, the session header, and (the browser adds it) its `Origin`.
+    fn web_session(token: &str, origin: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "cookie",
+            format!("theme=dark; {}={token}", auth::SESSION_COOKIE)
+                .parse()
+                .unwrap(),
+        );
+        h.insert(auth::SESSION_HEADER, "1".parse().unwrap());
+        h.insert("origin", origin.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn a_web_session_cookie_authenticates_from_the_web_origin() {
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let h = web_session(&token, &auth::web_origin());
+        assert_eq!(state.authed_wallet(&h), Some("0xabc".into()));
+        assert_eq!(state.authed_wallet_strict(&h), Ok(Some("0xabc".into())));
+    }
+
+    #[test]
+    fn a_cookie_without_the_session_header_authenticates_nothing() {
+        // CSRF: a cross-site form post carries the cookie (were SameSite ever
+        // relaxed) but can't add a custom header. Ignored, not 401'd — this is
+        // also what a leftover cookie after sign-out looks like, and the web app
+        // stops sending both together the moment it signs out.
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let mut h = web_session(&token, &auth::web_origin());
+        h.remove(auth::SESSION_HEADER);
+        assert_eq!(state.authed_wallet(&h), None);
+        assert_eq!(state.authed_wallet_strict(&h), Ok(None));
+    }
+
+    #[test]
+    fn a_cookie_from_another_origin_is_refused() {
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let h = web_session(&token, "https://evil.example");
+        assert_eq!(state.authed_wallet(&h), None);
+        assert_eq!(
+            state.authed_wallet_strict(&h).err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+        // No Origin at all is refused the same way.
+        let mut h = web_session(&token, &auth::web_origin());
+        h.remove("origin");
+        assert_eq!(
+            state.authed_wallet_strict(&h).err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn a_web_session_whose_cookie_is_gone_401s_instead_of_going_anonymous() {
+        // The cookie version of `strict_auth_rejects_a_stale_bearer…`. The web
+        // app can't read its httpOnly cookie, so the session header is how it
+        // says "I meant to be signed in": expired, cleared, or never set, the
+        // answer must be a 401 the client self-heals on — not an anonymous post.
+        let state = test_state(false, None);
+        let mut h = web_session("unused", &auth::web_origin());
+        h.remove("cookie");
+        assert_eq!(
+            state.authed_wallet_strict(&h).err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+
+        // A cookie naming a session this process never issued (every restart).
+        let h = web_session("not-a-real-session", &auth::web_origin());
+        assert_eq!(
+            state.authed_wallet_strict(&h).err(),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn the_bearer_still_wins_for_the_native_client() {
+        // chess-client and the house bot never have the cookie. A bearer is
+        // explicit, so it decides even when a cookie rides along.
+        let state = test_state(false, None);
+        let web = state.0.auth.mint_session("0xweb");
+        let native = state.0.auth.mint_session("0xnative");
+        let mut h = web_session(&web, &auth::web_origin());
+        h.insert("authorization", format!("Bearer {native}").parse().unwrap());
+        assert_eq!(state.authed_wallet_strict(&h), Ok(Some("0xnative".into())));
+        assert_eq!(
+            state.authed_wallet(&bearer(&native)),
+            Some("0xnative".into())
+        );
+    }
+
+    /// The auth router behind the production CORS layer, driven in-process.
+    async fn call_auth(
+        state: &AppState,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use tower::ServiceExt;
+        let origin = auth::web_origin().parse().unwrap();
+        auth::routes()
+            .layer(cors_layer(origin))
+            .with_state(state.clone())
+            .oneshot(req)
+            .await
+            .unwrap()
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        use http_body_util::BodyExt;
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A signed SIWE message for anvil's first account, with a nonce the
+    /// server has issued.
+    async fn signed_siwe(state: &AppState) -> serde_json::Value {
+        let req = axum::http::Request::get("/auth/nonce")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let nonce = body_json(call_auth(state, req).await).await["nonce"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+        let addr = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+        let message = format!(
+            "{} wants you to sign in with your Ethereum account:\n{addr}\n\n\
+             Sign in.\n\nURI: http://localhost:3000\nVersion: 1\n\
+             Chain ID: {}\nNonce: {nonce}\nIssued At: 2026-10-17T00:00:00Z",
+            auth::expected_domain(),
+            std::env::var("SIWE_CHAIN_ID").unwrap_or_else(|_| "8453".into()),
+        );
+        let (_, signature) = ledger::personal_sign(key, &message).unwrap();
+        serde_json::json!({ "message": message, "signature": signature })
+    }
+
+    fn post_json(path: &str, body: &serde_json::Value) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(path)
+            .header("content-type", "application/json")
+            .header("origin", auth::web_origin())
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn session_cookie_of(resp: &axum::response::Response) -> Option<String> {
+        resp.headers()
+            .get("set-cookie")
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    /// Pull the token back out of a `Set-Cookie` (what the browser would store).
+    fn cookie_token(set_cookie: &str) -> String {
+        set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix(&format!("{}=", auth::SESSION_COOKIE))
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_web_sign_in_gets_an_httponly_cookie_and_no_token_in_the_body() {
+        let state = test_state(false, None);
+        let mut body = signed_siwe(&state).await;
+        body["cookie"] = true.into();
+        let resp = call_auth(&state, post_json("/auth/verify", &body)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Credentialed CORS, or the browser discards the cookie AND hides the body.
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-credentials")
+                .unwrap(),
+            "true"
+        );
+        let set = session_cookie_of(&resp).expect("verify sets the session cookie");
+        for attr in ["HttpOnly", "Secure", "SameSite=Strict", "Path=/"] {
+            assert!(set.contains(attr), "cookie lacks {attr}: {set}");
+        }
+        assert!(set.starts_with("__Host-"), "{set}");
+        assert!(
+            !set.contains("Domain"),
+            "a __Host- cookie must be host-only: {set}"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json.get("token").is_none(),
+            "a token in the body is one script can read: {json}"
+        );
+        assert_eq!(
+            json["address"],
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
+
+        // And the cookie is a working session.
+        let h = web_session(&cookie_token(&set), &auth::web_origin());
+        assert_eq!(
+            state.authed_wallet(&h).as_deref(),
+            Some("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_native_sign_in_still_gets_its_bearer_token() {
+        // chess-client posts no `cookie` flag and reads `token` from the body.
+        let state = test_state(false, None);
+        let body = signed_siwe(&state).await;
+        let resp = call_auth(&state, post_json("/auth/verify", &body)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(session_cookie_of(&resp).is_none());
+        let token = body_json(resp).await["token"].as_str().unwrap().to_string();
+        assert!(state.authed_wallet(&bearer(&token)).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_stored_bearer_is_adopted_into_the_cookie_without_signing_out() {
+        // The migration: a returning visitor's localStorage token is traded for
+        // the cookie once. Same session, so nothing they were doing is lost.
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let mut req = post_json("/auth/cookie", &serde_json::json!({}));
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let resp = call_auth(&state, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set = session_cookie_of(&resp).expect("adoption sets the cookie");
+        assert!(set.contains("HttpOnly"));
+        assert_eq!(cookie_token(&set), token);
+        assert_eq!(body_json(resp).await["address"], "0xabc");
+
+        // A dead bearer adopts nothing (the client signs out, as before)…
+        let mut req = post_json("/auth/cookie", &serde_json::json!({}));
+        req.headers_mut()
+            .insert("authorization", "Bearer gone".parse().unwrap());
+        assert_eq!(
+            call_auth(&state, req).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // …and a cookie can't be "adopted" into a cookie.
+        let mut req = post_json("/auth/cookie", &serde_json::json!({}));
+        req.headers_mut()
+            .extend(web_session(&token, &auth::web_origin()));
+        assert_eq!(
+            call_auth(&state, req).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_the_session_and_leaves_the_cookie_alone() {
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let mut req = post_json("/auth/logout", &serde_json::json!({}));
+        req.headers_mut()
+            .extend(web_session(&token, &auth::web_origin()));
+        let resp = call_auth(&state, req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // No clearing Set-Cookie: a late one would delete the cookie of a
+        // sign-in that raced it (account switch). The server-side revoke is
+        // what ends the session.
+        assert!(session_cookie_of(&resp).is_none());
+        assert_eq!(
+            state.authed_wallet(&web_session(&token, &auth::web_origin())),
+            None
+        );
+        // Signing out of a dead session is not an error.
+        let mut req = post_json("/auth/logout", &serde_json::json!({}));
+        req.headers_mut()
+            .extend(web_session(&token, &auth::web_origin()));
+        assert_eq!(
+            call_auth(&state, req).await.status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_me_answers_for_the_cookie() {
+        // The web app's post-sign-in check that the cookie actually stuck.
+        let state = test_state(false, None);
+        let token = state.0.auth.mint_session("0xabc");
+        let mut req = axum::http::Request::get("/auth/me")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *req.headers_mut() = web_session(&token, &auth::web_origin());
+        let resp = call_auth(&state, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["address"], "0xabc");
+
+        let mut req = axum::http::Request::get("/auth/me")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        *req.headers_mut() = web_session("gone", &auth::web_origin());
+        assert_eq!(
+            call_auth(&state, req).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn the_preflight_admits_the_session_header_with_credentials() {
+        // Every signed-in web request sends `X-OpenChess-Session`, so every one
+        // is preflighted. A preflight that doesn't allow the header — or allows
+        // it without credentials — fails every signed-in call in the browser
+        // while every server-side test still passes.
+        let state = test_state(false, None);
+        let req = axum::http::Request::builder()
+            .method("OPTIONS")
+            .uri("/auth/me")
+            .header("origin", auth::web_origin())
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                format!("content-type,{}", auth::SESSION_HEADER),
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = call_auth(&state, req).await;
+        let h = resp.headers();
+        assert_eq!(
+            h.get("access-control-allow-origin").unwrap(),
+            auth::web_origin().as_str()
+        );
+        assert_eq!(h.get("access-control-allow-credentials").unwrap(), "true");
+        let allowed = h
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(allowed.contains(auth::SESSION_HEADER), "{allowed}");
+
+        // Another origin is never echoed back (tower-http always answers with
+        // the one configured origin), so its browser blocks the call.
+        let req = axum::http::Request::builder()
+            .method("OPTIONS")
+            .uri("/auth/me")
+            .header("origin", "https://evil.example")
+            .header("access-control-request-method", "POST")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = call_auth(&state, req).await;
+        assert_ne!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .map(|v| v.as_bytes()),
+            Some(&b"https://evil.example"[..])
         );
     }
 

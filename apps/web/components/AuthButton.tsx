@@ -5,9 +5,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAccount, useAccountEffect } from "wagmi";
 
 import { dynamicConfigured } from "@/lib/dynamicEnv";
-import { authAddress, authToken, clearAuth } from "@/lib/escrow";
+import { authAddress, clearAuth } from "@/lib/escrow";
 import { markSignInIntent, useSignInIntent } from "@/lib/signInIntent";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 import { signInWithEthereum } from "@/lib/siwe";
 import { playerLabel } from "@/lib/playerLabel";
 import { usePlayerCard } from "@/lib/usePlayerCard";
@@ -57,16 +57,16 @@ function AuthButtonInner() {
   // user has no ENS name or avatar to fall back on, so without a username the
   // chip has only the pawn glyph and a hex address to show them.
   const { photo, username } = usePlayerCard(address);
-  // Derive sign-in from the reactive session token, NOT a local snapshot. The
-  // token can be cleared out from under this component by authedFetch's 401
+  // Derive sign-in from the reactive session, NOT a local snapshot. The
+  // session can be cleared out from under this component by authedFetch's 401
   // self-heal (a server redeploy voids every session) via `clearAuth()`, which
-  // fires AUTH_EVENT — `useAuthToken` re-reads on it. A local `signedIn` state
+  // fires AUTH_EVENT — `useSession` re-reads on it. A local `signedIn` state
   // set only on sign-in/disconnect would stay stuck "signed in" after such a
   // clear, so the chip would keep showing an account while every authed action
-  // 401s, with no in-app way to re-sign. Reading the token here means the header
-  // drops back to "Finish sign-in" the instant the session goes away.
-  const authTok = useAuthToken();
-  const signedIn = !!authTok && !!address && authAddress() === address.toLowerCase();
+  // 401s, with no in-app way to re-sign. Reading the session here means the
+  // header drops back to "Finish sign-in" the instant the session goes away.
+  const sessionWallet = useSession();
+  const signedIn = !!sessionWallet && !!address && sessionWallet === address.toLowerCase();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -81,14 +81,16 @@ function AuthButtonInner() {
   // Latest connected address, readable from inside async callbacks.
   const addressRef = useRef(address);
 
-  // On account change, drop a token that belongs to a different wallet OR a
-  // legacy token with no bound address (pre-address-binding sessions) — both
-  // force a clean re-sign for this wallet. `clearAuth` fires AUTH_EVENT, so the
+  // On account change, drop a session that belongs to a different wallet — it
+  // forces a clean re-sign for this wallet. (A legacy bearer with no bound
+  // address, from before address binding, is discarded by
+  // `adoptLegacySession`.) `clearAuth` fires AUTH_EVENT, so the
   // derived `signedIn` above updates on its own; no local state to reset here.
   useEffect(() => {
     addressRef.current = address;
     const key = address?.toLowerCase() ?? null;
-    if (key && authToken() && authAddress() !== key) clearAuth();
+    const held = authAddress();
+    if (key && held && held !== key) clearAuth();
     signTried.current = null;
     setError(null);
   }, [address]);

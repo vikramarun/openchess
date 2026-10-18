@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 
 import { removeAvatar, toSquareJpeg, uploadAvatar } from "@/lib/avatar";
-import { useAuthToken } from "@/lib/useAuthToken";
+import { useSession } from "@/lib/useSession";
 
 /** Add / replace / remove the signed-in wallet's profile photo.
  *
@@ -17,14 +17,14 @@ export function AvatarEditor({
   hasPhoto: boolean;
   onChanged: () => void;
 }) {
-  const token = useAuthToken();
+  const sessionWallet = useSession();
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   // The wallet can be connected without a SIWE session (or with one the server
   // forgot on restart), and the upload needs the session, not the connection.
-  if (!token) {
+  if (!sessionWallet) {
     return (
       <div className="muted" style={{ fontSize: 13, marginTop: 6 }}>
         Sign in to add a profile photo.
