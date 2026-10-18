@@ -23,7 +23,8 @@
 #   OPENCHESS_WALLET_KEY  required: bot wallet private key (unfunded!)
 #   SERVER                default https://openchess.fly.dev
 #   ENGINE                default stockfish (must be on PATH or a path)
-#   NAME                  default "House Bot"
+#   NAME                  default "House Bot" (the agent's own label; opponents
+#                         see the wallet's username, granted via HOUSE_WALLET)
 #   (no strength knob, on purpose — see the note above the invocation)
 #   TCS                   default "60:0 180:0 300:0 600:0" (initial:increment
 #                         seconds; matches the lobby's 1+0/3+0/5+0/10+0 tiles)
@@ -185,8 +186,8 @@ run_tc() {
     # `--uci-option "Skill Level=$SKILL"`, defaulting to 20 (full) but inviting
     # a weaker house bot — and "Skill Level" below 20 does not play weaker
     # chess, it picks a deliberately worse move from the top few, which reads as
-    # random blunders. The product promise is full-strength Stockfish, this is
-    # the opponent most players actually face, and it settles real money. Don't
+    # random blunders. The product promise is full-strength Stockfish, and this
+    # is the opponent most players actually face. Don't
     # add one back: not Skill Level, not UCI_LimitStrength/UCI_Elo.
     "$CLIENT" connect --auto \
       --server "$SERVER" \

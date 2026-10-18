@@ -68,7 +68,7 @@ Pick `live-ref` from the chain, not from memory:
 runtime code with that ref's vendored artifact, masking immutables. It exits 0
 when they match, and lists ABI functions the deployment lacks. The address
 production uses is `escrow` in `GET https://openchess.fly.dev/config` (or the
-`ESCROW_ADDR` Fly secret). DEPLOYMENTS.md has also listed a superseded v1 and a
+`ESCROW_ADDR` Fly secret). docs/deployments.md has also listed a superseded v1 and a
 mistaken deployment of v1 bytecode, so check it every time.
 
 Why it exists: adding a field to the `Tournament` struct made every
@@ -148,7 +148,7 @@ item has caught a real bug here:
   forever.
 - **Does every client satisfy the new contract?** Web hardcoded ABIs, the
   native client (`chess-client`), the house bot (`scripts/house-bot.sh`),
-  the repo's own scripts, and DEPLOYMENTS.md's instructions.
+  the repo's own scripts, and docs/deployments.md and docs/operations.md.
 - **Error → default is a decision.** Every `.ok()`, `.is_ok()`,
   `unwrap_or(..)`, `Err(_) => false` on an RPC read: does a transient error
   become a confident wrong answer, and is it cached for the process lifetime?

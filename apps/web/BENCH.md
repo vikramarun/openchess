@@ -1,3 +1,11 @@
+> **Outcome.** The style feature this harness was built to price was dropped:
+> choosing among the engine's near-equal moves cost ~144 Elo even at a
+> 5-centipawn window, and ~130 with a two-pass re-verification. The browser bot
+> always plays the engine's own move (`lib/candidates.ts` is kept but is not in
+> the move loop), and nothing in the product offers a way to weaken the engine.
+> The `/bench/time` harness is what should tune the clock-management constants
+> (`TAKEOVER_FACTOR` in `lib/timePolicy.ts`); it has not been run at scale yet.
+
 This file covers two harnesses:
 
 - **`/bench`** — what a playing *style* costs, at fixed nodes. The original, below.
@@ -77,11 +85,11 @@ over a game.
 - **Openings and think time are the free levers**, and both are shipped. A
   repertoire is established theory; a time signature is highly visible and
   costs nothing measurable.
-- **A style budget is a handicap, not a flavour.** If it ships it belongs
-  beside the `UCI_Elo` strength limiter, labelled with the numbers above — not
-  presented as free character. Note that `UCI_Elo` is Stockfish's own,
-  better-calibrated way to be weaker, so a style window has to justify itself
-  against it.
+- **A style budget is a handicap, not a flavour.** Had it shipped, it would
+  have had to be labelled as one, with the numbers above — not presented as
+  free character. (The product went further and offers no strength reduction
+  of any kind: full-strength engines are the promise on a surface that settles
+  money.)
 - **Wagered games.** A style budget above zero is a measurable, knowable
   disadvantage. Either restrict wagered browser seats to ε0 or surface the cost
   at the point of staking.

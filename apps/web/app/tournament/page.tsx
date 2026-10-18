@@ -61,8 +61,8 @@ export default function TournamentPage() {
       <div className="page-head">
         <h1 className="display d2">🏆 Tournament</h1>
         <p className="muted">
-          Buy in to a prize pool. A round-robin runs (Swiss &amp; knockout coming), and the
-          pool is distributed onchain by final standings.
+          Buy in to a prize pool. A round-robin runs, and the pool is distributed onchain by
+          final standings.
         </p>
       </div>
       {mounted ? (
@@ -715,7 +715,7 @@ function TournamentClient() {
         {/* Anyone may add to the pool, entrant or not, while the field is still
             playing for it. Not once the tournament is `complete`: settlement is
             being signed against the pool as read, so money arriving in that
-            window is raked rather than paid out (see TOURNAMENTS.md). */}
+            window is raked rather than paid out (see docs/tournaments.md). */}
         {hasPrizePool(openT) &&
           config?.escrow &&
           wagerOn &&

@@ -8,8 +8,9 @@ redistributed — see Licensing below for why that matters.
 
 24 books: six styles (`classical`, `sharp`, `solid`, `hypermodern`, `gambit`,
 `offbeat`) across four slots (as White; as Black vs 1.e4 / vs 1.d4 / vs
-anything else). A repertoire picks one book per slot, and the slots are
-independent — Sharp as White with Solid as Black is a first-class choice.
+anything else). Each slot takes one style, **all six** (the default, ~1 MB for
+the full set, fetched lazily), or no book at all, and the slots are independent —
+Sharp as White with Solid as Black is a first-class choice.
 
 **A style is a weighted mix, not one opening.** "Sharp" is not "the Sicilian";
 it is the Open Sicilian *and* the King's Gambit *and* the Vienna *and* the
@@ -72,7 +73,8 @@ implementation here would be free to drift from the one that probes at runtime.
 **A book only ever stores the moves of the side that owns it.** `w-*` books hold
 White's moves, `b-*` books hold Black's. Polyglot is keyed by position, so a
 White entry can never match a Black-to-move position — which is what lets a
-repertoire be assembled by simply *concatenating* the four selected books.
+repertoire be assembled by simply *concatenating* the selected books — up to
+all 24 when every slot is on "all styles".
 `pnpm test:books` pins this.
 
 (One caveat that is load-bearing: the concatenation must be **re-sorted by key**.

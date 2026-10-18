@@ -1,24 +1,24 @@
-# Fly.io config for the OpenChess game server. Deploy with:
+# Fly.io config for the OpenChess game server. First time:
 #
-#   fly launch --no-deploy --copy-config --ha=false --name openchess   # first time
-#   fly postgres create --name openchess-db                            # managed Postgres
-#   fly postgres attach openchess-db                                   # sets DATABASE_URL
-#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x...      # onchain (staked play)
-#   fly deploy --ha=false                                              # ALWAYS --ha=false
-#   fly scale count 1                                                  # exactly ONE instance
-#   fly machines list                                                  # verify: one machine
+#   fly launch --no-deploy --copy-config --ha=false --name openchess
+#   fly postgres create --name openchess-db && fly postgres attach openchess-db
+#   fly secrets set RPC_URL=... ESCROW_ADDR=0x... ORACLE_KEY=0x... HOUSE_WALLET=0x...
+#
+# Then deploy ONLY with the wrapper (it deploys --ha=false, pins one machine,
+# makes sure it's started, and gates on /health, /ready and /config):
+#
+#   ./scripts/deploy-server.sh
+#
+# Full runbook and every env var: docs/operations.md.
 #
 # IMPORTANT: this is a single-node, stateful server (live games, lobby, rooms,
 # launch tokens, and SIWE sessions are all in-process memory). It MUST run
 # exactly ONE machine. Fly defaults to a 2-machine HA pair, which silently
 # breaks everything (each request hits a different machine's memory: offers
 # vanish, games won't start, sign-in doesn't stick). So:
-#   - deploy with  --ha=false  EVERY time (a plain `fly deploy` re-adds the HA
-#     machine),
-#   - keep `fly scale count 1`, and
-#   - check `fly machines list` after each deploy.
-# (True HA needs the Redis-backed session/lobby + sharded-rooms work — see
-# PRODUCTION.md — until then, one machine only.)
+# never run a bare `fly deploy` (it re-adds the HA machine). True HA needs the
+# shared-store + room-affinity work in docs/multi-node.md; until then, one
+# machine only.
 
 app = "openchess"
 primary_region = "iad"
@@ -36,8 +36,8 @@ kill_timeout = "20s"
 [env]
   BIND = "0.0.0.0:8080"
   # The canonical frontend host. SIWE_DOMAIN is host-only (must equal the browser
-  # URL exactly); WEB_ORIGIN is the full origin (CORS). www.openchess.ai must
-  # redirect to the apex so the origin is always this one.
+  # URL exactly); WEB_ORIGIN is the full origin (CORS). The apex is the only
+  # production origin (www.openchess.ai does not resolve).
   SIWE_DOMAIN = "openchess.ai"
   WEB_ORIGIN = "https://openchess.ai"
   # Chain used for SIWE + escrow. Only matters once you enable wagering — flip to
@@ -55,10 +55,14 @@ kill_timeout = "20s"
   REQUIRE_ONCHAIN = "1"
 
 # Secrets (NOT in this file — set via `fly secrets set` / `fly postgres attach`):
-#   DATABASE_URL   (from `fly postgres attach`)
-#   RPC_URL        (Base RPC endpoint)
-#   ESCROW_ADDR    (deployed ChessEscrow address)
-#   ORACLE_KEY     (oracle signer key — use a KMS/HSM in real production)
+#   DATABASE_URL          (from `fly postgres attach`)
+#   RPC_URL               (Base RPC endpoint)
+#   ESCROW_ADDR           (deployed ChessEscrow address)
+#   ORACLE_KEY            (oracle signer key; a plaintext hot key today, with no
+#                          KMS support yet — see docs/operations.md)
+#   HOUSE_WALLET          (the house bot's address; quick play needs it)
+#   ALERT_WEBHOOK_URL     (optional: money-path failure alerts)
+#   SETTLE_CONFIRMATIONS  (optional: blocks before a write counts, default 1)
 
 [http_service]
   internal_port = 8080

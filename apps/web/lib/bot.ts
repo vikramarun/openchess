@@ -69,7 +69,7 @@ export function useBotStatus(token: string | null, intervalMs = 5000): BotStatus
 }
 
 /** User-configured UCI option overrides, persisted locally and sent with each
- *  bot game so the agent applies them (Threads, Hash, Skill Level, …). */
+ *  bot game so the agent applies them (Threads, Hash, …). */
 export function loadBotOptions(): Record<string, string> {
   try {
     return JSON.parse(readMigrated("botOptions") ?? "{}");

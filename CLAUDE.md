@@ -1,13 +1,16 @@
 # CLAUDE.md
 
-Orientation for agents working in this repo. Read [HANDOFF.md](HANDOFF.md) for
-the current state + the next big task (multi-node); this file is the quick
-build/test/architecture reference.
+Orientation for agents (and people) working in this repo: the build/test
+reference, then every constraint that has bitten someone, and why. Start with
+[README.md](README.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for the overview;
+[docs/](docs/) has operations, deployments, tournaments, multi-node and the
+security-review history.
 
 ## What this is
 OpenChess: engine-vs-engine chess where bots play and users stake USDC on Base,
 non-custodially. Rust monorepo (Cargo workspace) + Next.js web app. **Live on
-Base mainnet** (see [DEPLOYMENTS.md](DEPLOYMENTS.md)).
+Base mainnet** (see [docs/deployments.md](docs/deployments.md)); the contract in
+`contracts/` is exactly what is deployed.
 
 ## Build / test / run
 ```bash
@@ -46,6 +49,7 @@ cargo run -p server                # game server on 127.0.0.1:8080
 (cd apps/web && pnpm dev)          # web on :3000
 cargo run -p book-gen -- assets/house-book.bin   # rebuild the house bot's book
 (cd apps/web && pnpm gen:icon)     # regenerate app/icon.svg from lib/brand.ts
+bash .claude/skills/test-openchess/scripts/ci-gates.sh   # every CI gate, locally, scratch DB
 ```
 - Contract ABIs are **vendored** in `crates/ledger/abi/`, so `cargo build` does
   **not** need a prior `forge build`. Re-vendor after editing the contract
@@ -82,6 +86,11 @@ crates/persistence   Postgres (sqlx) + migrations + settlement outbox
 crates/book-gen      dev tool: builds assets/house-book.bin (Polyglot) from a
                      SAN repertoire; not part of any deployed artifact
 contracts/           ChessEscrow.sol (Foundry): pooled balances + EIP-712 settlement
+                     (exactly the live v2; see docs/deployments.md)
+scripts/             deploy-server.sh (the ONLY way to deploy the server), house-bot.sh,
+                     local onchain demos + e2e money tests
+docs/                operations (runbook + every env var), deployments, tournaments,
+                     multi-node, security-reviews
 apps/web             Next.js: landing demo reel (lib/demoReel.ts) + quick play at /, browse at
                      /lobby, in-browser Stockfish 18 (WASM/NNUE) + built-in Polyglot
                      repertoires (lib/books.ts, lib/polyglot.ts), sign-in gate
@@ -104,7 +113,7 @@ wallet.
   registry, and the rate-limit buckets are all in-process memory (`main.rs`
   AppState, `matchmaking.rs` Lobby, `auth.rs`, `agents.rs`, `ratelimit.rs`). Run
   exactly one Fly machine (`--ha=false` + `fly scale count 1`). Making it
-  multi-node is the next task; see [HANDOFF.md](HANDOFF.md).
+  multi-node is the next big task; see [docs/multi-node.md](docs/multi-node.md).
   One exception is now durable: an **`open` tournament is rehydrated from
   Postgres on boot** (`recover_tournaments`), because a restart used to delete
   it from the lobby while its onchain pool stayed open and entrants' buy-ins
@@ -646,7 +655,7 @@ wallet.
   server/web support for it: nothing about v2 blocks, and running two contract
   layouts at once cost a dual-layout decoder on both sides. It lives in git
   history (`9f4f6e0`) if buy-in tournaments ever need it — see
-  [DEPLOYMENTS.md](DEPLOYMENTS.md). Bringing it back is a constructor change
+  [docs/deployments.md](docs/deployments.md). Bringing it back is a constructor change
   (⇒ redeploy) AND a change to what `tournaments()` returns (one more word), so
   the server and web would have to read both layouts until the cutover.
 - **A flag is a draw when the OPPONENT cannot mate** (FIDE 6.9), which is

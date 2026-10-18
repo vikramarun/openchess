@@ -25,7 +25,7 @@ pub struct PlayOpts {
     /// Shared read-only book — real books are large, so open once and share
     /// across games instead of re-reading/re-sorting per game.
     pub book: Option<std::sync::Arc<OpeningBook>>,
-    /// UCI options applied after launch (e.g. Threads, Hash, Skill Level).
+    /// UCI options applied after launch (e.g. Threads, Hash).
     pub uci_options: Vec<(String, String)>,
     /// How much of the clock the engine may spend on one move.
     pub time: TimePolicy,

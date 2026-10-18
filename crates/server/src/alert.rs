@@ -9,7 +9,7 @@
 //!
 //! This exists because the two loudest failure logs — an escrow refund failing
 //! after an aborted dispatch, and the settlement outbox giving up — mean funds
-//! are stuck, and until now nobody would notice. See HANDOFF.md.
+//! are stuck, and until now nobody would notice. See docs/operations.md.
 
 /// Strip anything that looks like a URL from alert text.
 ///

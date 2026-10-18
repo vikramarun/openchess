@@ -1,21 +1,75 @@
-# OpenChess Security & Correctness Audit
+# Security review history
 
-Scope: full repo (Solidity escrow, Rust server/engine/ledger/persistence, Next.js
-web). Method: four independent review passes (contract security, Rust
-concurrency/money-path, auth/web/API, architecture/trust-model), cross-checked
-against the source. This is a **prototype** audit: it documents what must change
-before the system handles real money. Severities: Critical = funds can be
-stolen/locked or auth bypassed; High = exploitable integrity/availability;
-Medium/Low = hardening.
+A record of every security review of OpenChess and what came of it.
 
-## Overall verdict
+**These are internal reviews, not an audit.** Each round was a structured review
+of the source, done largely with AI coding agents, across the contract, the Rust
+server and money path, auth, and the web app. Each finding was fixed and
+regression-tested, and the fixes themselves were reviewed. Nobody outside the
+project has audited the contract or the server. Treat this as engineering
+history, not assurance.
 
-Good bones: an IO-free authoritative `game-engine`, a replay-guarded escrow with
-sound value-conservation, and a transactional outbox. But it is **a trusted-
-operator system in non-custodial clothing**, and the off-chain identity layer is
-not connected to the onchain money layer. **Not production-ready for real money.**
+## Where things stand
+
+The open items, in rough order of risk:
+
+- **No third-party audit** of `ChessEscrow`. The server's 25 USDC stake cap is
+  the guardrail standing in for one.
+- **The oracle is a single hot key**, and it is trusted for every result. A
+  tournament payout is not even constrained to the event's entrants onchain;
+  the contract only enforces payouts ≤ pool. There is no dispute window.
+- **The owner is a single hardware wallet,** and `setOracle` has no timelock.
+- **Session tokens live in `localStorage`.** Any XSS could steal one, and a
+  session can commit its wallet's escrow balance to staked games (up to the cap
+  per game). It should become an httpOnly cookie.
+- **Launch tokens ride in the WebSocket URL's query string.** They're bearer
+  capabilities, so keep them on TLS and out of logs. A leaked one can only throw
+  a game: payouts go to the seat's wallet, which is fixed when the escrow opens.
+- **Collusion between two wallets one person controls** isn't prevented. Casual
+  Elo is kept off the leaderboard to limit what it buys.
+- **The tournament settle deadline is guarded by the server, not the
+  contract** (v2 has one clock starting at creation). A two-clock contract that
+  enforces it onchain was written and reverted undeployed; see
+  [deployments.md](deployments.md).
+
+Kinds of bugs found and fixed over the rounds below:
+- Unauthenticated staking, seat hijacks, and impersonation through
+  client-supplied names.
+- Settlement that could strand funds, including a reverted transaction being
+  treated as success.
+- Races between timers and in-flight money operations.
+- A clock that couldn't flag a player sitting at zero.
+- Restarts that settled tournaments on unfinished games.
+- A former owner keeping admin rights.
+
+| Round | Date | Scope |
+|---|---|---|
+| 1 | 2026-05-29 | Prototype review: contract, server, auth, architecture |
+| 2 | 2026-05-30 | Game modes and Merkle tournament settlement |
+| 3 | 2026-05-30 | Pre-deploy: contract, backend operations, frontend |
+| 4 | 2026-07-09 | Contract invariant testing, full-surface security |
+| 5 | 2026-08-08 | Incidents from the first real deploy |
+| 6 | 2026-08-09 | Launch review of the tournament and identity work |
+| 7 | 2026-08-19 | Pre-launch security review (six findings) |
+| 8 | 2026-10-17 | Reviews of round 7's fixes, plus accept/join hardening |
+
+File and line references in each round point at the code as it was then.
 
 ---
+
+# Round 1: prototype review
+
+Scope: the whole repo (Solidity escrow, Rust server, engine, ledger and
+persistence, Next.js web). Four review passes: contract security, Rust
+concurrency and money path, auth/web/API, and architecture/trust model.
+Severities: Critical = funds can be stolen or locked, or auth bypassed; High =
+exploitable integrity or availability; Medium/Low = hardening.
+
+**Verdict at the time.** Good bones: an IO-free authoritative `game-engine`, a
+replay-guarded escrow with sound value conservation, and a transactional
+outbox. But it was a trusted-operator system dressed as non-custodial, and the
+off-chain identity layer wasn't connected to the onchain money layer. Not ready
+for real money.
 
 ## CRITICAL
 
@@ -174,13 +228,13 @@ lives).
 7. **Hygiene**: CI (Postgres service + `forge build` before `cargo`), LICENSE,
    graceful shutdown, metrics, `server`/`byo-client` test coverage; correct README.
 
-Production-ready today: `game-engine`, `ChessEscrow` conservation/refund logic,
-outbox schema. Prototype-only: seat↔wallet↔stake binding, gauntlet loop, tournament
+Solid at the time: `game-engine`, `ChessEscrow` conservation and refund
+logic, the outbox schema. Prototype-only: seat↔wallet↔stake binding, gauntlet loop, tournament
 money, reconnection, result verifiability, and server-layer hardening.
 
 ---
 
-## Remediation status (post-fix)
+## Round 1 remediation
 
 The Critical/High findings and most Mediums were addressed; remaining items are
 deployment/ops or explicit product follow-ups.
@@ -196,10 +250,10 @@ deployment/ops or explicit product follow-ups.
 | H5 deadline / domain separator | Fixed | `deadline` in `GameResult`; separator recomputed on chainId change. |
 | H6 SIWE verification | Fixed | Domain + chainId + address-match + single-use TTL nonce. |
 | H7 room panics | Fixed | `unwrap()`s removed; graceful guards. |
-| H8 unbounded state / rate limit | Fixed (mem) / deferred (rate limit) | Room/token/offer/ticket/nonce/session eviction + TTL sweep. Edge rate-limiting left to deployment. |
+| H8 unbounded state / rate limit | Fixed | Room/token/offer/ticket/nonce/session eviction + TTL sweep. *Later:* per-IP rate limiting and global caps landed in-app (`ratelimit.rs`), plus a per-socket inbound frame budget; edge rate limiting is still an operator item. |
 | H9 CORS | Fixed | Restricted to `WEB_ORIGIN` (default `localhost:3000`). |
-| M1 result verifiability | Partly | `result_hash` now SHA-256 over the move log. `server_sig` to clients + onchain dispute window TODO. |
-| M2 collusion/wash-trading | Deferred | Same-wallet seats rejected; rating/Sybil controls are product follow-ups. |
+| M1 result verifiability | Partly | `result_hash` is SHA-256 over the move log, and (later) the oracle signs it and clients verify against `/oracle`. An onchain dispute window is still open. |
+| M2 collusion/wash-trading | Partly | Same-wallet seats rejected. *Later:* separate ranked and casual Elo (casual off the leaderboard), a same-wallet Elo guard, and cheap pooled tournaments must be invite/approval. Two cooperating wallets remain open. |
 | M3 reconnection | Fixed | `Detach` on drop + resend-state on re-attach (clock still runs during disconnect, by design). |
 | M4 input bounds | Fixed | Time-control + stake bounds; overflow-safe. |
 | M5 transport/token | Partly | Launch tokens remain **bearer capabilities** (not wallet-bound), but the seat's *funds* are fixed to the authenticated wallet at escrow open, so a leaked token cannot redirect the payout, only throw the game. Concurrent hijack is blocked by the seat-occupancy guard, and the staked-offer's white token is only returned to the authenticated poster. Wallet-bound/single-use tokens, token-off-query, and wss/TLS remain deployment/product follow-ups. |
@@ -208,9 +262,9 @@ deployment/ops or explicit product follow-ups.
 
 ---
 
-## Round 2 remediation (modes + Merkle audit)
+# Round 2: game modes and Merkle settlement
 
-A second multi-agent audit (contracts + frontend + backend) was run after the
+A second multi-agent review (contracts + frontend + backend) was run after the
 two game modes and the Merkle-claim tournament settlement landed. No
 critical/drain bug; the genuine findings were fixed:
 
@@ -225,9 +279,9 @@ critical/drain bug; the genuine findings were fixed:
 | SIWE hardcoded Chain ID 8453 (breaks Base Sepolia / real domains); errors swallowed | High (FE) | Fixed | Chain id from the connected chain; sign-in errors surfaced in the UI. |
 | WalletConnect projectId placeholder fails silently | Med (FE) | Fixed | Warns loudly in-browser when unset (injected wallets still work). |
 | Spectator move-apply could throw and kill the WS loop | Low (FE) | Fixed | Legality-guarded apply + try/catch; plus WS reconnect with backoff. |
-| Session token in localStorage; no money UI yet | Med (FE) | Noted | Acceptable today (token gates nothing onchain); move to httpOnly cookie before any funds-gating UI ships. |
+| Session token in localStorage; no money UI yet | Med (FE) | **Open** | Accepted while the token gated nothing onchain. Staking has since shipped, so a stolen session can now commit its wallet's balance to games; listed as open at the top of this doc. |
 
-Confirmed correct by the audit: pooled-at-entry solvency, settle-vs-refund
+Confirmed correct by the review: pooled-at-entry solvency, settle-vs-refund
 mutual exclusion, cross-tournament pool isolation, Merkle leaf double-hash
 (second-preimage safe), no locks held across `.await`, payout ≤ pool, and
 fail-closed on the money endpoints. Test count after round 2: **42** (20 Rust +
@@ -235,11 +289,11 @@ fail-closed on the money endpoints. Test count after round 2: **42** (20 Rust +
 
 ---
 
-## Round 3: final audit + production-readiness
+# Round 3: pre-deploy review + production readiness
 
-A third full audit (contract pre-deploy, backend ops-readiness, frontend + WASM
+A third full review (contract pre-deploy, backend ops-readiness, frontend + WASM
 engine) found **no remaining fund-loss bug**. Code-fixable items were fixed; the
-rest are operator/infra actions tracked in `PRODUCTION.md`.
+rest are operator/infra actions tracked in [operations.md](operations.md).
 
 **Fixed in code:**
 - Contract: `FeeUpdated` event + `oldOracle` in `OracleUpdated` (indexer
@@ -251,21 +305,23 @@ rest are operator/infra actions tracked in `PRODUCTION.md`.
   SIGTERM-aware graceful shutdown; WS message/frame size caps + UCI-length cap.
 - Frontend: WASM engine load-failure handling (`worker.onerror` rejects ready);
   resilient play client (resign instead of silent stall on engine failure /
-  `move_rejected`); SRI on CDN stylesheets; client-only wagmi config (kills the
+  `move_rejected`; *later* an illegal engine move is retried and then replaced by
+any legal move rather than resigned); SRI on CDN stylesheets (*later* moot: the
+CSS is vendored and the CDN origin removed from the CSP); client-only wagmi config (kills the
   `indexedDB` prerender warning); honest "beta" labeling of the staked modes.
 
-**Flagged to the operator (see `PRODUCTION.md`):** third-party contract audit;
+**Flagged to the operator (see [operations.md](operations.md)):** third-party contract audit;
 deploy+verify with chosen params; HSM/KMS oracle key + multisig/timelock owner;
 single-node-only (Redis/sharding needed for >1 replica); managed Postgres +
 one-shot migrations; TLS + edge rate-limiting; settlement/outbox alerting;
 legal/AML/licensing review; tournament-restart durability caveat; verifiable
 results (`server_sig` + dispute window) as the remaining trust-model TODO.
 
-See `ARCHITECTURE.md` for system/flow/data diagrams.
+See [ARCHITECTURE.md](../ARCHITECTURE.md) for system/flow/data diagrams.
 
 ---
 
-## Caveats closed (verifiable results + tournament durability)
+## Round 3 follow-ups: verifiable results and tournament durability
 
 The two trust-model/durability caveats from round 3 are now addressed and
 live-verified:
@@ -276,19 +332,19 @@ live-verified:
   "✓ Verified, signed by oracle 0x…" badge. Ledger test
   `signs_and_recovers_result_commitment` proves the round-trip. (A full onchain
   *dispute window* / optimistic fraud-proof remains future work.)
-- **Tournament restart durability.** Tournaments + pairings are persisted
-  (`tournaments`, `tournament_games`); on boot `recover_tournaments` re-derives
-  standings from persisted game results and **settles completed tournaments by
-  result** (verified: a seeded `running` tournament with finished games settled
-  on restart with standings alice 1.5 / carol 1.5 / bob 0). Tournaments with
-  games still in flight are marked `abandoned` (entrants refund via
-  `claimRefund`), since in-flight rooms aren't resumable on a single node.
+- **Tournament restart durability.** Tournaments and pairings are persisted
+  (`tournaments`, `tournament_games`). *As first built*, a restart re-derived
+  standings and settled completed tournaments by result. *That was later
+  removed:* every `running` tournament is now abandoned on boot (entrants refund
+  via `claimRefund`), a completed one settles only through the durable
+  tournament outbox, and `open` tournaments are rehydrated in full so their
+  onchain pools stay startable.
 
 ---
 
-## Round 4: pre-handoff review (contract deep-dependency + full-surface security)
+# Round 4: contract invariants and full-surface security
 
-Two independent reviews before handoff: a Foundry deep-test pass on the escrow
+Two separate review passes: a Foundry deep-test pass on the escrow
 and a full-surface security review of the money/auth code.
 
 **Contract:** added a handler-driven **solvency invariant** (escrow USDC balance
@@ -305,8 +361,8 @@ across 128k random calls; plus a **conservation fuzz** test and a
   it, steering standings and thus the onchain pool payout to other entrants.
   (The same class of bug was already guarded for 1v1 in `park_get`.) **Fix:**
   tokens are `#[serde(skip)]` in the public view; each entrant fetches only its
-  own seat token via the authenticated `GET /tournaments/{id}/my-games` (wallet
-  for buy-in tournaments; display name for casual, where no money is at stake).
+  own seat token via the authenticated `GET /tournaments/{id}/my-games` (keyed on
+  the wallet; casual entrants were display names at the time and are wallets now).
   `tourney_start` is now organizer-gated for buy-in tournaments. Verified: the
   public view exposes only `game_id`/`white`/`black`; `/my-games` returns only
   the caller's token.
@@ -326,7 +382,7 @@ Merkle-claim and refund browser UIs have since shipped;
 
 ---
 
-## Round 5: production incident review (first real deploy)
+# Round 5: incidents from the first real deploy
 
 Not an audit, but findings from putting the thing in front of users. Every one was
 already documented somewhere, already had a mitigation, and happened anyway,
@@ -344,3 +400,67 @@ because nothing enforced them. That pattern is the actual finding.
 Nothing here touched fund safety: the money paths failed closed throughout, and
 no stake was lost or mis-settled. The damage was availability, wasted debugging,
 and a first-visitor experience that didn't work.
+
+---
+
+# Round 6: launch review (2026-08-09)
+
+A review of the tournament, identity and sponsorship work (PRs #49-#58) before
+launch, fixed in PR #60.
+
+| Finding | Sev | Fix |
+|---|---|---|
+| Casual tournaments keyed entrants on a typed display name, so a joiner could enter as anyone, including another player, and the standings printed it | P0 | Every entrant is now the session's wallet; display names come from the wallet's username |
+| Open free-entry (sponsored) events could be filled by one person's wallets to drain the sponsorship | P1 | A pooled event with an entry fee under 1 USDC must use invite or approval admission |
+| Wallet writes could be sent on the wrong chain and hang waiting for a Base receipt | P1 | Every write pins the chain and fails cleanly on a mismatch |
+| Free-entry events settled by Merkle root could leave winners unable to claim | P1 | Claims are authorized by the proof, not by an onchain entry |
+
+# Round 7: pre-launch security review (2026-08-19)
+
+Six findings, all fixed (commits `c229393`, `e3d146b`; merged in PR #64).
+
+| ID | Finding | Fix |
+|---|---|---|
+| H-01 | Alloy resolves a receipt as `Ok` even when the transaction reverted, so every write path treated reverts as success. Effects: an entrant who never paid joined the field, a game ran as staked with nothing locked, and a reverted settlement was recorded as settled | All writes go through `OnchainSettlement::confirm`, which fails on a revert. Each write then re-reads its postcondition from the chain, and both outboxes re-read the chain before marking anything settled |
+| H-02 | The lobby's TTL sweep deleted rows by age alone, so it could delete an offer mid-accept. The poster's seat was lost, and the room then handed the acceptor the win and the pot | The sweep branches on state: rows mid-match survive on a lease longer than the room's start window, and matched rows survive while their game is live |
+| M-01 | Tournament games were playable before their outcome routing existed, and one slow bot agent could stall a whole round | Routing and the tournament's own record are registered before any seat is delivered; agent dispatch is time-bounded and aborts with a refund |
+| M-02 | A tournament could keep filling, or keep playing, after its settle window had closed, so it paid nobody | The server sizes joins and starts against the live onchain deadline. The contract half (a second clock) was reverted undeployed, so this is mitigated, not fixed at the root |
+| M-03 | A player who stopped reading their socket filled its queue and froze the room actor, along with the clock, the opponent and settlement | Delivery to a client never blocks an actor (`try_send`); inbound frames are budgeted per socket |
+| M-04 | The escrow owner was cached at boot, so a former owner kept admin rights after an ownership transfer | The owner is re-read from the chain on every privileged call, failing closed |
+
+Fixed alongside these:
+
+- **Signed clocks.** The server clock is now signed. An overrun is carried as a
+  debt instead of being floored at zero, which had let a side at 0 ms keep
+  playing inside the lag allowance.
+- **Flag rule.** A flag is a draw only when the *opponent* can't mate (FIDE
+  6.9). Previously it was a draw whenever *neither side* could mate, so a
+  player who flagged with a queen against a bare king lost the game.
+
+# Round 8: reviews of the fixes (2026-10-17)
+
+Two review passes over round 7's fixes found bugs the fixes themselves had
+introduced, and a hardening pass on accepts and joins followed (PRs #64, #66).
+
+- **The shutdown drain paid out a tournament on unfinished games.** It ended
+  games as aborted draws and reported them as results, so a deploy during a
+  final round completed the event and paid its pool. Drained games are now
+  unreported and unrated, and the event is abandoned so entrants refund.
+- **Starts could race the drain.** A start already waiting on `openGame` when
+  shutdown began was missed and stranded its stake. A handshake now makes the
+  drain wait for starts in flight and alert on any it times out on.
+- **One stale read rolled back a write that had landed.** A load-balanced RPC
+  can answer from a node a block behind the receipt. Postcondition reads now
+  retry until they hold, and entry is idempotent, so a retry can't revert
+  forever.
+- **A finished game's result could be dropped.** Tournament routes were pruned
+  while a result was still queued; they're now kept until the event is over.
+- **The inbound frame budget flagged fast bots.** It had been set to 20 frames
+  a second, which flagged legitimate fast engine-vs-engine games; it's now 500.
+- **Disconnects could forfeit stakes.** Money-moving handlers now finish in a
+  spawned task. If the requester disconnected before receiving their seat, the
+  game is aborted and refunded rather than forfeited.
+- **Paid entries could be lost.** Entries are recorded before the buy-in moves,
+  reconciled with the chain at start, and refunded at settlement if still
+  unseated.
+

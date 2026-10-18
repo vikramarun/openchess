@@ -1,8 +1,9 @@
 # Build and publish prebuilt `chess-client` binaries on version tags, so
 # players can bring their engines without installing a Rust toolchain.
 #
-# Cut a release with:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Cut a release by bumping crates/byo-client/Cargo.toml's version, then tagging
+# that exact version (the job below refuses a mismatch):
+#   git tag v0.1.2 && git push origin v0.1.2
 #
 # Artifact names are LOAD-BEARING: the web app's /connect page links to
 # .../releases/latest/download/<name>, so keep them stable:

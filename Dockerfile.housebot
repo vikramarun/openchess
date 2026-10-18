@@ -3,9 +3,11 @@
 # its OWN Fly app (see fly.housebot.toml) — it is a client of the game server,
 # not part of it, and must not share a machine with `chess-server`.
 #
-#   fly launch --no-deploy --copy-config --config fly.housebot.toml --ha=false
-#   fly secrets set -a openchess-housebot OPENCHESS_WALLET_KEY=0x...  # UNFUNDED
+#   fly apps create openchess-housebot
+#   fly secrets set --stage -a openchess-housebot OPENCHESS_WALLET_KEY=0x...  # UNFUNDED
 #   fly deploy --config fly.housebot.toml --ha=false
+#
+# (`--stage` is required on a new app; see the header of fly.housebot.toml.)
 #
 # The house wallet holds nothing: house games are casual (no stake), so the key
 # only ever signs SIWE. Use a fresh throwaway key.

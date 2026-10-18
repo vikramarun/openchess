@@ -4,8 +4,7 @@
 Exercises the full staked-tournament loop against a *real* stack — local Anvil
 chain, real Postgres, real wallets (Anvil deterministic keys), and the real
 chess-server (SIWE auth, durable settlement outbox, onchain settlement via the
-ledger crate). This is the money-path smoke test HANDOFF.md flagged as
-outstanding; run it after any change to the tournament / settlement / escrow path.
+ledger crate). This is the money-path smoke test; run it after any change to the tournament / settlement / escrow path.
 
 Prereqs: anvil, forge, cast (Foundry), psql, a reachable Postgres at $DATABASE_URL
 (default postgres://$USER@localhost/chess with migrations applied), and a debug
