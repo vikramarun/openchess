@@ -28,7 +28,8 @@ use crate::net::{play, PlayOpts, TimePolicy};
 
 pub struct ConnectOpts {
     pub http_server: String,
-    /// Display name shown to opponents; defaults to the engine name.
+    /// A label for this agent, shown in the owner's bot status; defaults to the
+    /// engine name. Opponents see the wallet's username, not this.
     pub name: Option<String>,
     pub engine_path: String,
     pub engine_args: Vec<String>,

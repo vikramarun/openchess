@@ -7,7 +7,12 @@
 # pins the count to one, and shows the machine list so you can eyeball it.
 #
 # Usage:  ./scripts/deploy-server.sh   (run from repo root; extra args pass to fly deploy)
+#
+# The health checks below hit SERVER_URL (default: production). A self-hosted
+# copy must set it, or its deploy passes by checking someone else's server:
+#   SERVER_URL=https://my-app.fly.dev ./scripts/deploy-server.sh
 set -euo pipefail
+SERVER_URL="${SERVER_URL:-https://openchess.fly.dev}"
 
 echo "→ fly deploy --ha=false"
 fly deploy --ha=false "$@"
@@ -73,10 +78,10 @@ fi
 # meant a completely dead app still exited 0 — the script printed a timeout and
 # declared success. A deploy that leaves the service down is a failed deploy, and
 # it has to say so, or the next person finds out from users.
-echo "→ waiting for https://openchess.fly.dev/health"
+echo "→ waiting for ${SERVER_URL}/health"
 ok=""
 for _ in $(seq 1 30); do
-  if [ "$(curl -s -o /dev/null -m 10 -w '%{http_code}' https://openchess.fly.dev/health)" = "200" ]; then
+  if [ "$(curl -s -o /dev/null -m 10 -w '%{http_code}' "${SERVER_URL}/health")" = "200" ]; then
     ok=1
     break
   fi
@@ -99,7 +104,7 @@ echo "→ /ready:"
 # `|| true` so a CONNECTION failure (curl exit 7, not an HTTP status) doesn't
 # trip `set -e` here and kill the script before it can say what went wrong. The
 # empty string that leaves behind is not "200", so it still fails — loudly.
-ready=$(curl -s -o /dev/null -m 15 -w '%{http_code}' https://openchess.fly.dev/ready || true)
+ready=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "${SERVER_URL}/ready" || true)
 if [ "$ready" != "200" ]; then
   echo >&2
   echo "FAIL: /ready returned ${ready} — the server is up but not fit to serve." >&2
@@ -114,7 +119,7 @@ echo "→ /config sanity:"
 # exit 7 with nothing said. Reaching this line means /health and /ready both
 # just answered, so a failure now means the app died in the last few seconds —
 # rare, and worth saying out loud rather than exiting mutely.
-config=$(curl -sS -m 15 https://openchess.fly.dev/config || true)
+config=$(curl -sS -m 15 "${SERVER_URL}/config" || true)
 if [ -z "$config" ]; then
   echo >&2
   echo "FAIL: /config returned nothing — the app stopped answering mid-check." >&2

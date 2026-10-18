@@ -24,7 +24,7 @@
 #   REPO_ROOT  checkout whose ledger crate is tested (default: git toplevel)
 #   LIVE_REF   git ref whose vendored ABI+bytecode matches the deployed escrow
 #              (default: origin/main — correct only while main matches the
-#              deployment; check DEPLOYMENTS.md)
+#              deployment; check docs/deployments.md)
 set -euo pipefail
 ROOT=$(cd "${1:-$(git rev-parse --show-toplevel)}" && pwd)
 REF=${2:-origin/main}

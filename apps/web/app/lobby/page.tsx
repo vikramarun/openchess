@@ -94,8 +94,8 @@ function LobbyBody({
                 <span className="mc-tag money">stakes</span>
               </div>
               <div className="mc-desc">
-                Pay one entry into a prize pool. Round-robin now, Swiss and knockout soon. The
-                pool is distributed onchain by final standings.
+                Pay one entry into a prize pool and play a round-robin. The pool is
+                distributed onchain by final standings.
               </div>
             </Link>
           </div>

@@ -8,7 +8,7 @@ at construction. Also reports which of the ref's ABI functions are missing from
 the deployed code, the `tournaments()` return width the chain gives versus the
 ref's ABI, and how much USDC the contract holds.
 
-Use it to pick abi-compat.sh's LIVE_REF, and whenever DEPLOYMENTS.md and the
+Use it to pick abi-compat.sh's LIVE_REF, and whenever docs/deployments.md and the
 vendored ABI might have drifted apart.
 
 Usage: verify-deployed.py ADDRESS [--ref origin/main] [--rpc https://mainnet.base.org]

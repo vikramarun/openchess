@@ -123,7 +123,7 @@ that get SCORED; counters (round_remaining etc.) that can be left too high or de
     focus: `Every client of any interface the PR changes: apps/web (hand-written ABI fragments in lib/escrow.ts,
 components/TournamentClaim.tsx, SponsorPool.tsx, lib/sponsorships.ts; deadline/refund math; endpoints), the native
 chess-client (crates/byo-client), the house bot (scripts/house-bot.sh), the repo's scripts that deploy or drive the
-contract (onchain-demo.sh, tournament-e2e.py), and DEPLOYMENTS.md's deploy instructions and deploy-order claims.
+contract (onchain-demo.sh, tournament-e2e.py), and docs/deployments.md + docs/operations.md deploy instructions and deploy-order claims.
 Does each one still satisfy the new contract, before AND after the contract redeploy?`,
   },
   {
@@ -131,7 +131,7 @@ Does each one still satisfy the new contract, before AND after the contract rede
     focus: `Treat the PR description and its comments as hypotheses. For each claimed fix: is it at the root or the
 input only, and what does the fix itself break? Are fixes applied symmetrically (park vs queue vs tournament)? Do the
 new tests use stand-ins (mock contracts, hand-built state) that hide real behaviour? Would each regression test fail
-with its fix reverted? Are docs (CLAUDE.md, DEPLOYMENTS.md) now claiming something the code does not do?`,
+with its fix reverted? Are docs (CLAUDE.md, README.md, docs/) now claiming something the code does not do?`,
   },
 ]
 

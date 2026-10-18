@@ -210,11 +210,12 @@ enum Command {
         engine_args: Vec<String>,
         #[command(flatten)]
         book: BookArgs,
-        /// Display name shown to opponents (defaults to the engine name).
+        /// A label for this agent, shown in your own bot status (defaults to the
+        /// engine name). Opponents see your wallet's username, not this.
         #[arg(long)]
         name: Option<String>,
         /// UCI option applied to every game, as Name=Value (repeatable),
-        /// e.g. --uci-option "Threads=4" --uci-option "Skill Level=15".
+        /// e.g. --uci-option "Threads=4" --uci-option "Hash=256".
         #[arg(long = "uci-option", value_parser = parse_uci_option)]
         uci_options: Vec<(String, String)>,
         /// Single-use pairing code from the web app's "Connect your engine"
@@ -252,7 +253,7 @@ enum Command {
     },
 }
 
-/// Parse `Name=Value` (the name may contain spaces, e.g. "Skill Level=15").
+/// Parse `Name=Value` (the name may contain spaces, e.g. "Move Overhead=100").
 fn parse_uci_option(s: &str) -> Result<(String, String), String> {
     match s.split_once('=') {
         Some((k, v)) if !k.trim().is_empty() => Ok((k.trim().to_string(), v.trim().to_string())),

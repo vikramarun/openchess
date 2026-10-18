@@ -1,7 +1,7 @@
 //! In-process rate limiting + connection caps.
 //!
 //! Single-node only, like the rest of this server's live state — a multi-node
-//! deployment would move these behind Redis (see HANDOFF.md). Two primitives,
+//! deployment would move these behind Redis (see docs/multi-node.md). Two primitives,
 //! both keyed by a string (typically a client IP, sometimes a wallet):
 //!
 //! - [`TokenBucket`] — request-rate limiting. Each check costs one token;
